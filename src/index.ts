@@ -11,37 +11,41 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   Tool,
+  CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { SupabaseStorage } from './storage/supabase.js';
-import { Memory } from './storage/types.js';
-
-// 環境變數
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error('Error: SUPABASE_URL and SUPABASE_KEY are required');
-  process.exit(1);
-}
-
-// 初始化儲存層
-const storage = new SupabaseStorage({
-  supabaseUrl: SUPABASE_URL,
-  supabaseKey: SUPABASE_KEY
-});
+import { db } from './db/client.js';
+import { Memory } from './db/schema.js';
+import {
+  saveMemory,
+  searchMemories,
+  listMemories,
+  getMemory,
+  deleteMemory,
+  getProjectStats,
+} from './tools/index.js';
+import { getProjectId } from './utils/project-id.js';
 
 // MCP Tools 定義
 const tools: Tool[] = [
   {
     name: 'cc_memory_save',
-    description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和技術棧。',
+    description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。',
     inputSchema: {
       type: 'object',
       properties: {
-        project_name: {
+        project_id: {
           type: 'string',
-          description: '專案名稱'
+          description: '專案 ID（可選，預設從工作目錄偵測）'
+        },
+        project_path: {
+          type: 'string',
+          description: '專案路徑（可選）'
+        },
+        type: {
+          type: 'string',
+          enum: ['session', 'decision'],
+          description: '記憶類型：session（一般對話）或 decision（重要決策）'
         },
         summary: {
           type: 'string',
@@ -57,27 +61,18 @@ const tools: Tool[] = [
           items: { type: 'string' },
           description: '重要決策列表'
         },
-        tech_stack: {
+        next_steps: {
           type: 'array',
           items: { type: 'string' },
-          description: '技術棧列表'
-        },
-        embedding: {
-          type: 'array',
-          items: { type: 'number' },
-          description: '向量 embedding（可選）'
-        },
-        session_id: {
-          type: 'string',
-          description: 'Session ID（可選）'
+          description: '下一步待辦列表'
         }
       },
-      required: ['project_name', 'summary']
+      required: ['type', 'summary']
     }
   },
   {
     name: 'cc_memory_search',
-    description: '搜尋相關的專案記憶。支援語義搜尋（需要 embedding）和關鍵字搜尋。',
+    description: '搜尋相關的專案記憶。支援關鍵字搜尋。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -85,24 +80,18 @@ const tools: Tool[] = [
           type: 'string',
           description: '搜尋查詢'
         },
-        project: {
+        project_id: {
           type: 'string',
           description: '限定專案（可選）'
         },
-        keywords: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '關鍵字搜尋（可選）'
-        },
-        embedding: {
-          type: 'array',
-          items: { type: 'number' },
-          description: '向量搜尋（可選）'
+        type: {
+          type: 'string',
+          enum: ['session', 'decision'],
+          description: '限定記憶類型（可選）'
         },
         limit: {
           type: 'number',
-          description: '結果數量限制',
-          default: 5
+          description: '結果數量限制（預設 10）'
         }
       },
       required: ['query']
@@ -114,25 +103,39 @@ const tools: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        project: {
+        project_id: {
           type: 'string',
-          description: '專案名稱'
+          description: '專案 ID'
+        },
+        type: {
+          type: 'string',
+          enum: ['session', 'decision'],
+          description: '限定記憶類型（可選）'
         },
         limit: {
           type: 'number',
-          description: '結果數量限制',
-          default: 20
+          description: '結果數量限制（預設 20）'
+        },
+        offset: {
+          type: 'number',
+          description: '分頁偏移（預設 0）'
         }
       },
-      required: ['project']
+      required: ['project_id']
     }
   },
   {
-    name: 'cc_memory_list_projects',
-    description: '列出所有有記憶的專案',
+    name: 'cc_memory_get',
+    description: '取得單一記憶詳情',
     inputSchema: {
       type: 'object',
-      properties: {}
+      properties: {
+        id: {
+          type: 'string',
+          description: '記憶 ID'
+        }
+      },
+      required: ['id']
     }
   },
   {
@@ -141,17 +144,17 @@ const tools: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        project: {
+        project_id: {
           type: 'string',
-          description: '專案名稱'
+          description: '專案 ID'
         }
       },
-      required: ['project']
+      required: ['project_id']
     }
   },
   {
     name: 'cc_memory_delete',
-    description: '刪除指定的記憶',
+    description: '刪除指定的記憶（軟刪除，標記為 archived）',
     inputSchema: {
       type: 'object',
       properties: {
@@ -164,6 +167,31 @@ const tools: Tool[] = [
     }
   }
 ];
+
+// 格式化記憶顯示
+function formatMemory(memory: Memory, index?: number): string {
+  const prefix = index !== undefined ? `${index + 1}. ` : '';
+  const date = memory.createdAt
+    ? new Date(memory.createdAt).toLocaleDateString('zh-TW')
+    : 'N/A';
+  const type = memory.type === 'decision' ? '🎯' : '📝';
+
+  let result = `${prefix}${type} [${date}] ${memory.summary}`;
+
+  if (memory.keywords && memory.keywords.length > 0) {
+    result += `\n   關鍵字: ${memory.keywords.join(', ')}`;
+  }
+
+  if (memory.decisions && memory.decisions.length > 0) {
+    result += `\n   決策: ${memory.decisions.join('; ')}`;
+  }
+
+  if (memory.nextSteps && memory.nextSteps.length > 0) {
+    result += `\n   下一步: ${memory.nextSteps.join('; ')}`;
+  }
+
+  return result;
+}
 
 // 建立 MCP Server
 const server = new Server(
@@ -184,51 +212,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // 處理 tool 呼叫
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
   const { name, arguments: args } = request.params;
 
   try {
     switch (name) {
       case 'cc_memory_save': {
-        const memory: Memory = {
-          project_name: args.project_name as string,
-          summary: args.summary as string,
-          keywords: (args.keywords as string[]) || [],
-          decisions: (args.decisions as string[]) || [],
-          tech_stack: (args.tech_stack as string[]) || [],
-          embedding: args.embedding as number[] | undefined,
-          session_id: args.session_id as string | undefined
-        };
+        // 若未提供 project_id，嘗試從 project_path 偵測
+        let projectId = args?.project_id as string | undefined;
+        const projectPath = args?.project_path as string | undefined;
 
-        const result = await storage.saveMemory(memory);
+        if (!projectId && projectPath) {
+          projectId = await getProjectId(projectPath);
+        }
+
+        if (!projectId) {
+          return {
+            content: [{
+              type: 'text',
+              text: '錯誤: 請提供 project_id 或 project_path'
+            }],
+            isError: true
+          };
+        }
+
+        const result = await saveMemory(db as any, {
+          projectId,
+          projectPath,
+          type: args?.type as 'session' | 'decision',
+          summary: args?.summary as string,
+          keywords: args?.keywords as string[] | undefined,
+          decisions: args?.decisions as string[] | undefined,
+          nextSteps: args?.next_steps as string[] | undefined,
+        });
 
         return {
           content: [{
             type: 'text',
-            text: `✓ 記憶已儲存\nID: ${result.id}\n專案: ${memory.project_name}`
+            text: `✓ 記憶已儲存\nID: ${result.id}\n專案: ${projectId}`
           }]
         };
       }
 
       case 'cc_memory_search': {
-        const query = args.query as string;
-        const project = args.project as string | undefined;
-        const keywords = args.keywords as string[] | undefined;
-        const embedding = args.embedding as number[] | undefined;
-        const limit = (args.limit as number) || 5;
-
-        let results;
-
-        if (embedding && embedding.length > 0) {
-          // 向量搜尋
-          results = await storage.searchByVector(embedding, project, limit);
-        } else if (keywords && keywords.length > 0) {
-          // 關鍵字搜尋
-          results = await storage.searchByKeywords(keywords, project, limit);
-        } else {
-          // 全文搜尋
-          results = await storage.searchFulltext(query, project, limit);
-        }
+        const results = await searchMemories(db as any, {
+          query: args?.query as string,
+          projectId: args?.project_id as string | undefined,
+          type: args?.type as 'session' | 'decision' | undefined,
+          limit: args?.limit as number | undefined,
+        });
 
         if (results.length === 0) {
           return {
@@ -239,16 +271,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const formatted = results.map((r, i) => {
-          let score = '';
-          if (r.similarity !== undefined) {
-            score = ` (相似度: ${(r.similarity * 100).toFixed(1)}%)`;
-          } else if (r.rank !== undefined) {
-            score = ` (相關度: ${r.rank.toFixed(2)})`;
-          }
-
-          return `## ${i + 1}. [${r.project_name}]${score}\n${r.summary}\n\n關鍵字: ${r.keywords?.join(', ') || 'N/A'}`;
-        }).join('\n\n---\n\n');
+        const formatted = results.map((r, i) => formatMemory(r, i)).join('\n\n');
 
         return {
           content: [{
@@ -259,89 +282,81 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'cc_memory_list': {
-        const project = args.project as string;
-        const limit = (args.limit as number) || 20;
-
-        const results = await storage.listProjectMemories(project, limit);
+        const projectId = args?.project_id as string;
+        const results = await listMemories(db as any, {
+          projectId,
+          type: args?.type as 'session' | 'decision' | undefined,
+          limit: args?.limit as number | undefined,
+          offset: args?.offset as number | undefined,
+        });
 
         if (results.length === 0) {
           return {
             content: [{
               type: 'text',
-              text: `專案 "${project}" 沒有任何記憶`
+              text: `專案 "${projectId}" 沒有任何記憶`
             }]
           };
         }
 
-        const formatted = results.map((r, i) => {
-          const date = new Date(r.created_at).toLocaleDateString('zh-TW');
-          return `${i + 1}. [${date}] ${r.summary.substring(0, 100)}...`;
-        }).join('\n');
+        const formatted = results.map((r, i) => formatMemory(r, i)).join('\n\n');
 
         return {
           content: [{
             type: 'text',
-            text: `專案 "${project}" 的記憶 (${results.length} 筆):\n\n${formatted}`
+            text: `專案 "${projectId}" 的記憶 (${results.length} 筆):\n\n${formatted}`
           }]
         };
       }
 
-      case 'cc_memory_list_projects': {
-        const projects = await storage.listProjects();
+      case 'cc_memory_get': {
+        const id = args?.id as string;
+        const memory = await getMemory(db as any, id);
 
-        if (projects.length === 0) {
+        if (!memory) {
           return {
             content: [{
               type: 'text',
-              text: '目前沒有任何專案記憶'
+              text: `找不到記憶 (ID: ${id})`
             }]
           };
         }
 
-        const formatted = projects.map((p) => {
-          const date = new Date(p.last_updated).toLocaleDateString('zh-TW');
-          return `- **${p.project_name}**: ${p.memory_count} 筆記憶 (最後更新: ${date})`;
-        }).join('\n');
-
         return {
           content: [{
             type: 'text',
-            text: `所有專案:\n\n${formatted}`
+            text: formatMemory(memory)
           }]
         };
       }
 
       case 'cc_memory_stats': {
-        const project = args.project as string;
-        const stats = await storage.getProjectStats(project);
+        const projectId = args?.project_id as string;
+        const stats = await getProjectStats(db as any, projectId);
 
-        if (!stats) {
-          return {
-            content: [{
-              type: 'text',
-              text: `專案 "${project}" 沒有統計資料`
-            }]
-          };
-        }
-
-        const firstDate = new Date(stats.first_memory).toLocaleDateString('zh-TW');
-        const lastDate = new Date(stats.last_memory).toLocaleDateString('zh-TW');
+        const firstDate = stats.firstMemory
+          ? new Date(stats.firstMemory).toLocaleDateString('zh-TW')
+          : 'N/A';
+        const lastDate = stats.lastMemory
+          ? new Date(stats.lastMemory).toLocaleDateString('zh-TW')
+          : 'N/A';
 
         return {
           content: [{
             type: 'text',
-            text: `專案 "${project}" 統計:\n\n` +
-              `- 總記憶數: ${stats.total_memories}\n` +
+            text: `專案 "${projectId}" 統計:\n\n` +
+              `- 總記憶數: ${stats.totalMemories}\n` +
+              `- Session 記憶: ${stats.sessionCount}\n` +
+              `- Decision 記憶: ${stats.decisionCount}\n` +
               `- 第一筆記憶: ${firstDate}\n` +
-              `- 最後記憶: ${lastDate}\n` +
-              `- 熱門關鍵字: ${stats.top_keywords?.join(', ') || 'N/A'}`
+              `- 最後記憶: ${lastDate}`
           }]
         };
       }
 
       case 'cc_memory_delete': {
-        const id = args.id as string;
-        await storage.deleteMemory(id);
+        const id = args?.id as string;
+        await deleteMemory(db as any, id);
 
         return {
           content: [{
