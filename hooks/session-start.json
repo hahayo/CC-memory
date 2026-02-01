@@ -1,0 +1,15 @@
+{
+  "name": "CC-memory Session Start",
+  "description": "Session 開始時自動載入專案記憶",
+  "event": "Start",
+  "enabled": false,
+  "action": {
+    "type": "skill",
+    "skill": "load-memory"
+  },
+  "notes": [
+    "這個 hook 會在 session 開始時自動執行 /load-memory",
+    "預設關閉，因為會增加初始化時間",
+    "設定 enabled: true 可開啟自動載入"
+  ]
+}
