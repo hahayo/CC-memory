@@ -1,0 +1,15 @@
+{
+  "name": "CC-memory Auto Extract",
+  "description": "Session 結束時自動提醒萃取記憶",
+  "event": "Stop",
+  "enabled": false,
+  "action": {
+    "type": "message",
+    "content": "💡 Session 即將結束。如果這個 session 有重要內容，請執行 `/extract-memory` 來儲存記憶。"
+  },
+  "notes": [
+    "這個 hook 預設關閉，因為自動萃取可能會消耗額外的 token",
+    "要啟用自動萃取，將 enabled 改為 true",
+    "或者每次 session 結束前手動執行 /extract-memory"
+  ]
+}
