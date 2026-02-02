@@ -81,21 +81,25 @@ describe('searchMemories', () => {
     const input: SearchInput = {
       query: 'test',
       limit: 5,
+      mode: 'keyword',
     };
 
     await searchMemories(mockDb as any, input);
 
-    expect(mockLimit).toHaveBeenCalledWith(5);
+    // keyword 模式會取 limit * 2 以便過濾後仍有足夠結果
+    expect(mockLimit).toHaveBeenCalledWith(10);
   });
 
   it('should default to limit 10', async () => {
     const input: SearchInput = {
       query: 'test',
+      mode: 'keyword',
     };
 
     await searchMemories(mockDb as any, input);
 
-    expect(mockLimit).toHaveBeenCalledWith(10);
+    // keyword 模式會取 limit * 2 (預設 10 * 2 = 20)
+    expect(mockLimit).toHaveBeenCalledWith(20);
   });
 
   it('should filter results by keyword match', async () => {

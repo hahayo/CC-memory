@@ -10,7 +10,8 @@
     "start": "node build/index.js",
     "test": "vitest",
     "lint": "eslint src/**/*.ts",
-    "clean": "rm -rf build"
+    "clean": "rm -rf build",
+    "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts"
   },
   "keywords": [
     "claude",
@@ -24,19 +25,21 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google/genai": "^1.39.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.0",
     "drizzle-orm": "^0.38.0",
-    "postgres": "^3.4.0",
-    "dotenv": "^16.4.0"
+    "postgres": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "drizzle-kit": "^0.30.0",
-    "typescript": "^5.3.0",
-    "vitest": "^1.0.0",
-    "eslint": "^8.55.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
-    "@typescript-eslint/parser": "^6.13.0"
+    "@typescript-eslint/parser": "^6.13.0",
+    "drizzle-kit": "^0.30.0",
+    "eslint": "^8.55.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

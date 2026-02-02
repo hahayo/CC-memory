@@ -72,7 +72,7 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_memory_search',
-    description: '搜尋相關的專案記憶。支援關鍵字搜尋。',
+    description: '搜尋相關的專案記憶。支援關鍵字搜尋、語義搜尋和混合搜尋。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -88,6 +88,11 @@ const tools: Tool[] = [
           type: 'string',
           enum: ['session', 'decision'],
           description: '限定記憶類型（可選）'
+        },
+        mode: {
+          type: 'string',
+          enum: ['keyword', 'semantic', 'hybrid'],
+          description: '搜尋模式：keyword（關鍵字）、semantic（語義）、hybrid（混合，預設）'
         },
         limit: {
           type: 'number',
@@ -246,20 +251,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
           nextSteps: args?.next_steps as string[] | undefined,
         });
 
+        const embeddingStatus = result.hasEmbedding
+          ? '✓ 已生成 embedding'
+          : '(無 embedding - 語義搜尋不可用)';
+
         return {
           content: [{
             type: 'text',
-            text: `✓ 記憶已儲存\nID: ${result.id}\n專案: ${projectId}`
+            text: `✓ 記憶已儲存\nID: ${result.id}\n專案: ${projectId}\n${embeddingStatus}`
           }]
         };
       }
 
       case 'cc_memory_search': {
+        const mode = args?.mode as 'keyword' | 'semantic' | 'hybrid' | undefined;
         const results = await searchMemories(db as any, {
           query: args?.query as string,
           projectId: args?.project_id as string | undefined,
           type: args?.type as 'session' | 'decision' | undefined,
           limit: args?.limit as number | undefined,
+          mode,
         });
 
         if (results.length === 0) {
@@ -272,11 +283,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
         }
 
         const formatted = results.map((r, i) => formatMemory(r, i)).join('\n\n');
+        const modeLabel = mode || 'hybrid';
 
         return {
           content: [{
             type: 'text',
-            text: `找到 ${results.length} 筆相關記憶:\n\n${formatted}`
+            text: `找到 ${results.length} 筆相關記憶 (${modeLabel} 模式):\n\n${formatted}`
           }]
         };
       }
