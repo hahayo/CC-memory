@@ -20,43 +20,26 @@
 
 ### 1. 設定 PostgreSQL 資料庫
 
-- [ ] 在 Zeabur 建立 PostgreSQL 服務
-  1. 登入 [Zeabur Dashboard](https://zeabur.com)
-  2. 建立新專案或選擇現有專案
-  3. Add Service → Database → PostgreSQL
-  4. 取得連線字串
+- [x] 在 Zeabur 建立 PostgreSQL 服務（2026-02-03）
+  - Host: cgk1.clusters.zeabur.com:27784
+  - Database: zeabur
 
 ### 2. 啟用 pgvector 擴充
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
+- [x] 已啟用（2026-02-03）
 
 ### 3. 建立 .env 檔案
 
-```bash
-# 必填
-DATABASE_URL=postgresql://user:password@xxx.zeabur.app:5432/cc_memory
-
-# 可選 - 啟用語義搜尋
-GEMINI_API_KEY=your_gemini_api_key
-```
+- [x] 已建立（2026-02-03）
 
 ### 4. 推送 Schema 到資料庫
 
-```bash
-npx drizzle-kit push
-```
-
-預期結果：成功建立 `project_memories` 表（含 embedding 欄位和 HNSW 索引）
+- [x] 已推送（2026-02-03）
+  - project_memories 表已建立（14 欄位含 embedding）
 
 ### 5. 驗證資料庫連線
 
-```bash
-npx drizzle-kit studio
-```
-
-預期結果：可以開啟 Drizzle Studio 查看資料庫
+- [x] 已驗證（2026-02-03）
 
 ---
 
@@ -64,30 +47,21 @@ npx drizzle-kit studio
 
 ### 6. 配置 MCP Server
 
-```bash
-claude mcp add cc-memory \
-  -e DATABASE_URL=your-connection-string \
-  -e GEMINI_API_KEY=your-api-key \
-  -- node /path/to/CC-memory/build/index.js
-```
-
-驗證：
-```bash
-claude mcp list
-# 應該看到 cc-memory
-```
+- [x] 已配置全域 MCP Server（2026-02-07）
 
 ### 7. 安裝 Skills
 
-```bash
-cp skills/*.md ~/.claude/skills/
-```
+- [x] 已安裝至 `~/.claude/skills/`（2026-02-07）
 
-### 8. 安裝 Hooks（可選）
+### 8. 配置 Hooks
 
-```bash
-cp hooks/*.json ~/.claude/hooks/
-```
+- [x] SessionEnd hook 已配置（2026-02-07）
+  - 提醒用戶執行 `/save-memory`
+- session-start hook 維持關閉（避免增加啟動時間）
+
+### 8.5. 為所有專案加入 Project ID 標記
+
+- [x] 12 個專案的 CLAUDE.md 皆已加入 `<!-- cc-memory: project="xxx" -->` 標記（2026-02-07）
 
 ---
 
@@ -95,15 +69,15 @@ cp hooks/*.json ~/.claude/hooks/
 
 ### 9. 測試 MCP Tools
 
-- [ ] `cc_memory_save` - 儲存一筆測試記憶（確認有/無 embedding）
-- [ ] `cc_memory_search` - 搜尋記憶
-  - [ ] mode=keyword - 關鍵字搜尋
-  - [ ] mode=semantic - 語義搜尋（需 GEMINI_API_KEY）
-  - [ ] mode=hybrid - 混合搜尋（預設）
-- [ ] `cc_memory_list` - 列出專案記憶
-- [ ] `cc_memory_get` - 取得單一記憶
-- [ ] `cc_memory_stats` - 查看統計
-- [ ] `cc_memory_delete` - 刪除記憶
+- [x] `cc_memory_save` - 儲存記憶 + embedding 生成 ✓
+- [x] `cc_memory_search` - 搜尋記憶
+  - [x] mode=keyword - 關鍵字搜尋 ✓
+  - [x] mode=semantic - 語義搜尋 ✓（Gemini embedding 已啟用）
+  - [x] mode=hybrid - 混合搜尋 ✓
+- [x] `cc_memory_list` - 列出專案記憶
+- [x] `cc_memory_get` - 取得單一記憶
+- [x] `cc_memory_stats` - 查看統計
+- [x] `cc_memory_delete` - 刪除記憶（軟刪除確認正常）
 
 ### 10. Backfill Embeddings（如果有舊資料）
 
@@ -115,8 +89,9 @@ npm run backfill:embeddings
 
 ### 11. 測試 Skills
 
-- [ ] `/save-memory` - 儲存當前 session 記憶
-- [ ] `/load-memory` - 載入專案記憶上下文
+- [x] `/save-memory` - 已安裝，端對端流程驗證通過（手動模擬）
+- [x] `/load-memory` - 已安裝，端對端流程驗證通過（手動模擬）
+- 注意：Skills 需在新 session 才會自動載入
 
 ---
 
@@ -124,4 +99,4 @@ npm run backfill:embeddings
 
 - 基礎功能實作完成：2026-02-01
 - 語義搜尋功能實作完成：2026-02-02
-- 部署完成：待填寫
+- 部署完成：2026-02-07
