@@ -1,5 +1,17 @@
 // src/db/schema.ts
-import { pgTable, uuid, text, timestamp, jsonb, index, vector } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  jsonb,
+  index,
+  vector,
+  check,
+  integer,
+  real,
+  bigint,
+} from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 // Embedding 維度常數（與 Gemini gemini-embedding-001 匹配）
@@ -49,3 +61,97 @@ export const projectMemories = pgTable(
 // TypeScript 型別
 export type Memory = typeof projectMemories.$inferSelect;
 export type NewMemory = typeof projectMemories.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// tasks（v0.2 新增）— 由 Phase 1 TDD 加入
+// ---------------------------------------------------------------------------
+
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: text('project_id').notNull(),
+    projectPath: text('project_path'),
+    title: text('title').notNull(),
+    description: text('description'),
+    status: text('status').notNull().default('open'),
+    priority: text('priority').notNull().default('normal'),
+    dueDate: timestamp('due_date', { withTimezone: true }),
+    tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
+    source: text('source').notNull().default('manual'),
+    sourceRef: text('source_ref'),
+    idempotencyKey: text('idempotency_key').unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    metadata: jsonb('metadata').notNull().default({}),
+  },
+  (table) => [
+    check('tasks_title_length_check', sql`char_length(${table.title}) BETWEEN 1 AND 500`),
+    check('tasks_status_check', sql`${table.status} IN ('open','in_progress','done','cancelled')`),
+    check('tasks_priority_check', sql`${table.priority} IN ('low','normal','high')`),
+    check('tasks_source_check', sql`${table.source} IN ('manual','telegram','claude-code','codex','mcp')`),
+    index('tasks_project_status_created_idx').on(table.projectId, table.status, table.createdAt.desc()),
+    index('tasks_due_date_idx')
+      .on(table.dueDate)
+      .where(sql`${table.dueDate} IS NOT NULL AND ${table.status} <> 'done'`),
+    index('tasks_idempotency_idx')
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
+  ]
+);
+
+export type Task = typeof tasks.$inferSelect;
+export type NewTask = typeof tasks.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// search_feedback（v0.2 新增）— 由 Phase 1 TDD 加入
+// retrieval 評估用：query / mode / 排名結果 / 使用者選擇 / thumbs
+// ---------------------------------------------------------------------------
+
+export const searchFeedback = pgTable(
+  'search_feedback',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    query: text('query').notNull(),
+    querySurface: text('query_surface').notNull(),
+    queryProjectId: text('query_project_id'),
+    mode: text('mode').notNull(),
+    limit: integer('limit').notNull(),
+    resultIds: uuid('result_ids').array().notNull(),
+    resultProjectIds: text('result_project_ids').array().notNull(),
+    rankPositions: integer('rank_positions').array().notNull(),
+    scores: real('scores').array(),
+    selectedId: uuid('selected_id'),
+    selectedRank: integer('selected_rank'),
+    thumbs: text('thumbs'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('search_feedback_surface_check', sql`${table.querySurface} IN ('telegram','mcp','http')`),
+    check('search_feedback_mode_check', sql`${table.mode} IN ('keyword','semantic','hybrid')`),
+    check(
+      'search_feedback_thumbs_check',
+      sql`${table.thumbs} IS NULL OR ${table.thumbs} IN ('up','down')`
+    ),
+    index('search_feedback_created_idx').on(table.createdAt.desc()),
+    index('search_feedback_mode_idx').on(table.mode, table.thumbs),
+  ]
+);
+
+export type SearchFeedback = typeof searchFeedback.$inferSelect;
+export type NewSearchFeedback = typeof searchFeedback.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// bot_user_state（v0.2 新增）— 由 Phase 1 TDD 加入
+// Telegram bot active project 持久化；重啟不掉資料
+// ---------------------------------------------------------------------------
+
+export const botUserState = pgTable('bot_user_state', {
+  telegramUserId: bigint('telegram_user_id', { mode: 'bigint' }).primaryKey(),
+  activeProjectId: text('active_project_id'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type BotUserState = typeof botUserState.$inferSelect;
+export type NewBotUserState = typeof botUserState.$inferInsert;
