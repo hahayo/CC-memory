@@ -1,81 +1,75 @@
 # CC-memory v0.2 Implementation Plan
 
-> Spec 版本：1.1（Codex plan review 修訂） · 範圍：路線 A 最保守自建
+> Spec 版本：**1.3** · 範圍：路線 A 最保守自建 · Phase 0+1 已完成
 
 ---
 
 ## Architecture（路徑定死）
+
 ```
            ┌──────────────────────────────────────────┐
            │    PostgreSQL (Zeabur, 既有)               │
-           │    project_memories (v0.1, 不動)           │
-           │    tasks (新) + search_feedback (新)       │
+           │    project_memories  (v0.1 + v1.3 補欄位)  │
+           │    tasks             (v0.2 Phase 1)        │
+           │    search_feedback   (v0.2 Phase 1)        │
+           │    bot_user_state    (v0.2 Phase 1)        │
            └──────────────────┬───────────────────────┘
                               │
                    ┌──────────▼──────────┐
                    │  src/services/      │  ← 核心業務邏輯
                    │  memories / tasks / │     所有 DB 存取的唯一通道
-                   │  feedback / auth    │
+                   │  feedback / auth /  │
+                   │  projects / botstate│
                    └──┬───────────────┬──┘
                       │               │
              ┌────────┘               └────────┐
              ▼                                 ▼
       ┌─────────────┐                ┌──────────────────┐
       │ MCP stdio   │                │ HTTP REST (Hono) │
-      │ (既有+task) │                │ 雙 token 分權    │
-      │             │                │ Zeabur           │
+      │ (既有+task) │                │ 雙 token + bot   │
+      │             │                │  user header     │
       └──────▲──────┘                └────────▲─────────┘
              │                                │
-             │                                │ 只走 HTTP，不直連 DB/service
+             │                                │  只走 HTTP，**完全**不直連 DB
      ┌───────┴────────┐                ┌──────┴──────┐
      │ Claude Code +  │                │ Telegram    │
      │ Codex CLI      │                │ bot         │
      └────────────────┘                └─────────────┘
 ```
 
-**強制規則**：bot **不得** import `src/services/*` 或 `src/db/*`，編譯期即檢查；bot 的 `package.json` 或 tsconfig path 分離，防止意外依賴。
+**強制規則**
+- bot 的 `package.json` / tsconfig path 與 main src/ 分離
+- `src/bot/**` 禁止 import `src/services/**` 或 `src/db/**`（CI grep gate）
+- `bot_user_state` 讀寫一律走 `/api/bot/state/:telegram_user_id` HTTP endpoint
 
 ---
 
 ## Data Model
 
-### 新增 `tasks` 表
+### `project_memories`（v0.1 + v1.3 補兩欄位）
+
+v1.3 加 2 個 nullable 欄位，不動既有資料：
+
 ```sql
--- 0002_tasks.sql
-CREATE TABLE tasks (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id text NOT NULL,
-  project_path text,
+-- 由 Phase 2 migration 0002_add_idempotency_and_writer.sql 添加
+ALTER TABLE project_memories
+  ADD COLUMN idempotency_key text,
+  ADD COLUMN writer_host text;
 
-  title text NOT NULL CHECK (char_length(title) BETWEEN 1 AND 500),
-  description text,
-  status text NOT NULL DEFAULT 'open'
-    CHECK (status IN ('open','in_progress','done','cancelled')),
-  priority text NOT NULL DEFAULT 'normal'
-    CHECK (priority IN ('low','normal','high')),
-  due_date timestamptz,
-  tags text[] NOT NULL DEFAULT '{}'::text[],
+CREATE UNIQUE INDEX project_memories_idempotency_idx
+  ON project_memories (idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+```
 
-  source text NOT NULL DEFAULT 'manual'
-    CHECK (source IN ('manual','telegram','claude-code','codex','mcp')),
-  source_ref text,
+原因：P0-2。metadata JSONB scan 無法原子冪等；partial unique index 才能讓
+webhook retry / bot 重送雙寫 fail-fast。
 
-  -- idempotency for Telegram polling / webhook duplicates
-  idempotency_key text UNIQUE,
+### `tasks`（v0.2 Phase 1 已上線 + v1.3 補 writer_host）
 
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz,
+Phase 1 已有的欄位見 `src/db/schema.ts` / `sql/migrations/0001_add_tasks_feedback_bot_state.sql`。v1.3 只加：
 
-  metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX tasks_project_status_created_idx
-  ON tasks (project_id, status, created_at DESC);
-CREATE INDEX tasks_due_date_idx
-  ON tasks (due_date) WHERE due_date IS NOT NULL AND status <> 'done';
-CREATE INDEX tasks_idempotency_idx
-  ON tasks (idempotency_key) WHERE idempotency_key IS NOT NULL;
+```sql
+ALTER TABLE tasks ADD COLUMN writer_host text;
 ```
 
 #### Task 狀態轉移規則（明定）
@@ -89,45 +83,29 @@ CREATE INDEX tasks_idempotency_idx
 | `cancelled` | `open` | 復原 | 不動 |
 | `done` → `in_progress` | ❌ 禁止（要先 `open`） | — | — |
 
-在 `services/tasks.ts` 集中驗證；DB trigger 延後（MVP 靠 service 層即可）。
+在 `services/tasks.ts` 集中驗證。**Optimistic locking**：`updateTask` 必須帶
+`expectedStatus`；SQL `UPDATE ... WHERE id = ? AND status = ?`，affected=0 時
+throw `StaleTaskError`（409）。
 
-### 新增 `search_feedback` 表（加強版）
+### `search_feedback`（Phase 1 已上線，Phase 5 補 CHECK）
+
+Phase 5 選用增強（MVP 可跳過，若時間允許）：
+
 ```sql
--- 0003_search_feedback.sql
-CREATE TABLE search_feedback (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  query text NOT NULL,
-  query_surface text NOT NULL              -- 'telegram' | 'mcp' | 'http'
-    CHECK (query_surface IN ('telegram','mcp','http')),
-  query_project_id text,                   -- 查詢當下的 active project（可能 NULL 代表跨專案）
-
-  mode text NOT NULL                       -- 'keyword' | 'semantic' | 'hybrid'
-    CHECK (mode IN ('keyword','semantic','hybrid')),
-  "limit" integer NOT NULL,
-
-  result_ids uuid[] NOT NULL,
-  result_project_ids text[] NOT NULL,      -- 平行陣列 to result_ids
-  rank_positions integer[] NOT NULL,       -- 1..N
-  scores real[],                           -- similarity / RRF 分數（可 NULL）
-
-  selected_id uuid,                        -- 使用者點了哪條
-  selected_rank integer,
-  thumbs text                              -- 'up' | 'down' | NULL
-    CHECK (thumbs IN ('up','down')),
-
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX search_feedback_created_idx ON search_feedback (created_at DESC);
-CREATE INDEX search_feedback_mode_idx ON search_feedback (mode, thumbs);
+ALTER TABLE search_feedback
+  ADD CONSTRAINT search_feedback_arrays_same_length CHECK (
+    cardinality(result_ids) = cardinality(result_project_ids)
+    AND cardinality(result_ids) = cardinality(rank_positions)
+    AND (scores IS NULL OR cardinality(scores) = cardinality(result_ids))
+  );
 ```
 
-**為什麼要這麼多欄位**：Codex 指出若只存 `thumbs`，兩週後無法判斷「該調 keyword / semantic / hybrid / threshold / project routing」。加這些欄位後 retrieval eval 才有決策依據。
+`selected_rank ∈ 1..N` 由 service 層驗證（SQL 表達過於複雜）。
 
-### 新增 `bot_user_state` 表
+### `bot_user_state`（Phase 1 已上線，只改 access path）
+
 ```sql
--- 0004_bot_user_state.sql
+-- 已部署
 CREATE TABLE bot_user_state (
   telegram_user_id bigint PRIMARY KEY,
   active_project_id text,
@@ -135,31 +113,94 @@ CREATE TABLE bot_user_state (
 );
 ```
 
-重啟不掉資料，防止 silent miswrite。
-
-### `project_memories` — 不動（v0.1 schema 保留）
+**v1.3 關鍵差異**：bot 端**不再**有 `src/bot/state.ts` 直連 DB。所有讀寫經
+`/api/bot/state/:telegram_user_id` HTTP。
 
 ---
 
-## Canonical Project Identity
+## Canonical Project Identity（v1.3 修訂）
 
-優先級（保留現有邏輯，只補文件與強制）：
+### 優先序（新）
 
 ```
-(1) CLAUDE.md 的 <!-- cc-memory: project="xxx" --> marker（最權威）
-(2) env var CC_MEMORY_PROJECT_ID（手動覆蓋，優先度次高）
-(3) 目錄 basename（最弱 fallback）
+(1) explicit function arg（MCP tool 或 HTTP body 明示）
+(2) env CC_MEMORY_PROJECT_ID（override）
+(3) CLAUDE.md marker `<!-- cc-memory: project="xxx" -->`（專案預設）
+(4) repo_name（git remote 穩定 id，跨電腦一致）
+(5) basename(cwd)（最弱 fallback）
 ```
 
-規則：新增 `src/services/projects.ts`（`resolveProjectId` / `listCanonicalProjects` / `projectExists`）。Telegram `/switch` 只能切 DB 既存 project（不存在 → 拒絕並提示先在 CC 建第一筆記憶）。未選 project 的寫入動作一律拒絕，不做任何 fallback。
+**v1.1 → v1.3 變動**：env 從 #2 升到顯式 override；新增 `repo_name` 層。
+
+### `repo_name` 解析
+
+`src/utils/repo-name.ts`。為避免 shell injection，**禁用 `exec()` 字串拼接**，
+改用 Node 的 `execFileSync`：
+
+```ts
+import { execFileSync } from 'node:child_process';
+
+export function resolveRepoName(cwd: string): string | null {
+  try {
+    // -C <cwd> 讓 git 切到該目錄；所有參數作為獨立 argv 陣列，不經 shell
+    const url = execFileSync('git', ['-C', cwd, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    // https://github.com/hahayo/CC-memory.git → CC-memory
+    // git@github.com:hahayo/CC-memory.git    → CC-memory
+    return url.match(/[/:]([^/]+?)(?:\.git)?\s*$/)?.[1] ?? null;
+  } catch { return null; }
+}
+```
+
+不是 git repo 或無 remote → 回 null → 繼續下一層 fallback。
+
+### `listProjects()` 來源定義
+
+```sql
+SELECT DISTINCT project_id FROM (
+  SELECT project_id FROM project_memories WHERE status = 'active'
+  UNION
+  SELECT project_id FROM tasks WHERE status <> 'cancelled'
+) s
+```
+
+空 project（memories / tasks 全空）**不會**出現在 list，`/switch` 會拒絕。
+
+### Telegram `/switch` 規則
+
+- 必須在 `listProjects()` 結果中（不做任何 fallback）
+- 不存在 → 回「專案不存在，先用 Claude Code `/save-memory` 或 `/todo` 建第一筆」
+
+---
+
+## Writer Attribution（v1.3 新增）
+
+### 值來源
+
+`src/utils/writer-host.ts`：
+
+```ts
+import os from 'node:os';
+export function resolveWriterHost(): string {
+  return process.env.CC_MEMORY_WRITER?.trim() || os.hostname();
+}
+```
+
+### 填入時機
+
+每次 `saveMemory` / `createTask` 由 service 層自動填入 `writer_host`（不交給
+呼叫端決定）。
+- MCP：`os.hostname()`，Claude Code 本機跑 → 顯示使用者電腦名
+- HTTP：同樣由 API service 填，API 在 Zeabur 上 → 顯示 container hostname
+- Bot：`CC_MEMORY_WRITER=telegram-bot` 的 env，容易辨認
 
 ---
 
 ## Service Layer（Signatures）
 
 ### `src/services/memories.ts`
-
-搬自 `src/tools/*.ts`（純邏輯，不含 MCP 格式化）：
 
 ```ts
 export async function saveMemory(input: SaveMemoryInput): Promise<Memory>;
@@ -171,29 +212,48 @@ export async function deleteByIdempotencyKey(key: string, maxAgeSec: number): Pr
 export async function getProjectStats(projectId: string): Promise<Stats>;
 ```
 
-### `src/services/tasks.ts`（新）
+### `src/services/tasks.ts`
 
 ```ts
 export async function createTask(input: CreateTaskInput): Promise<Task>;
 export async function listTasks(input: ListTasksInput): Promise<Task[]>;
-export async function updateTask(id: string, patch: UpdateTaskPatch): Promise<Task>;
-// updateTask 內部強制狀態轉移規則；違規 throw InvalidTransitionError
+export async function updateTask(
+  id: string,
+  patch: UpdateTaskPatch,
+  opts: { expectedStatus: Task['status'] }   // optimistic locking
+): Promise<Task>;
+export async function resolveTaskByShortId(
+  prefix: string,
+  projectId: string
+): Promise<Task | 'NOT_FOUND' | { kind: 'AMBIGUOUS'; candidates: Task[] }>;
 ```
 
-### `src/services/projects.ts`（新）
+### `src/services/projects.ts`
 
 ```ts
-export function resolveProjectId(opts: ResolveOpts): Promise<string>;
-export async function listProjects(): Promise<Project[]>;       // distinct from memories + tasks
+export function resolveProjectId(opts: {
+  explicit?: string;
+  cwd?: string;
+  envOverride?: string;   // 測試用；預設讀 process.env.CC_MEMORY_PROJECT_ID
+}): string | null;
+export async function listProjects(): Promise<string[]>;  // union, distinct
 export async function projectExists(id: string): Promise<boolean>;
 ```
 
-### `src/services/feedback.ts`（新）
+### `src/services/botstate.ts`（Phase 3 新增）
+
+Server-side bot_user_state 存取。**僅 HTTP route 使用**，bot 本身不 import。
 
 ```ts
-export async function recordFeedback(input: FeedbackInput): Promise<void>;
+export async function getBotUserState(telegramUserId: bigint): Promise<BotUserState | null>;
+export async function setActiveProject(telegramUserId: bigint, projectId: string | null): Promise<void>;
+```
+
+### `src/services/feedback.ts`
+
+```ts
+export async function recordFeedback(input: FeedbackInput): Promise<void>;  // 驗長度 + rank
 export async function getRetrievalStats(sinceDays: number): Promise<RetrievalStats>;
-// breakdown by mode / query_surface
 ```
 
 ### 既有 MCP 層改動
@@ -209,44 +269,60 @@ export async function getRetrievalStats(sinceDays: number): Promise<RetrievalSta
 
 ### 技術選型
 
-Framework **Hono**；Auth **雙 token**（見下）；部署 Zeabur 獨立 service；Entry `src/http/index.ts`。
+Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立 service；Entry `src/http/index.ts`。
 
-### Token 分權
+### Auth 模型（v1.3 修訂）
 
-| Token | 權限 | 持有者 |
+| Scope | Header 要求 | 伺服器行為 |
 |---|---|---|
-| `BOT_API_TOKEN` | `POST /api/memories`（限 source='telegram'）、`POST /api/tasks`（限 source='telegram'）、`PATCH /api/tasks/:id` 限自己 project、`GET /api/*` 限帶 `project` 參數、`POST /api/feedback`、`DELETE /api/memories/by-idempotency/:key`（10 秒內） | Telegram bot |
-| `ADMIN_API_TOKEN` | 全部 endpoint，含跨專案 `/search?all=true`、`DELETE /api/memories/:id`、`GET /api/projects` | 個人使用 / curl / 未來 Web UI |
+| `admin` | `Authorization: Bearer <ADMIN_API_TOKEN>` | 跨專案全權 |
+| `bot` | `Authorization: Bearer <BOT_API_TOKEN>` + `X-Telegram-User-Id: <bigint>` | 查 `bot_user_state` 取 `active_project_id`；若 null 拒寫 |
 
-實作：Header `Authorization: Bearer <token>`；middleware `src/http/middleware/auth.ts` 根據 token 設定 `c.var.scope = 'bot' | 'admin'`；各 route handler 檢查 scope。
+`src/http/middleware/auth.ts`：
+1. 驗 token，設 `c.var.scope = 'bot' | 'admin'`
+2. 若 `scope === 'bot'`：從 header 讀 `X-Telegram-User-Id`（missing → 401）
+3. 查 `bot_user_state`，將 `activeProjectId` 塞入 `c.var.activeProjectId`
+4. handler 裡 bot scope 任何 mutating route 若 `activeProjectId` 為 null → 403 + `SWITCH_REQUIRED`
 
-### Endpoints（含 404/409 行為）
+### Endpoints
 
-| Method | Path | Scope | 404/409 |
+| Method | Path | Scope | 語意 / 錯誤 |
 |---|---|---|---|
-| `GET /health` | any | — | — |
-| `GET /api/memories` | any | 404 不適用，空陣列 |
-| `POST /api/memories` | bot+admin | 409 若 idempotency_key 重複（回舊 id） |
-| `GET /api/memories/:id` | any | 404 若不存在或跨專案（bot scope） |
-| `DELETE /api/memories/:id` | **admin only** | 404 若不存在；已 archived 回 200 no-op |
-| `DELETE /api/memories/by-idempotency/:key` | bot+admin | 404 / 403 若超過 10 秒 |
-| `GET /api/tasks` | any | 同 memories |
-| `POST /api/tasks` | bot+admin | 409 若 idempotency_key 重複 |
-| `PATCH /api/tasks/:id` | any | 404 若不存在；409 若違反狀態轉移 |
-| `GET /api/projects` | **admin only** | — |
-| `POST /api/feedback` | any | 201 |
+| `GET /health` | any | — | 200 |
+| `GET /api/memories?project=X` | bot + admin | bot scope 強制 `project = c.var.activeProjectId`（query 參數忽略）|
+| `POST /api/memories` | bot + admin | 409 若 idempotency_key 重複（回舊 id）; bot scope 強制 project = active |
+| `GET /api/memories/:id` | any | 404 若不存在；bot scope 額外 404 若跨 project |
+| `DELETE /api/memories/:id` | **admin only** | 404 / 200 no-op on archived |
+| `DELETE /api/memories/by-idempotency/:key` | bot + admin | 404 / 403 若超過 10 秒 |
+| `GET /api/tasks?project=X` | bot + admin | 同 memories project 強制 |
+| `POST /api/tasks` | bot + admin | 409 若 idempotency_key 重複 |
+| `PATCH /api/tasks/:id` | bot + admin | body 需 `expected_status`; 409 若狀態違規 / stale |
+| `GET /api/projects` | **admin only** | union list |
+| `POST /api/feedback` | any | 201；service 驗 array 長度與 rank |
+| `GET /api/bot/state/:telegram_user_id` | bot only | bot scope 只能讀自己 id（header 對得上）；404 若無記錄 |
+| `PUT /api/bot/state/:telegram_user_id` | bot only | body `{ active_project_id }`；驗 projectExists；同上只能改自己 |
 
-Response envelope：
+### HTTP 錯誤碼
+
+| Code | 使用情境 |
+|---|---|
+| 400 | 欄位缺漏 / 格式錯 |
+| 401 | token 缺 / 無效 / bot 無 `X-Telegram-User-Id` |
+| 403 | scope 不足 / 無 active project 但嘗試 mutate / undo 超時 |
+| 404 | 不存在 |
+| 409 | idempotency_key 重複 / 狀態轉移違規 / stale |
+| 422 | validation fail（feedback array length / rank out of range） |
+
+### Response envelope
 
 ```json
 { "data": ..., "error": null }
-// or
 { "data": null, "error": { "code": "NOT_FOUND", "message": "..." } }
 ```
 
 ### Observability
 
-`hono/logger` 中介層印每個 request；結構化 log 欄位：timestamp, scope, path, status, duration_ms, project_id。錯誤走 `console.error` + stack（Zeabur log 收集）。MVP 不接 Sentry/Datadog；記錄「何時該接」到 v0.3 backlog。
+`hono/logger` middleware；結構化 log 欄位：timestamp, scope, path, status, duration_ms, project_id, telegram_user_id（bot scope 時）。錯誤走 `console.error` + stack。MVP 不接 Sentry/Datadog；記錄「何時該接」到 v0.3 backlog。
 
 ---
 
@@ -257,29 +333,41 @@ Response envelope：
 | 指令 | 說明 | 未選 project 時 |
 |---|---|---|
 | `/start` | 歡迎 + 當前 active project（若無則提示 `/switch`） | OK |
-| `/projects` | 列出 DB 已存在 project | OK |
-| `/switch <name>` | 切換 active project（**必須 DB 存在**） | OK |
+| `/projects` | 列出 `listProjects()` 結果 | OK |
+| `/switch <name>` | 切換 active project（**必須 `listProjects` 裡存在**） | OK |
 | `/here` | 顯示目前 active project | OK |
 | `/search <q>` | 限定 active project 搜尋；帶 `--all` 跨專案（需 ADMIN token） | OK（可跨） |
-| `/note <text>` | 記錄 memory | **拒絕並提示 `/switch`** |
-| `/todo <text>` | 新增 todo | **拒絕並提示 `/switch`** |
+| `/note <text>` | 記錄 memory | **拒絕，提示 `/switch`** |
+| `/todo <text>` | 新增 todo | **拒絕，提示 `/switch`** |
 | `/todos` | 列未完成 todo（當前 project） | **拒絕** |
-| `/done <id前6>` | 完成 | OK（task 自帶 project） |
-| `/cancel <id前6>` | 取消 | OK |
+| `/done <id前6>` | 完成（`resolveTaskByShortId`；多筆則列候選） | OK |
+| `/cancel <id前6>` | 取消（同上） | OK |
 
-### Write 確認 + Undo（改用 pending_until / idempotency_key）
+### Write 流程 + Undo（走資料層冪等）
 
-**捨棄 timer 模式**，改為資料層：
+1. Bot 送 `/note X`：產生 `idempotency_key = uuid`、call `POST /api/memories` 帶 key → **先真的 insert**
+2. 訊息帶 inline `[撤銷]` button，callback data = key
+3. 使用者點撤銷：bot → `DELETE /api/memories/by-idempotency/:key`；`created_at` 距今 ≤ 10 秒生效，> 10 秒收 403
+4. 重複點撤銷或重複發訊息：冪等保證（第二次 POST 同 key → 409 回舊 id；第二次 DELETE 同 key → 200 no-op）
 
-1. Bot 送 `/note X`：產生 `idempotency_key = uuid`、**先真的 insert**，訊息帶 inline `[撤銷]` button（callback data = key）
-2. 使用者點撤銷：bot → HTTP `DELETE /api/memories/by-idempotency/:key`；10 秒內有效，超過就拒絕（by `created_at`）
-3. 重複點撤銷或重複發訊息：idempotency_key 保證冪等
+`tasks` 同理；memories 現在 v1.3 加了正式欄位 `idempotency_key` 才能可靠冪等（見 Data Model）。
 
-`tasks` 同理，靠 `tasks.idempotency_key UNIQUE`。`project_memories` 不改 schema，把 idempotency_key 存 `metadata.idempotency_key`，query 走 `jsonb` 比對。
+### Short ID 解析
+
+`resolveTaskByShortId(prefix, projectId)` 在 service 層：
+- 0 筆 → `NOT_FOUND`（bot 回「找不到」）
+- 1 筆 → 回 `Task`
+- 2+ 筆 → `AMBIGUOUS`（bot 列候選前 6 碼 + title，要求 7 碼或完整 id）
 
 ### 白名單
 
 env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log。
+
+### Bot 不碰 DB 的強制
+
+- `src/bot/` 目錄的 `tsconfig.bot.json` 的 `paths` 不包含 `src/db/**` / `src/services/**`
+- CI 加 script：`! grep -rnE "from ['\"](\\.\\./)?(db|services)/" src/bot/ || exit 1`
+- 所有 active_project 操作：`GET|PUT /api/bot/state/:user`
 
 ---
 
@@ -287,13 +375,29 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 
 ### Zeabur 服務拓撲
 
-| Service | Runtime | Repo entry | 說明 |
+| Service | Runtime | Entry | 說明 |
 |---|---|---|---|
 | `cc-memory-pg` | PostgreSQL（既有） | — | 不動 |
 | `cc-memory-api` | Node.js | `build/http/index.js` | HTTP REST |
 | `cc-memory-bot` | Node.js | `build/bot/index.js` | Telegram bot |
 
-**單 repo 多 service**；Zeabur 支援指定 start command。
+### Build scripts（v1.3 新增，Phase 3 開工前）
+
+```json
+{
+  "scripts": {
+    "build": "tsc",
+    "build:mcp": "tsc --project tsconfig.mcp.json",
+    "build:api": "tsc --project tsconfig.api.json",
+    "build:bot": "tsc --project tsconfig.bot.json",
+    "start": "node build/index.js",
+    "start:api": "node build/http/index.js",
+    "start:bot": "node build/bot/index.js"
+  }
+}
+```
+
+`tsconfig.bot.json` 的 `include` 只含 `src/bot/**`，強制與 main 隔離。
 
 ### 環境變數
 
@@ -302,98 +406,128 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 DATABASE_URL=postgresql://...
 GEMINI_API_KEY=...
 
-# 新增（API）
+# 新增（通用）
+CC_MEMORY_PROJECT_ID=         # 可選 override
+CC_MEMORY_WRITER=             # 可選，預設 os.hostname()
+
+# 新增（API 用）
 BOT_API_TOKEN=<32+ 字元隨機>
 ADMIN_API_TOKEN=<32+ 字元隨機>
 PORT=3000
 
-# 新增（Bot）
+# 新增（Bot 用）
 TELEGRAM_BOT_TOKEN=<BotFather>
 TELEGRAM_ALLOWED_USER_IDS=123,456
 API_URL=https://cc-memory-api.zeabur.app
-API_TOKEN=<= BOT_API_TOKEN>  # bot 只拿 BOT_API_TOKEN
+API_TOKEN=<= BOT_API_TOKEN>
+CC_MEMORY_WRITER=telegram-bot   # bot 辨識
 UNDO_WINDOW_SEC=10
 ```
 
 ### 多電腦使用
 
-每台電腦 MCP server 本地跑，連雲端 PG；Telegram bot 單一部署；Codex CLI 用 `codex mcp add cc-memory -- node /path/to/build/index.js`。
+每台電腦 MCP server 本地跑，連雲端 PG；Telegram bot 單一部署在 Zeabur；
+Codex CLI：`codex mcp add cc-memory -- node /path/to/build/index.js`。
+
+`project_id` 透過 `repo_name` 解析保證跨電腦一致（見 Canonical Project Identity）。
 
 ---
 
-## Files to Create / Modify
+## Files to Create / Modify（v1.3 更新）
 
 ### 新建
 
 ```
 src/services/
   memories.ts          # 搬自 src/tools/*.ts
-  tasks.ts             # 新（含狀態轉移驗證）
-  projects.ts          # 新（canonical id）
-  feedback.ts          # 新
+  tasks.ts             # 新（含狀態轉移 + optimistic lock + short-id 解析）
+  projects.ts          # 新（5 層優先序解析）
+  feedback.ts          # 新（含 array 長度與 rank 驗證）
+  botstate.ts          # 新（bot_user_state 唯一通道，HTTP 用）
 
 src/http/
   index.ts             # Hono app
-  routes/{memories,tasks,projects,feedback,health}.ts
+  routes/{memories,tasks,projects,feedback,health,botstate}.ts
   middleware/{auth,logger,error}.ts
 
 src/bot/
-  index.ts             # telegraf entry (獨立 package imports only from http client)
-  client.ts            # fetch wrapper to HTTP API
-  state.ts             # bot_user_state DB ops (bot 唯一允許碰 DB 的地方)
-  handlers/{switch,search,note,todo,todos,projects,start}.ts
+  index.ts             # telegraf entry（tsconfig.bot.json 限制 import）
+  client.ts            # fetch wrapper，帶 X-Telegram-User-Id header
+  handlers/{switch,search,note,todo,todos,projects,start,done,cancel}.ts
   undo.ts              # idempotency key 管理
 
+src/utils/
+  repo-name.ts         # git remote 抽 repo name（execFileSync，無 shell）
+  writer-host.ts       # env 或 os.hostname()
+
 sql/migrations/
-  0001_baseline.sql    # 從 Drizzle generate，紀錄用
-  0002_tasks.sql
-  0003_search_feedback.sql
-  0004_bot_user_state.sql
+  0002_add_idempotency_and_writer.sql  # ALTER project_memories + tasks
 
 scripts/
   eval-retrieval.ts    # 2 週評估腳本
 
 docs/
-  http-api.md
+  http-api.md          # 正式 API 規格
   telegram-bot.md
   retrieval-eval.md
   zeabur-deploy.md
-  schema-alignment.md  # Day 0 紀錄
 ```
 
 ### 修改
 
 ```
-src/db/schema.ts            # 加 tasks + search_feedback + bot_user_state
+src/db/schema.ts            # 加 project_memories.idempotency_key / writer_host、tasks.writer_host
 src/index.ts                # MCP server 加 task tools，call services
-src/tools/*.ts              # 保留當薄殼（或下一版清）
-package.json                # 加 hono, @hono/node-server, telegraf
+src/utils/project-id.ts     # 原有 getProjectId 遷到 services/projects.ts，加 env + repo_name
+src/tools/*.ts              # 保留當薄殼
+package.json                # 加 hono, @hono/node-server, telegraf; build/start scripts 分 mcp/api/bot
+tsconfig.json               # 新增 tsconfig.{mcp,api,bot}.json，bot 不能 import 核心
 README.md                   # HTTP + bot + Codex MCP 設定章節
-.env.example                # 4 個新 env
+.env.example                # 新增所有 v0.2 env
 docs/TODO.md                # v0.2 工作項目
 ```
 
-### 刪除（Day 0）
+### 刪除
 
 ```
-sql/schema.sql              # 死檔，避免誤導
+（無；Phase 0 已刪 sql/schema.sql）
 ```
+
+### 不再規劃的檔案（v1.1 有，v1.3 移除）
+
+- `src/bot/state.ts` ← **刪除規劃**。bot 不碰 DB，走 `/api/bot/state` HTTP
 
 ### 關鍵既有可重用
 
 | 檔案 | 重用點 |
 |---|---|
 | `src/db/client.ts` | DB 連線 |
-| `src/db/schema.ts:9` `projectMemories` | 保留不動 |
-| `src/utils/project-id.ts:13` `getProjectId` | MCP 場景繼續用，搬進 `services/projects.ts` |
+| `src/db/schema.ts:projectMemories` | 保留，只加 2 欄位 |
+| `src/utils/project-id.ts:getProjectId` | 併入 services/projects.ts，加 env + repo_name 層 |
 | `src/utils/embedding.ts` | search service 繼續用 |
-| `src/tools/search.ts:135` `hybridSearch` | 搬到 `services/memories.ts`，**加入回傳 mode/scores/rank 給 feedback 寫入** |
+| `src/tools/search.ts:hybridSearch` | 搬到 services/memories.ts，加入回傳 mode/scores/rank |
 | `skills/save-memory.md`, `skills/load-memory.md` | 不動 |
+
+---
+
+## Rollout Order（v1.3 修訂）
+
+| Phase | 交付 | Gate |
+|---|---|---|
+| **0** ✅ | Schema alignment | 完成 |
+| **1** ✅ | `tasks` / `search_feedback` / `bot_user_state` + TDD | 完成 |
+| **2** | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
+| **3** | HTTP API（含 `/api/bot/state`）+ X-Telegram-User-Id middleware + 雙 token + Zeabur deploy | curl 全 endpoint 通；bot token 對 admin 收 403；bot scope 無 user header 收 401 |
+| **4** | Telegram bot（走 HTTP only）+ undo + short-id collision | 跨電腦寫讀通；bot CI grep gate 無違規 |
+| **5** | `search_feedback` 完整 + retrieval eval 腳本骨架 | 10 秒內撤銷成功；端對端 demo |
+
+**Gate 未過不進下個 phase**。
 
 ---
 
 ## 回滾策略
 
-- Schema migration 單向（加表，不動舊表）→ 回滾 = 不部署新 service
-- Service layer：新舊並存 1 週，MCP 可 feature-flag 切回 `src/tools/*` 實作
-- HTTP / bot：獨立 service，關閉不影響 CC 使用
+- **Phase 2** schema 變更是 additive ALTER（加 nullable column + partial index），回滾 = 不部署新 service
+- **Service layer**：新舊並存 1 週，MCP 可 feature-flag 切回 `src/tools/*`
+- **HTTP / bot**：獨立 Zeabur service，關閉不影響 Claude Code 本機使用
+- **bot_user_state API 失效**：bot 降級為「必須每次訊息帶 `#project=X`」模式（後續實作，v0.3）
