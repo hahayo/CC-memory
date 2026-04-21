@@ -160,6 +160,14 @@ export async function updateTask(
     throw new NotFoundError('Task not found', { id });
   }
   const current = currentRows[0] as Task;
+
+  // Step 1.5：projectId 範疇檢查（codex review round 5 P2）
+  //   若 caller 指定 projectId，task 必須屬於該 project，否則視為「找不到」
+  //   （不洩露存在性給跨 project 窺探者）
+  if (options.projectId !== undefined && current.projectId !== options.projectId) {
+    throw new NotFoundError('Task not found', { id });
+  }
+
   const currentStatus = current.status as TaskStatus;
 
   // Step 2：expectedStatus 檢查
@@ -204,10 +212,16 @@ export async function updateTask(
   // 其他組合：不碰 completed_at
 
   // Step 6：UPDATE ... WHERE id=? AND status=expectedStatus（optimistic locking 第二道防線）
+  //   若 projectId 有帶也加進 WHERE，雙重保險（race 下別人重 insert 同 id 到他 project
+  //   是 UUID collision 天方夜譚，但加了不花成本）
+  const updateConditions = [eq(tasks.id, id), eq(tasks.status, options.expectedStatus)];
+  if (options.projectId !== undefined) {
+    updateConditions.push(eq(tasks.projectId, options.projectId));
+  }
   const updated = await db
     .update(tasks)
     .set(setPayload)
-    .where(and(eq(tasks.id, id), eq(tasks.status, options.expectedStatus)))
+    .where(and(...updateConditions))
     .returning();
 
   if (updated.length === 0) {

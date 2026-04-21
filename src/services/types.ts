@@ -144,6 +144,12 @@ export interface UpdateTaskPatch {
 export interface UpdateTaskOptions {
   /** optimistic locking：僅當目前 status 符合時才 update；不符合 throw StaleTaskError */
   expectedStatus: TaskStatus;
+  /**
+   * 限定 task 必須屬於某 project；不符則 throw NotFoundError（不洩露存在性）。
+   * Codex review round 5 P2：避免 UUID-only update 跨 project 任意改動。
+   * MCP handler 統一從 resolveProjectId 取值傳入。
+   */
+  projectId?: string;
 }
 
 export type ResolveShortIdResult =

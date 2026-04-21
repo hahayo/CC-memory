@@ -470,6 +470,38 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 5 finding #1：updateTask projectId scope ---------
+  describe('updateTask project scope guard', () => {
+    it('projectId mismatch → NotFoundError（不洩露存在性）', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-scopeA', title: 'locked' });
+      await expect(
+        updateTask(
+          db,
+          t.id,
+          { status: 'done' },
+          { expectedStatus: 'open', projectId: testPrefix + '-scopeB' }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+
+    it('projectId matches → 正常更新', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-scopeC', title: 'ok' });
+      const updated = await updateTask(
+        db,
+        t.id,
+        { status: 'done' },
+        { expectedStatus: 'open', projectId: testPrefix + '-scopeC' }
+      );
+      expect(updated.status).toBe('done');
+    });
+
+    it('projectId undefined → 不做 scope 檢查（向後相容）', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-scopeD', title: 'ok' });
+      const updated = await updateTask(db, t.id, { status: 'done' }, { expectedStatus: 'open' });
+      expect(updated.status).toBe('done');
+    });
+  });
+
   // --------- Codex review round 2 finding：createTask + updateTask completed_at ----------
   describe('completed_at lifecycle (round 2 fix)', () => {
     it('createTask with status=done auto-sets completed_at', async () => {

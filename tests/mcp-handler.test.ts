@@ -117,6 +117,7 @@ describe('MCP handler (Stage 2)', () => {
       'cc_task_update',
       {
         id,
+        project_id: tp,
         expected_status: 'open', // 與實際 in_progress 不符
         status: 'done',
       },
@@ -140,7 +141,7 @@ describe('MCP handler (Stage 2)', () => {
 
     const res = await handleToolCall(
       'cc_task_update',
-      { id, expected_status: 'open', status: 'in_progress' },
+      { id, project_id: tp, expected_status: 'open', status: 'in_progress' },
       testDb
     );
     expect(res.isError).not.toBe(true);
@@ -149,13 +150,35 @@ describe('MCP handler (Stage 2)', () => {
     expect(text).toContain('abc');
   });
 
+  // --------- Codex review round 5 P2：cc_task_update 必須提供 project scope ---------
+  it('cc_task_update 跨 project 嘗試改 UUID → NOT_FOUND（不洩露存在性）', async () => {
+    const id = randomUUID();
+    const otherProject = `${tp}-other`;
+    await sql`INSERT INTO tasks (id, project_id, title, status) VALUES (${id}, ${otherProject}, 'cross', 'open')`;
+
+    const res = await handleToolCall(
+      'cc_task_update',
+      { id, project_id: tp, expected_status: 'open', status: 'done' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('NOT_FOUND');
+
+    // 驗證 other project 的 task 沒被改動
+    const rows = await sql<{ status: string }[]>`SELECT status FROM tasks WHERE id = ${id}`;
+    expect(rows[0].status).toBe('open');
+
+    await sql`DELETE FROM tasks WHERE project_id = ${otherProject}`;
+  });
+
   it('cc_task_update 違反狀態轉移 → JSON error code=INVALID_TRANSITION', async () => {
     const id = randomUUID();
     await sql`INSERT INTO tasks (id, project_id, title, status) VALUES (${id}, ${tp}, 'abc', 'done')`;
 
     const res = await handleToolCall(
       'cc_task_update',
-      { id, expected_status: 'done', status: 'in_progress' },
+      { id, project_id: tp, expected_status: 'done', status: 'in_progress' },
       testDb
     );
     expect(res.isError).toBe(true);
@@ -252,7 +275,7 @@ describe('MCP handler (Stage 2)', () => {
 
     const res = await handleToolCall(
       'cc_task_update',
-      { id, expected_status: 'open', due_date: '2026-99-99' },
+      { id, project_id: tp, expected_status: 'open', due_date: '2026-99-99' },
       testDb
     );
     expect(res.isError).toBe(true);

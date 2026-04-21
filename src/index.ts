@@ -584,6 +584,9 @@ export async function handleToolCall(
       }
 
       case 'cc_task_update': {
+        // 強制 project scope：cc_task_update 必須傳 project_id 或 project_path，
+        // 否則 UUID-only update 可跨 project 亂改（codex round 5 P2）。
+        const { projectId } = resolveCwdAndProjectId(args);
         const id = args.id as string;
         const expected = args.expected_status as TaskStatus;
         const patch: Record<string, unknown> = {};
@@ -597,7 +600,10 @@ export async function handleToolCall(
         const parsedDue = parseDueDate(args.due_date);
         if (parsedDue !== undefined) patch.dueDate = parsedDue;
 
-        const updated = await updateTask(database, id, patch, { expectedStatus: expected });
+        const updated = await updateTask(database, id, patch, {
+          expectedStatus: expected,
+          projectId,
+        });
         return {
           content: [
             {
