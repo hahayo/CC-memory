@@ -317,6 +317,46 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_ARGUMENT');
   });
 
+  // --------- Codex review round 12：whitespace project_id + due_date format ---------
+  it('whitespace-only project_id → JSON error INVALID_ARGUMENT（不 fallback）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_list',
+      { project_id: '   ' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('date-only due_date 顯示 YYYY-MM-DD（不被 toLocaleDateString 漂移）', async () => {
+    const id = randomUUID();
+    // 插入 UTC 午夜的 dueDate（對應 "2026-12-31" date-only 語意）
+    await sql`INSERT INTO tasks (id, project_id, title, due_date)
+              VALUES (${id}, ${tp}, 'y2026', '2026-12-31 00:00:00+00')`;
+    const res = await handleToolCall(
+      'cc_task_list',
+      { project_id: tp },
+      testDb
+    );
+    const text = (res.content[0] as { text: string }).text;
+    // 應顯示 date-only 格式，不應該是 2026-12-30 或其他漂移
+    expect(text).toContain('2026-12-31');
+  });
+
+  it('timed due_date 渲染為完整 ISO（含時間 + Z）', async () => {
+    const id = randomUUID();
+    await sql`INSERT INTO tasks (id, project_id, title, due_date)
+              VALUES (${id}, ${tp}, 'with time', '2026-06-15 14:30:00+00')`;
+    const res = await handleToolCall(
+      'cc_task_list',
+      { project_id: tp },
+      testDb
+    );
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toMatch(/2026-06-15T14:30:00\.000Z/);
+  });
+
   // --------- Codex review round 11：input validation tightening ---------
   it('相對 project_path → JSON error INVALID_ARGUMENT', async () => {
     const res = await handleToolCall('cc_memory_list', { project_path: '.' }, testDb);

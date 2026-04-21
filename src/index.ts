@@ -48,8 +48,11 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
 } {
   const rawPath = args?.project_path;
   const rawId = args?.project_id;
-  const hasPath = typeof rawPath === 'string' && rawPath.length > 0;
-  const hasId = typeof rawId === 'string' && rawId.length > 0;
+  // trim 後才視為有效，避免 "   " 這種 whitespace-only 值繞過 fail-fast
+  // 再走 resolveProjectId 裡的 nonEmpty() 檢查 → fallback 到 env/marker/git/basename
+  // 造成跨 project misroute（codex review round 12 P1）
+  const hasPath = typeof rawPath === 'string' && rawPath.trim().length > 0;
+  const hasId = typeof rawId === 'string' && rawId.trim().length > 0;
 
   // MCP stdio server 的 process.cwd() 是 server 啟動目錄，不是 client 端的專案目錄。
   // 任一 tool 若 caller 不傳 project_id 也不傳 project_path，fail-fast 不 fallback；
@@ -177,6 +180,21 @@ function formatMemory(memory: Memory, index?: number): string {
   return result;
 }
 
+/**
+ * 格式化 dueDate 為可讀字串：
+ *   - UTC 午夜（date-only 語意，例如 YYYY-MM-DD 被 new Date 存為 00:00Z）→ 只顯示 YYYY-MM-DD
+ *   - 否則 → 完整 ISO（含 time + Z），保證跨時區 server 顯示一致
+ * 避免 toLocaleDateString 在非 UTC server 上把 date-only 顯示成前一天
+ * （codex review round 12 P2）。
+ */
+function formatDueDate(d: Date): string {
+  const iso = d.toISOString();
+  if (iso.endsWith('T00:00:00.000Z')) {
+    return iso.slice(0, 10);
+  }
+  return iso;
+}
+
 function formatTask(task: Task, index?: number): string {
   const prefix = index !== undefined ? `${index + 1}. ` : '';
   const statusEmoji: Record<string, string> =
@@ -185,7 +203,7 @@ function formatTask(task: Task, index?: number): string {
   const hostStamp = task.writerHost ? ` ✍️${task.writerHost}` : '';
   const shortId = task.id.slice(0, 8);
   const prio = task.priority !== 'normal' ? `[${task.priority}]` : '';
-  const due = task.dueDate ? ` (due ${new Date(task.dueDate).toLocaleDateString('zh-TW')})` : '';
+  const due = task.dueDate ? ` (due ${formatDueDate(new Date(task.dueDate))})` : '';
   return `${prefix}${emoji} ${prio}${hostStamp} ${task.title}${due} (#${shortId})`;
 }
 
