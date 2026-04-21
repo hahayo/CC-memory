@@ -6,6 +6,7 @@ describe('deleteMemory', () => {
   const mockUpdate = vi.fn();
   const mockSet = vi.fn();
   const mockWhere = vi.fn();
+  const mockReturning = vi.fn();
 
   const mockDb = {
     update: mockUpdate,
@@ -15,7 +16,8 @@ describe('deleteMemory', () => {
     vi.clearAllMocks();
     mockUpdate.mockReturnValue({ set: mockSet });
     mockSet.mockReturnValue({ where: mockWhere });
-    mockWhere.mockResolvedValue(undefined);
+    mockWhere.mockReturnValue({ returning: mockReturning });
+    mockReturning.mockResolvedValue([{ id: 'test-uuid' }]);
   });
 
   it('should archive a memory (soft delete)', async () => {

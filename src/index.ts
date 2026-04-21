@@ -328,11 +328,13 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_memory_get',
-    description: '取得單一記憶詳情',
+    description: '取得單一記憶詳情。project_id 與 project_path 擇一必填（scope 保護，避免跨 project 讀取）。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
       properties: {
         id: { type: 'string', description: '記憶 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
       },
       required: ['id'],
@@ -352,11 +354,13 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_memory_delete',
-    description: '刪除指定的記憶（軟刪除，標記為 archived）',
+    description: '刪除指定的記憶（軟刪除，標記為 archived）。project_id 與 project_path 擇一必填（scope 保護，避免跨 project 意外刪除）。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
       properties: {
         id: { type: 'string', description: '記憶 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
       },
       required: ['id'],
@@ -612,8 +616,10 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_get': {
+        // 強制 project scope（codex review round 18 P2）：避免跨 project 讀取
+        const { projectId } = resolveCwdAndProjectId(args);
         const id = args.id as string;
-        const memory = await getMemory(database, id);
+        const memory = await getMemory(database, id, projectId);
         if (!memory) {
           throw new NotFoundError(`找不到記憶 (ID: ${id})`, { id });
         }
@@ -646,8 +652,13 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_delete': {
+        // 強制 project scope（codex review round 18 P1）：避免跨 project 意外刪除
+        const { projectId } = resolveCwdAndProjectId(args);
         const id = args.id as string;
-        await deleteMemory(database, id);
+        const deleted = await deleteMemory(database, id, projectId);
+        if (!deleted) {
+          throw new NotFoundError(`找不到記憶 (ID: ${id})`, { id });
+        }
         return { content: [{ type: 'text', text: `✓ 記憶已刪除 (ID: ${id})` }] };
       }
 

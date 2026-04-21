@@ -367,7 +367,7 @@ describe('services/memories.ts integration (real PG)', () => {
         summary: 'to be undone',
         idempotencyKey: key,
       });
-      const ok = await deleteByIdempotencyKey(db, key, 300);
+      const ok = await deleteByIdempotencyKey(db, projectId, key, 300);
       expect(ok).toBe(true);
 
       const rows = await sql<{ status: string }[]>`
@@ -377,23 +377,50 @@ describe('services/memories.ts integration (real PG)', () => {
     });
 
     it('non-existent key returns false', async () => {
-      const ok = await deleteByIdempotencyKey(db, `never-used-${randomUUID()}`, 300);
+      const ok = await deleteByIdempotencyKey(
+        db,
+        `${TRACK_M_PREFIX}-dk-miss`,
+        `never-used-${randomUUID()}`,
+        300
+      );
       expect(ok).toBe(false);
     });
 
     it('empty key throws InvalidArgumentError', async () => {
-      await expect(deleteByIdempotencyKey(db, '', 300)).rejects.toBeInstanceOf(
+      await expect(
+        deleteByIdempotencyKey(db, `${TRACK_M_PREFIX}-dk3`, '', 300)
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+    });
+
+    it('empty projectId throws InvalidArgumentError', async () => {
+      await expect(deleteByIdempotencyKey(db, '', 'some-key', 300)).rejects.toBeInstanceOf(
         InvalidArgumentError
       );
     });
 
     it('maxAgeSec <= 0 throws InvalidArgumentError', async () => {
-      await expect(deleteByIdempotencyKey(db, 'some-key', 0)).rejects.toBeInstanceOf(
-        InvalidArgumentError
-      );
-      await expect(deleteByIdempotencyKey(db, 'some-key', -1)).rejects.toBeInstanceOf(
-        InvalidArgumentError
-      );
+      await expect(
+        deleteByIdempotencyKey(db, `${TRACK_M_PREFIX}-dk4`, 'some-key', 0)
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+      await expect(
+        deleteByIdempotencyKey(db, `${TRACK_M_PREFIX}-dk4`, 'some-key', -1)
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+    });
+
+    // --------- Codex review round 18 P2：不跨 project 刪除 ---------
+    it('key matches but different project → 回 false（不刪跨 project row）', async () => {
+      const projA = `${TRACK_M_PREFIX}-dkxpA`;
+      const projB = `${TRACK_M_PREFIX}-dkxpB`;
+      const key = `shared-${randomUUID()}`;
+      await saveMemory(db, { projectId: projA, type: 'session', summary: 'in A', idempotencyKey: key });
+      // 嘗試用 projB 刪 projA 的 row
+      const ok = await deleteByIdempotencyKey(db, projB, key, 300);
+      expect(ok).toBe(false);
+      // projA 的 row 仍 active
+      const rows = await sql<{ status: string }[]>`
+        SELECT status FROM project_memories WHERE idempotency_key = ${key} AND project_id = ${projA}
+      `;
+      expect(rows[0].status).toBe('active');
     });
   });
 

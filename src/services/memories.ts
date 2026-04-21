@@ -467,18 +467,46 @@ export async function listMemories(
     .offset(offset)) as Memory[];
 }
 
-export async function getMemory(db: DbClient, id: string): Promise<Memory | null> {
+/**
+ * 取單一 memory。若 projectId 提供，須同時屬於該 project，否則回 null
+ * （不洩露跨 project 存在性，對齊 task scope guard — codex review round 18 P2）。
+ */
+export async function getMemory(
+  db: DbClient,
+  id: string,
+  projectId?: string
+): Promise<Memory | null> {
+  const conditions: SQL[] = [eq(projectMemories.id, id)];
+  if (projectId !== undefined) {
+    conditions.push(eq(projectMemories.projectId, projectId));
+  }
   const rows = (await db
     .select()
     .from(projectMemories)
-    .where(eq(projectMemories.id, id))
+    .where(conditions.length > 1 ? and(...conditions) : conditions[0])
     .limit(1)) as Memory[];
   return rows[0] ?? null;
 }
 
-export async function deleteMemory(db: DbClient, id: string): Promise<boolean> {
-  await db.update(projectMemories).set({ status: 'archived' }).where(eq(projectMemories.id, id));
-  return true;
+/**
+ * 軟刪除（status='archived'）。若 projectId 提供，只刪該 project 的 row；
+ * 找不到時回 false（跨 project delete 嘗試 = 找不到）。codex review round 18 P1。
+ */
+export async function deleteMemory(
+  db: DbClient,
+  id: string,
+  projectId?: string
+): Promise<boolean> {
+  const conditions: SQL[] = [eq(projectMemories.id, id)];
+  if (projectId !== undefined) {
+    conditions.push(eq(projectMemories.projectId, projectId));
+  }
+  const result = (await db
+    .update(projectMemories)
+    .set({ status: 'archived' })
+    .where(conditions.length > 1 ? and(...conditions) : conditions[0])
+    .returning({ id: projectMemories.id })) as Array<{ id: string }>;
+  return result.length > 0;
 }
 
 export async function getProjectStats(
@@ -548,11 +576,27 @@ export async function getProjectStats(
  *
  * 用途：Phase B Telegram /undo 指令，使用者想回退最近一次同 key 寫入。
  */
+/**
+ * 以 (projectId, idempotencyKey) 定位近期寫入的記憶並軟刪除。
+ *
+ * - 僅搜 status='active' 且 created_at > now() - maxAgeSec 秒，且必屬於指定 project。
+ * - 找到 → 軟刪除（status='archived'）並回 true。
+ * - 找不到（含過期或跨 project）→ 回 false。
+ * - key 為空 / maxAgeSec <= 0 / projectId 為空 → throw InvalidArgumentError。
+ *
+ * 用途：Phase B Telegram /undo 指令；必須知道 project 才能正確撤銷
+ * （codex review round 18 P2：partial unique index 現在 scope by
+ *  (project_id, idempotency_key)，沒帶 projectId 會撈到錯 project 的 row）。
+ */
 export async function deleteByIdempotencyKey(
   db: DbClient,
+  projectId: string,
   key: string,
   maxAgeSec: number
 ): Promise<boolean> {
+  if (!projectId || projectId.trim().length === 0) {
+    throw new InvalidArgumentError('deleteByIdempotencyKey: projectId must be non-empty');
+  }
   if (!key || key.trim().length === 0) {
     throw new InvalidArgumentError('deleteByIdempotencyKey: key must be non-empty');
   }
@@ -567,6 +611,7 @@ export async function deleteByIdempotencyKey(
     .from(projectMemories)
     .where(
       and(
+        eq(projectMemories.projectId, projectId),
         eq(projectMemories.idempotencyKey, key),
         eq(projectMemories.status, 'active'),
         sql`${projectMemories.createdAt} > ${cutoff}`

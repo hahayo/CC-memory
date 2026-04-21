@@ -226,12 +226,52 @@ describe('MCP handler (Stage 2)', () => {
 
   it('cc_memory_get 找不到 id → JSON error code=NOT_FOUND（非 INTERNAL）', async () => {
     const fakeId = randomUUID();
-    const res = await handleToolCall('cc_memory_get', { id: fakeId }, testDb);
+    const res = await handleToolCall('cc_memory_get', { id: fakeId, project_id: tp }, testDb);
     expect(res.isError).toBe(true);
     const parsed = JSON.parse((res.content[0] as { text: string }).text);
     expect(parsed.error).toBeDefined();
     expect(parsed.error.code).toBe('NOT_FOUND');
     expect(parsed.error.details).toEqual(expect.objectContaining({ id: fakeId }));
+  });
+
+  // --------- Codex review round 18 P1/P2：get/delete project scope ---------
+  it('cc_memory_get 跨 project 嘗試 → NOT_FOUND（不洩露存在性）', async () => {
+    const otherProj = `${tp}-other-get`;
+    const foreignId = randomUUID();
+    await sql`INSERT INTO project_memories (id, project_id, type, summary) VALUES (${foreignId}, ${otherProj}, 'session', 'secret')`;
+    try {
+      const res = await handleToolCall(
+        'cc_memory_get',
+        { id: foreignId, project_id: tp },
+        testDb
+      );
+      expect(res.isError).toBe(true);
+      const parsed = JSON.parse((res.content[0] as { text: string }).text);
+      expect(parsed.error.code).toBe('NOT_FOUND');
+    } finally {
+      await sql`DELETE FROM project_memories WHERE project_id = ${otherProj}`;
+    }
+  });
+
+  it('cc_memory_delete 跨 project 嘗試 → NOT_FOUND 且不刪除 foreign row', async () => {
+    const otherProj = `${tp}-other-del`;
+    const foreignId = randomUUID();
+    await sql`INSERT INTO project_memories (id, project_id, type, summary) VALUES (${foreignId}, ${otherProj}, 'session', 'survive')`;
+    try {
+      const res = await handleToolCall(
+        'cc_memory_delete',
+        { id: foreignId, project_id: tp },
+        testDb
+      );
+      expect(res.isError).toBe(true);
+      const parsed = JSON.parse((res.content[0] as { text: string }).text);
+      expect(parsed.error.code).toBe('NOT_FOUND');
+
+      const rows = await sql<{ status: string }[]>`SELECT status FROM project_memories WHERE id = ${foreignId}`;
+      expect(rows[0].status).toBe('active');
+    } finally {
+      await sql`DELETE FROM project_memories WHERE project_id = ${otherProj}`;
+    }
   });
 
   it('cc_task_create 重複 idempotency_key → JSON error code=IDEMPOTENCY_CONFLICT（非 INTERNAL）', async () => {
