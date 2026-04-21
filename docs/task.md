@@ -1,8 +1,15 @@
 # CC-memory v0.2 Task Breakdown
 
 > Spec 版本：**1.3** · 依 Phase 0-5 拆解 · Gate 未過不進下個 phase
+>
+> **Phase 劃分（2026-04-21 修訂）：**
+> - **Phase A — 本期交付**：Phase 0 ✅ + Phase 1 ✅ + Phase 2 + Phase 5-A
+> - **Phase B — 後續階段**：Phase 3 (HTTP) + Phase 4 (Telegram) + Phase 5-B
+> - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；Phase 5-A Gate 指定三區塊；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
 
 ---
+
+# Phase A — 本期交付（MCP only）
 
 ## Phase 0 — Schema Alignment ✅（已完成）
 
@@ -55,8 +62,9 @@
   - [ ] `updateTask(id, patch, { expectedStatus })` optimistic locking
   - [ ] 狀態轉移 table-driven 驗證（違反 throw `InvalidTransitionError`）
   - [ ] `resolveTaskByShortId(prefix, projectId)` 0/1/多筆回三態
-- [ ] `src/services/feedback.ts`：`recordFeedback`（驗 array 長度 + rank）
-- [ ] `src/services/botstate.ts`：`getBotUserState` / `setActiveProject`
+- [ ] `src/services/feedback.ts`：`recordSearchQuery`（Phase A MCP search 被動寫 row，9 欄：query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores；無 thumbs / selected_rank）
+- [ ] ~~`recordFeedback`（驗 array 長度 + rank，UPDATE thumbs / selected_rank）~~ → **延後到 Phase 5-B**（需 HTTP + Telegram inline button 回寫才有 signal）
+- [ ] ~~`src/services/botstate.ts`~~ → **延後到 Phase 3**（僅 HTTP bot route 使用，Phase A MCP 用不到）
 
 ### 2c MCP 改 call service
 
@@ -80,13 +88,38 @@
 - [ ] `npm test` 40+（新增）tests 全綠
 - [ ] MCP 6 memory tool + 3 task tool 從 Claude Code 測全通
 - [ ] DB 可查：`SELECT idempotency_key, writer_host FROM project_memories LIMIT 1`
+- [ ] **DB 層冪等**：raw `INSERT` 兩次同 idempotency_key → 第二次收 unique violation
+- [ ] **Service 層冪等**：`saveMemory` 第二次帶相同 idempotency_key → 不拋錯、回傳既有 row id（不新增 row）
 
 ---
 
-## Phase 3 — HTTP API（1.5d）
+## Phase 5-A — Retrieval Eval（Phase A，0.5d）
+
+- [ ] `src/services/feedback.ts`：`recordSearchQuery(input)` — 每次 MCP search 自動 call，寫入 query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores
+- [ ] `src/index.ts`：`cc_memory_search` handler 呼叫完 search 後 fire-and-forget `recordSearchQuery`
+- [ ] 選用：`ALTER TABLE search_feedback ADD CONSTRAINT search_feedback_arrays_same_length CHECK (...)`
+- [ ] `scripts/eval-retrieval.ts`：14 天 markdown 報告（Phase A 指標：每日查詢數 / mode 分佈 / 結果穩定度）
+  - [ ] 標註 Phase B 才能算的指標（接受率 / Top-1 / 撤銷率）為 "N/A（待 Phase B）"
+- [ ] 文件：`docs/retrieval-eval.md`
+- [ ] Codex MCP 驗證：`codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
+
+### Gate
+- [ ] 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到該 row
+- [ ] `scripts/eval-retrieval.ts` 能產出 markdown 報告，含「每日查詢數」「mode 分佈」「結果穩定度」三個區塊
+
+---
+
+# Phase B — 後續階段（HTTP + Telegram，可由其他 agent 承接）
+
+> 本期不實作，資料面支援（`idempotency_key`、`writer_host`、`bot_user_state` 表）在 Phase A 已就位。以下保留規劃但不排程。
+
+---
+
+## Phase 3 — HTTP API（Phase B，1.5d）
 
 ### 3a 基礎 + Auth
 
+- [ ] `src/services/botstate.ts`：`getBotUserState` / `setActiveProject`（從 Phase 2 延後來的）
 - [ ] 加 deps：`hono`, `@hono/node-server`
 - [ ] `src/http/index.ts`（Hono app entry）
 - [ ] `src/http/middleware/auth.ts`：
@@ -131,7 +164,7 @@
 
 ---
 
-## Phase 4 — Telegram Bot（1d）
+## Phase 4 — Telegram Bot（Phase B，1d）
 
 ### 4a 基礎
 
@@ -179,27 +212,35 @@
 
 ---
 
-## Phase 5 — Retrieval Eval（0.5-1d）
+## Phase 5-B — Feedback 回寫 + 部署文件（Phase B，0.5d）
 
-- [ ] `search_feedback` 寫入完整欄位（service 層驗長度 + rank）
-- [ ] 選用：`ALTER TABLE search_feedback ADD CONSTRAINT search_feedback_arrays_same_length CHECK (...)`
-- [ ] `POST /api/feedback` 實作
-- [ ] `scripts/eval-retrieval.ts`：14 天 markdown 報告
-  - [ ] 接受率 / 拒絕率 / Top-1 點擊率 / Mode 勝率 / 每日查詢數 / Write 撤銷率 / Bot silent error 率
-- [ ] 文件：`docs/http-api.md` / `docs/telegram-bot.md` / `docs/retrieval-eval.md` / `docs/zeabur-deploy.md`
-- [ ] Codex MCP 驗證：`codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
+- [ ] `POST /api/feedback` 實作（service 層驗長度 + rank；寫入時 UPDATE 對應 search_feedback row 的 selected_id / selected_rank / thumbs）
+- [ ] Telegram bot 搜尋後附 inline button [👍][👎][#1][#2][#3]，callback 打 `POST /api/feedback`
+- [ ] `scripts/eval-retrieval.ts`：補上 Phase B 指標計算（接受率 / 拒絕率 / Top-1 / Mode 勝率 / 撤銷率 / Bot silent error）
+- [ ] 文件：`docs/http-api.md` / `docs/telegram-bot.md` / `docs/zeabur-deploy.md`
 
 ### Gate
 - [ ] 端對端 demo：bot → HTTP → DB（跨電腦），每筆 row 都有 `writer_host`
+- [ ] Phase B 指標全部有 signal（接受率 / 撤銷率等不是 N/A）
 
 ---
 
-## 端對端驗收（跨 Phase）
+## 端對端驗收
 
-- [ ] A 電腦 Claude Code `cc_memory_save` → B 電腦 `cc_memory_list` 能看到，`writer_host` 顯示 A
-- [ ] Telegram `/todos` 能看到 A 剛建的 task
-- [ ] Telegram `/todo X` → A 電腦 `cc_task_list` 能看到，`writer_host` = `telegram-bot`
+### Phase A（本期必過）
+
+- [ ] A 電腦 Claude Code `cc_memory_save` → B 電腦 `cc_memory_list` 能看到，`writer_host` 顯示 A hostname
+- [ ] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
 - [ ] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
 - [ ] B 電腦 clone 到不同 path → 自動解析到相同 `project_id`（靠 repo_name）
+- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids / rank_positions / scores）
+- [ ] `scripts/eval-retrieval.ts` 能產出 markdown 報告（Phase A 指標）
+
+### Phase B（後續階段）
+
+- [ ] Telegram `/todos` 能看到 A 剛建的 task
+- [ ] Telegram `/todo X` → A 電腦 `cc_task_list` 能看到，`writer_host` = `telegram-bot`
 - [ ] Bot 設 `CC_MEMORY_WRITER=telegram-bot` → 寫入 row 的 `writer_host` 為 `telegram-bot`
 - [ ] 未設 active project 的 Telegram user 發 `/note` → 收 `SWITCH_REQUIRED` 提示
+- [ ] Telegram 10 秒內撤銷成功、超時 403、重複按 no-op
+- [ ] Phase B 指標（接受率 / Top-1 / 撤銷率）不再是 N/A

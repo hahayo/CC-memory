@@ -1,10 +1,30 @@
 # CC-memory v0.2 Implementation Plan
 
 > Spec 版本：**1.3** · 範圍：路線 A 最保守自建 · Phase 0+1 已完成
+>
+> **Phase 劃分（2026-04-21 修訂）：**
+> - **Phase A — MCP only（本期交付）**：Phase 0 ✅ + Phase 1 ✅ + Phase 2 + Phase 5-A
+> - **Phase B — HTTP + Telegram（後續階段 / 可由其他 agent 承接）**：Phase 3 + Phase 4 + Phase 5-B
+>
+> Phase A 優先保證：MCP 6 memory tool + 3 task tool 全綠、service layer 抽出、跨電腦 writer_host / repo_name 驗證、被動 retrieval 記錄。Phase B 資料面支援（`idempotency_key`、`bot_user_state` 表）在 Phase A 已就位，屆時不需改 schema。
+> - v1.3.1（2026-04-21）：plan.md 加 `## Dependencies` / `## Environment Variables`（從 Deployment 移出）/ `## Testing Strategy` / `## Risks & Open Questions`；`Phase A Groundwork` 區塊；Phase B 標題標記；`Phase 5` → `Phase 5-A`
+
+---
+
+## Phase A Groundwork（為 Phase B 預舖路）
+
+Phase A 雖然不實作 HTTP / bot，但以下 4 項資料面支援在 Phase A 完成，Phase B 開工時不需改 schema：
+
+- `idempotency_key text UNIQUE` on `project_memories`（支援 bot undo 冪等）
+- `writer_host text` on `project_memories` + `tasks`（支援跨電腦 / 跨介面寫入稽核）
+- `bot_user_state` 表 ✅（Phase 1 已上線；Phase A 不寫入，Phase B HTTP 才用）
+- `search_feedback` 表 ✅（Phase 1 已上線；Phase A MCP 被動寫入，Phase B 補 thumbs / selected_rank 回寫）
 
 ---
 
 ## Architecture（路徑定死）
+
+> 下圖為 Phase A + Phase B 完整目標架構；Phase A 本期只交付左下的 MCP stdio + `src/services/*`（不含 `botstate.ts`）。右側 HTTP + Bot 框標記 `[Phase B]` 的元件屬 Phase B。
 
 ```
            ┌──────────────────────────────────────────┐
@@ -19,28 +39,44 @@
                    │  src/services/      │  ← 核心業務邏輯
                    │  memories / tasks / │     所有 DB 存取的唯一通道
                    │  feedback / auth /  │
-                   │  projects / botstate│
+                   │  projects / botstate [Phase B]│
                    └──┬───────────────┬──┘
                       │               │
              ┌────────┘               └────────┐
              ▼                                 ▼
-      ┌─────────────┐                ┌──────────────────┐
-      │ MCP stdio   │                │ HTTP REST (Hono) │
-      │ (既有+task) │                │ 雙 token + bot   │
-      │             │                │  user header     │
-      └──────▲──────┘                └────────▲─────────┘
+      ┌─────────────┐                ┌──────────────────────────┐
+      │ MCP stdio   │                │ HTTP REST (Hono) [Phase B]│
+      │ (既有+task) │                │ 雙 token + bot            │
+      │             │                │  user header              │
+      └──────▲──────┘                └────────▲─────────────────┘
              │                                │
              │                                │  只走 HTTP，**完全**不直連 DB
-     ┌───────┴────────┐                ┌──────┴──────┐
-     │ Claude Code +  │                │ Telegram    │
-     │ Codex CLI      │                │ bot         │
-     └────────────────┘                └─────────────┘
+     ┌───────┴────────┐                ┌──────┴──────────────┐
+     │ Claude Code +  │                │ Telegram bot [Phase B]│
+     │ Codex CLI      │                │                      │
+     └────────────────┘                └──────────────────────┘
 ```
 
-**強制規則**
+**強制規則（Phase B 開工時起強制執行；Phase A 本期先不存在 src/bot/ 目錄故不適用）**
 - bot 的 `package.json` / tsconfig path 與 main src/ 分離
 - `src/bot/**` 禁止 import `src/services/**` 或 `src/db/**`（CI grep gate）
 - `bot_user_state` 讀寫一律走 `/api/bot/state/:telegram_user_id` HTTP endpoint
+
+---
+
+## Dependencies
+
+| 套件 | 用途 | 階段 |
+|---|---|---|
+| `drizzle-orm` / `drizzle-kit` | ORM + migration 唯一真相 | Phase A |
+| `@modelcontextprotocol/sdk` | MCP stdio server | Phase A |
+| `pgvector` (PG extension) | 向量欄位 + HNSW index | Phase A |
+| `@google/genai` | Gemini embedding（既有） | Phase A |
+| `vitest` / `@types/node` | 測試與型別 | Phase A |
+| `hono` / `@hono/node-server` | HTTP REST framework | Phase B |
+| `telegraf` | Telegram bot client | Phase B |
+
+Phase A 不加 `hono` / `telegraf`。Phase B 開工時一次補。
 
 ---
 
@@ -87,9 +123,9 @@ ALTER TABLE tasks ADD COLUMN writer_host text;
 `expectedStatus`；SQL `UPDATE ... WHERE id = ? AND status = ?`，affected=0 時
 throw `StaleTaskError`（409）。
 
-### `search_feedback`（Phase 1 已上線，Phase 5 補 CHECK）
+### `search_feedback`（Phase 1 已上線，Phase 5-A 補 CHECK）
 
-Phase 5 選用增強（MVP 可跳過，若時間允許）：
+Phase 5-A 選用增強（MVP 可跳過，若時間允許）：
 
 ```sql
 ALTER TABLE search_feedback
@@ -198,6 +234,53 @@ export function resolveWriterHost(): string {
 
 ---
 
+## Environment Variables
+
+### 通用（Phase A 起需要）
+
+| Env | 用途 | 必要性 |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL 連線（Zeabur） | 必填 |
+| `GEMINI_API_KEY` | Gemini embedding API | 必填 |
+| `CC_MEMORY_PROJECT_ID` | 明示覆蓋 project_id | 可選 override |
+| `CC_MEMORY_WRITER` | writer_host 來源；預設 `os.hostname()` | 可選 |
+
+### Phase B — HTTP API service
+
+| Env | 用途 |
+|---|---|
+| `BOT_API_TOKEN` | Bot scope token（32+ 字元隨機） |
+| `ADMIN_API_TOKEN` | Admin scope token（32+ 字元隨機） |
+| `PORT` | HTTP listen port（預設 3000） |
+
+### Phase B — Telegram bot service
+
+| Env | 用途 |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | BotFather token |
+| `TELEGRAM_ALLOWED_USER_IDS` | 白名單，逗號分隔 user id |
+| `API_URL` | 指向 HTTP service（例 `https://cc-memory-api.zeabur.app`） |
+| `API_TOKEN` | 等同 `BOT_API_TOKEN` |
+| `CC_MEMORY_WRITER` | 建議設 `telegram-bot` 方便辨識 |
+| `UNDO_WINDOW_SEC` | Undo 時效（秒），預設 10 |
+
+---
+
+## Testing Strategy
+
+| 層級 | 工具 | 範圍 | 執行時機 |
+|---|---|---|---|
+| Unit | vitest | `services/*` 純邏輯、`utils/*` | 每次 `npm test` |
+| Integration | vitest + Docker test PG | Drizzle schema / idempotency unique / service 串 DB | 每次 `npm test` |
+| Regression | 既有 9 個測試檔 | MCP 向後相容 | 每次 `npm test` |
+| E2E | curl / Telegram 手動 | Phase B 才啟用，HTTP + bot 串接 | Phase B Gate |
+
+**Red-Green-Refactor**：Phase 2a schema 補完必須先紅（測試先失敗）再綠。其他 service layer 測試跟隨 TDD。
+
+**Test PG**：使用 `docker-compose.test.yml` 起本地 PG；CI 走 GitHub Actions service container。
+
+---
+
 ## Service Layer（Signatures）
 
 ### `src/services/memories.ts`
@@ -252,7 +335,11 @@ export async function setActiveProject(telegramUserId: bigint, projectId: string
 ### `src/services/feedback.ts`
 
 ```ts
+// [Phase A] MCP cc_memory_search 呼叫完自動 fire-and-forget；寫入 9 欄完整 row（無 thumbs / selected_rank）
+export async function recordSearchQuery(input: SearchQueryInput): Promise<void>;
+// [Phase B] Telegram inline button / HTTP /api/feedback 回寫；UPDATE 對應 row 的 thumbs + selected_rank
 export async function recordFeedback(input: FeedbackInput): Promise<void>;  // 驗長度 + rank
+// [Phase A 啟用；Phase B 擴充指標] 離線 eval-retrieval.ts 統計
 export async function getRetrievalStats(sinceDays: number): Promise<RetrievalStats>;
 ```
 
@@ -265,7 +352,7 @@ export async function getRetrievalStats(sinceDays: number): Promise<RetrievalSta
 
 ---
 
-## HTTP REST API
+## HTTP REST API（Phase B）
 
 ### 技術選型
 
@@ -326,7 +413,7 @@ Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立
 
 ---
 
-## Telegram Bot
+## Telegram Bot（Phase B）
 
 ### Commands
 
@@ -371,7 +458,7 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 
 ---
 
-## Deployment
+## Deployment（Phase B）
 
 ### Zeabur 服務拓撲
 
@@ -399,31 +486,6 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 
 `tsconfig.bot.json` 的 `include` 只含 `src/bot/**`，強制與 main 隔離。
 
-### 環境變數
-
-```env
-# 既有
-DATABASE_URL=postgresql://...
-GEMINI_API_KEY=...
-
-# 新增（通用）
-CC_MEMORY_PROJECT_ID=         # 可選 override
-CC_MEMORY_WRITER=             # 可選，預設 os.hostname()
-
-# 新增（API 用）
-BOT_API_TOKEN=<32+ 字元隨機>
-ADMIN_API_TOKEN=<32+ 字元隨機>
-PORT=3000
-
-# 新增（Bot 用）
-TELEGRAM_BOT_TOKEN=<BotFather>
-TELEGRAM_ALLOWED_USER_IDS=123,456
-API_URL=https://cc-memory-api.zeabur.app
-API_TOKEN=<= BOT_API_TOKEN>
-CC_MEMORY_WRITER=telegram-bot   # bot 辨識
-UNDO_WINDOW_SEC=10
-```
-
 ### 多電腦使用
 
 每台電腦 MCP server 本地跑，連雲端 PG；Telegram bot 單一部署在 Zeabur；
@@ -435,42 +497,42 @@ Codex CLI：`codex mcp add cc-memory -- node /path/to/build/index.js`。
 
 ## Files to Create / Modify（v1.3 更新）
 
-### 新建
+### 新建（標記 Phase）
 
 ```
 src/services/
-  memories.ts          # 搬自 src/tools/*.ts
-  tasks.ts             # 新（含狀態轉移 + optimistic lock + short-id 解析）
-  projects.ts          # 新（5 層優先序解析）
-  feedback.ts          # 新（含 array 長度與 rank 驗證）
-  botstate.ts          # 新（bot_user_state 唯一通道，HTTP 用）
+  memories.ts          # Phase A  搬自 src/tools/*.ts
+  tasks.ts             # Phase A  含狀態轉移 + optimistic lock + short-id 解析
+  projects.ts          # Phase A  5 層優先序解析
+  feedback.ts          # Phase A  含 `recordSearchQuery`（MCP search 被動寫 9 欄 row）+ `getRetrievalStats`；`recordFeedback`（驗 array 長度 + rank）延到 Phase 5-B
+  botstate.ts          # Phase B  bot_user_state 唯一通道，僅 HTTP route 使用
 
-src/http/
+src/http/              # Phase B
   index.ts             # Hono app
   routes/{memories,tasks,projects,feedback,health,botstate}.ts
   middleware/{auth,logger,error}.ts
 
-src/bot/
+src/bot/               # Phase B
   index.ts             # telegraf entry（tsconfig.bot.json 限制 import）
   client.ts            # fetch wrapper，帶 X-Telegram-User-Id header
   handlers/{switch,search,note,todo,todos,projects,start,done,cancel}.ts
   undo.ts              # idempotency key 管理
 
 src/utils/
-  repo-name.ts         # git remote 抽 repo name（execFileSync，無 shell）
-  writer-host.ts       # env 或 os.hostname()
+  repo-name.ts         # Phase A  git remote 抽 repo name（execFileSync，無 shell）
+  writer-host.ts       # Phase A  env 或 os.hostname()
 
 sql/migrations/
-  0002_add_idempotency_and_writer.sql  # ALTER project_memories + tasks
+  0002_add_idempotency_and_writer.sql  # Phase A  ALTER project_memories + tasks
 
 scripts/
-  eval-retrieval.ts    # 2 週評估腳本
+  eval-retrieval.ts    # Phase A  評估腳本；Phase A 僅跑查詢數 / mode 分佈 / 結果穩定度；Phase B 補 thumbs / selected_rank / 撤銷率
 
 docs/
-  http-api.md          # 正式 API 規格
-  telegram-bot.md
-  retrieval-eval.md
-  zeabur-deploy.md
+  retrieval-eval.md    # Phase A
+  http-api.md          # Phase B  正式 API 規格
+  telegram-bot.md      # Phase B
+  zeabur-deploy.md     # Phase B
 ```
 
 ### 修改
@@ -510,18 +572,45 @@ docs/TODO.md                # v0.2 工作項目
 
 ---
 
-## Rollout Order（v1.3 修訂）
+## Rollout Order（2026-04-21 修訂）
+
+### Phase A — 本期交付（MCP only）
 
 | Phase | 交付 | Gate |
 |---|---|---|
 | **0** ✅ | Schema alignment | 完成 |
 | **1** ✅ | `tasks` / `search_feedback` / `bot_user_state` + TDD | 完成 |
 | **2** | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
+| **5-A** | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
+
+### Phase B — 後續階段（HTTP + Telegram，可由其他 agent 承接）
+
+| Phase | 交付 | Gate |
+|---|---|---|
 | **3** | HTTP API（含 `/api/bot/state`）+ X-Telegram-User-Id middleware + 雙 token + Zeabur deploy | curl 全 endpoint 通；bot token 對 admin 收 403；bot scope 無 user header 收 401 |
 | **4** | Telegram bot（走 HTTP only）+ undo + short-id collision | 跨電腦寫讀通；bot CI grep gate 無違規 |
-| **5** | `search_feedback` 完整 + retrieval eval 腳本骨架 | 10 秒內撤銷成功；端對端 demo |
+| **5-B** | `POST /api/feedback` + Telegram inline button 回寫 thumbs / selected_rank + `docs/http-api.md` / `docs/telegram-bot.md` / `docs/zeabur-deploy.md` | 10 秒內撤銷成功；Phase B 指標（接受率 / Top-1 / 撤銷率）可量測 |
 
-**Gate 未過不進下個 phase**。
+**Gate 未過不進下個 phase**。Phase A 所有 Gate 通過後才視 Phase B 需求啟動。
+
+---
+
+## Risks & Open Questions
+
+### 已知風險
+
+| 風險 | 影響 | 緩解 |
+|---|---|---|
+| `pgvector` HNSW index rebuild 卡住 | Phase 2 migration 可能在大表上長時間 lock | idempotency_key 為 partial unique index（WHERE IS NOT NULL）；現有資料 idempotency_key 全 NULL → rebuild 零代價 |
+| `writer_host` 在容器環境值不穩 | Zeabur container hostname 可能變動 | 明確用 `CC_MEMORY_WRITER` env 覆蓋（API service 設 `cc-memory-api`，bot 設 `telegram-bot`） |
+| idempotency retention 政策未定 | key UNIQUE 永久存留可能與未來 compaction 衝突 | v0.3 再定；MVP 不做 GC |
+| Service layer 抽出破向後相容 | MCP client 若語意漂移會破舊行為 | 既有 6 個 memory tool 輸入輸出格式鎖死；regression 測試覆蓋 |
+
+### Open Questions（待答）
+
+- HTTP rate limit：Phase B 上線時每個 scope 的 RPS 限制值（目前 MVP 單人使用不限）
+- Retrieval eval 觀察期：Phase A 啟用被動記錄後是否 14 天夠看 signal，或延到 28 天
+- `bot_user_state` 生命週期：telegram 使用者停用後該 row 是否歸檔（Phase B 討論）
 
 ---
 
