@@ -233,6 +233,31 @@ describe('MCP handler (Stage 2)', () => {
     );
   });
 
+  // --------- Codex review round 3 finding #1：fail-fast if no project selector ---------
+  it('cc_memory_list 無 project_id 也無 project_path → JSON error INVALID_ARGUMENT（不 fallback process.cwd()）', async () => {
+    const res = await handleToolCall('cc_memory_list', {}, testDb);
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/project_id 或 project_path/);
+  });
+
+  it('cc_task_create 無 project selector → JSON error INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall('cc_task_create', { title: 'orphan' }, testDb);
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_memory_search 仍允許無 project selector（= 跨專案搜尋，特例）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: 'any', mode: 'keyword' },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
   it('未知 tool → JSON error code=INVALID_ARGUMENT（非 INTERNAL）', async () => {
     const res = await handleToolCall('cc_nonexistent_tool_v2', {}, testDb);
     expect(res.isError).toBe(true);

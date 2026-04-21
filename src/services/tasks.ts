@@ -244,7 +244,9 @@ export async function resolveTaskByShortId(
   // 注意：prefix 來自呼叫端；% / _ 在 LIKE 裡有特殊意義，
   // 但 uuid 的合法字元只有 0-9 a-f -，不會包含 %/_，因此可直接拼。
   // 仍保守：顯式過濾非 uuid 字元以防 caller 傳奇怪值。
-  const sanitized = prefix.replace(/[^0-9a-fA-F-]/g, '');
+  // postgres uuid::text 一律輸出小寫，LIKE 大小寫敏感 → sanitize 後 toLowerCase()
+  // 避免 caller 複製大寫 UUID prefix 時 false NOT_FOUND（codex review round 3 P2）。
+  const sanitized = prefix.replace(/[^0-9a-fA-F-]/g, '').toLowerCase();
   if (sanitized.length < SHORT_ID_MIN_LENGTH) {
     // 真正送到 DB 的 prefix 被 sanitize 後太短 → 當 NOT_FOUND
     // （等同 uuid 不可能匹配）

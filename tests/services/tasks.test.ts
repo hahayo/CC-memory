@@ -452,6 +452,22 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
       const result = await resolveTaskByShortId(db, prefix, projB);
       expect(result.kind).toBe('NOT_FOUND');
     });
+
+    // --------- Codex review round 3 finding #2：uppercase prefix ---------
+    it('uppercase hex prefix matches lowercase uuid via toLowerCase sanitize', async () => {
+      const proj = testPrefix + '-upper';
+      const t = await createTask(db, { projectId: proj, title: 'case-test' });
+      const lowerPrefix = t.id.slice(0, 8);
+      const upperPrefix = lowerPrefix.toUpperCase();
+      // uuid 是隨機的，若恰好全是 digits 就略過（toUpperCase 無差異）
+      if (upperPrefix === lowerPrefix) return;
+
+      const result = await resolveTaskByShortId(db, upperPrefix, proj);
+      expect(result.kind).toBe('FOUND');
+      if (result.kind === 'FOUND') {
+        expect(result.task.id).toBe(t.id);
+      }
+    });
   });
 
   // --------- Codex review round 2 finding：createTask + updateTask completed_at ----------

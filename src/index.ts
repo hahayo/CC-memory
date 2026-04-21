@@ -46,9 +46,23 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   projectId: string;
 } {
   const rawPath = args?.project_path;
-  const cwd = typeof rawPath === 'string' && rawPath.length > 0 ? rawPath : process.cwd();
   const rawId = args?.project_id;
-  const explicit = typeof rawId === 'string' && rawId.length > 0 ? rawId : null;
+  const hasPath = typeof rawPath === 'string' && rawPath.length > 0;
+  const hasId = typeof rawId === 'string' && rawId.length > 0;
+
+  // MCP stdio server 的 process.cwd() 是 server 啟動目錄，不是 client 端的專案目錄。
+  // 任一 tool 若 caller 不傳 project_id 也不傳 project_path，fail-fast 不 fallback；
+  // 不然舊 client 會默默寫錯 project（codex review round 3 P1）。
+  // `cc_memory_search` 可以兩者都無（= 跨專案搜尋），所以那個分支在自己的 case 裡處理。
+  if (!hasPath && !hasId) {
+    throw new InvalidArgumentError(
+      '需提供 project_id 或 project_path（MCP server 的 process.cwd() 非 client cwd，無法可靠解析 project）',
+      { hint: 'skills/{save,load}-memory.md 已示範：tool call 時傳 project_path 為當前工作目錄絕對路徑' }
+    );
+  }
+
+  const cwd = hasPath ? (rawPath as string) : process.cwd();
+  const explicit = hasId ? (rawId as string) : null;
   const projectId = resolveProjectId({ explicit, cwd });
   return { cwd, projectId };
 }
