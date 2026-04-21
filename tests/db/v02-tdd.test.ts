@@ -5,40 +5,55 @@
 //   RED 階段 — schema.ts 只有 projectMemories，三張新表不存在，所有斷言失敗
 //   GREEN 階段 — 加入 tasks / search_feedback / bot_user_state 後全通過
 //
-// 執行：
-//   docker run -d --name cc-memory-test-pg -p 5433:5432 \
-//     -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
-//     -e POSTGRES_DB=cc_memory_test postgres:16
+// 執行（本機）：
+//   docker compose -f docker-compose.test.yml up -d
 //   npx drizzle-kit push --config drizzle.test.config.ts
 //   npx vitest run tests/db/v02-tdd.test.ts
+//
+// 執行（CI / 自訂 PG）：
+//   export TEST_DATABASE_URL=postgres://user:pass@host:port/db
+//   npx vitest run tests/db/v02-tdd.test.ts
+//
+// 設計：test PG 不可用時 **fail-loud**，不 silent skip。
+// 原因：這組 integration tests 是 Phase 1 schema contract 的守門員；
+//       skip 會讓 schema 退化（CHECK / UNIQUE / length constraint）看起來「測試全綠」。
 
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 
-// TEST_DATABASE_URL 優先；無則落回 docker 預設 port。若連線失敗，suite 自動 skip。
 const TEST_DB_URL = process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test';
 
-let testDbAlive = false;
-try {
-  const probe = postgres(TEST_DB_URL, { max: 1, idle_timeout: 2, connect_timeout: 2 });
-  await probe`SELECT 1`;
-  await probe.end();
-  testDbAlive = true;
-} catch {
-  testDbAlive = false;
-}
-
-const describeFn = testDbAlive ? describe : describe.skip;
-
-describeFn('v0.2 schema TDD (docker test DB)', () => {
+describe('v0.2 schema TDD (docker test DB)', () => {
   let sql: ReturnType<typeof postgres>;
   const createdTaskIds: string[] = [];
   const createdFeedbackIds: string[] = [];
   const createdBotUserIds: bigint[] = [];
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    // Fail-loud probe：無法連上 test PG 就丟明確指示，不要 silent skip。
+    try {
+      const probe = postgres(TEST_DB_URL, { max: 1, idle_timeout: 2, connect_timeout: 2 });
+      await probe`SELECT 1`;
+      await probe.end();
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `\nTest PostgreSQL is not reachable at ${TEST_DB_URL}.\n` +
+        `這組 integration tests 守護 Phase 1 schema contract（tasks / search_feedback / bot_user_state），不可 silent skip。\n\n` +
+        `啟動本機 test DB：\n` +
+        `  docker compose -f docker-compose.test.yml up -d\n` +
+        `  npx drizzle-kit push --config drizzle.test.config.ts\n\n` +
+        `或指定現有 test PG（例如 CI）：\n` +
+        `  export TEST_DATABASE_URL=postgres://user:pass@host:port/db\n\n` +
+        `原始錯誤：${cause}`
+      );
+    }
     sql = postgres(TEST_DB_URL, { max: 1 });
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
   });
 
   afterEach(async () => {

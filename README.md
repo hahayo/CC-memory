@@ -134,15 +134,36 @@ cc_memory_search / cc_memory_list
 # 開發模式
 npm run dev
 
-# 測試
-npm test
-
 # 建置
 npm run build
 
 # Drizzle Studio
 npx drizzle-kit studio
 ```
+
+### 測試
+
+Integration tests（`tests/db/v02-tdd.test.ts`）要真 PostgreSQL + pgvector 才能跑，不 silent skip。本機第一次跑測試前：
+
+```bash
+# 啟動本機 test PG（pgvector/pg16，port 5433）
+docker compose -f docker-compose.test.yml up -d
+
+# 推 schema 進 test DB
+npx drizzle-kit push --config drizzle.test.config.ts
+
+# 跑測試
+npm test
+```
+
+CI 或用現成 test PG 時，設 `TEST_DATABASE_URL` 跳過本機 docker：
+
+```bash
+export TEST_DATABASE_URL=postgres://user:pass@host:port/db
+npm test
+```
+
+若 test PG 不可用，測試會 **fail-loud** 並印出上面的指令作為提示。Embedding 相關測試不依賴 `GEMINI_API_KEY`（用 `vi.mock` 隔離，不會打真 Gemini API）。
 
 ## License
 

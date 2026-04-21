@@ -1,6 +1,17 @@
 // tests/tools/search.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// 隔離 embedding 模組，避免測試打真 Gemini API（不依賴 GEMINI_API_KEY 環境變數）
+// isEmbeddingEnabled=false 強制走 keyword 路徑，跟既有測試的 mockDb 鏈對齊
+vi.mock('../../src/utils/embedding.js', () => ({
+  isEmbeddingEnabled: vi.fn(() => false),
+  generateEmbedding: vi.fn(async () => null),
+  generateQueryEmbedding: vi.fn(async () => null),
+  composeEmbeddingText: vi.fn((summary: string) => summary),
+}));
+
 import { searchMemories, SearchInput } from '../../src/tools/search.js';
+import * as embedding from '../../src/utils/embedding.js';
 
 describe('searchMemories', () => {
   const mockSelect = vi.fn();
@@ -116,5 +127,12 @@ describe('searchMemories', () => {
       r.keywords?.some(k => k.toLowerCase().includes('drizzle'))
     );
     expect(drizzleResults.length).toBeGreaterThan(0);
+  });
+
+  // Guard：確保 embedding 模組被 vi.mock 攔截，避免未來有人移掉 mock 後測試回到打真 API
+  it('must not call real Gemini API (embedding module is mocked)', () => {
+    expect(vi.isMockFunction(embedding.generateQueryEmbedding)).toBe(true);
+    expect(vi.isMockFunction(embedding.generateEmbedding)).toBe(true);
+    expect(embedding.isEmbeddingEnabled()).toBe(false);
   });
 });
