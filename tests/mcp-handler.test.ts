@@ -317,6 +317,42 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_ARGUMENT');
   });
 
+  // --------- Codex review round 13：empty-string due_date + whitespace search project_id ---------
+  it('cc_task_create due_date: "" → INVALID_ARGUMENT（不靜默變 undefined）', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'x', due_date: '' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_task_update due_date: "   " → INVALID_ARGUMENT', async () => {
+    const id = randomUUID();
+    await sql`INSERT INTO tasks (id, project_id, title, status) VALUES (${id}, ${tp}, 'x', 'open')`;
+    const res = await handleToolCall(
+      'cc_task_update',
+      { id, project_id: tp, expected_status: 'open', due_date: '   ' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_memory_search project_id 全空白 → INVALID_ARGUMENT（不污染 search_feedback）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: 'x', project_id: '   ', mode: 'keyword' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
   // --------- Codex review round 12：whitespace project_id + due_date format ---------
   it('whitespace-only project_id → JSON error INVALID_ARGUMENT（不 fallback）', async () => {
     const res = await handleToolCall(

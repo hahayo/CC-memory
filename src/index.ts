@@ -107,7 +107,14 @@ function parseDueDate(raw: unknown): Date | null | undefined {
   if (typeof raw !== 'string') {
     throw new InvalidArgumentError('due_date 必須是 ISO 8601 字串或 null', { due_date: raw });
   }
-  if (raw.length === 0) return undefined;
+  // 空字串 / whitespace-only → 拒，不靜默 drop（codex review round 13 P2）。
+  // 契約：null = 清空；undefined / 省略 = 不動；ISO 字串 = 設值；空字串 = bad input。
+  if (raw.trim().length === 0) {
+    throw new InvalidArgumentError(
+      'due_date 若提供須為 ISO 8601 字串；若要清空請傳 null',
+      { due_date: raw }
+    );
+  }
   if (!ISO_8601_REGEX.test(raw)) {
     throw new InvalidArgumentError(
       `due_date 不是有效的 ISO 8601 字串: ${raw}`,
@@ -492,15 +499,15 @@ export async function handleToolCall(
         //   - 只傳 project_path → 驗絕對路徑後解析 id
         //   - 兩者都沒 → projectId undefined（全專案搜尋，
         //     search_feedback.query_project_id = NULL）
-        if (typeof args.project_id === 'string' && args.project_id.length === 0) {
+        if (typeof args.project_id === 'string' && args.project_id.trim().length === 0) {
           throw new InvalidArgumentError(
-            'project_id 若提供不可為空字串（若要全專案搜尋請省略此欄位）',
+            'project_id 若提供不可為空字串 / 空白（若要全專案搜尋請省略此欄位）',
             { project_id: args.project_id }
           );
         }
         const explicitId =
-          typeof args.project_id === 'string' && args.project_id.length > 0
-            ? (args.project_id as string)
+          typeof args.project_id === 'string' && args.project_id.trim().length > 0
+            ? (args.project_id.trim() as string)
             : null;
         const rawPath =
           typeof args.project_path === 'string' && args.project_path.length > 0
