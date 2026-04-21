@@ -162,13 +162,14 @@ const projectPathProp = {
 const tools: Tool[] = [
   {
     name: 'cc_memory_save',
-    description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。',
+    description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。project_id 與 project_path 擇一必填。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
       properties: {
         project_id: {
           type: 'string',
-          description: '專案 ID（可選，優先序最高；未提供時用 project_path 5 層解析）',
+          description: '專案 ID（與 project_path 擇一必填，優先序最高）',
         },
         project_path: projectPathProp,
         type: {
@@ -219,11 +220,12 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_memory_list',
-    description: '列出專案的所有記憶',
+    description: '列出專案的所有記憶。project_id 與 project_path 擇一必填。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
       properties: {
-        project_id: { type: 'string', description: '專案 ID（可選）' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
         type: {
           type: 'string',
@@ -249,11 +251,12 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_memory_stats',
-    description: '取得專案的記憶統計資訊',
+    description: '取得專案的記憶統計資訊。project_id 與 project_path 擇一必填。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
       properties: {
-        project_id: { type: 'string', description: '專案 ID（可選）' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
       },
     },
@@ -274,13 +277,14 @@ const tools: Tool[] = [
   // ---------- Task tools（v0.3 Phase A 新增） ----------
   {
     name: 'cc_task_create',
-    description: '建立新任務',
+    description: '建立新任務。project_id 與 project_path 擇一必填；title 1-500 字。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
       properties: {
-        project_id: { type: 'string', description: '專案 ID（可選）' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
-        title: { type: 'string', description: '任務標題（1-500 字）' },
+        title: { type: 'string', minLength: 1, maxLength: 500, description: '任務標題（1-500 字）' },
         description: { type: 'string', description: '任務詳細說明（可選）' },
         status: {
           type: 'string',
@@ -309,11 +313,12 @@ const tools: Tool[] = [
   },
   {
     name: 'cc_task_list',
-    description: '列出專案任務',
+    description: '列出專案任務。project_id 與 project_path 擇一必填。',
     inputSchema: {
       type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
       properties: {
-        project_id: { type: 'string', description: '專案 ID（可選）' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
         project_path: projectPathProp,
         status: {
           anyOf: [
@@ -333,9 +338,12 @@ const tools: Tool[] = [
   {
     name: 'cc_task_update',
     description:
-      '更新任務（帶 optimistic locking）。必須提供 project_id / project_path（任一）+ expected_status；違反狀態轉移或同時寫入會收到 CONFLICT / INVALID_TRANSITION。',
+      '更新任務（帶 optimistic locking）。必須提供 project_id / project_path（任一）+ expected_status；違反狀態轉移或同時寫入會收到 CONFLICT / INVALID_TRANSITION。title 若提供須 1-500 字。',
     inputSchema: {
       type: 'object',
+      allOf: [
+        { anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }] },
+      ],
       properties: {
         id: { type: 'string', description: '任務 ID' },
         project_id: {
@@ -348,7 +356,7 @@ const tools: Tool[] = [
           enum: ['open', 'in_progress', 'done', 'cancelled'],
           description: 'optimistic locking 用：client 以為的當前 status；不符即 CONFLICT',
         },
-        title: { type: 'string' },
+        title: { type: 'string', minLength: 1, maxLength: 500 },
         description: { type: 'string' },
         status: {
           type: 'string',

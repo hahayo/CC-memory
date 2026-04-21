@@ -66,7 +66,26 @@ function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
 // createTask
 // ---------------------------------------------------------------------------
 
+const TITLE_MIN_LENGTH = 1;
+const TITLE_MAX_LENGTH = 500;
+
+function validateTitle(title: string): void {
+  // DB CHECK 最終防線；service 層先擋避免 INTERNAL 變成 protocol error
+  if (typeof title !== 'string' || title.length < TITLE_MIN_LENGTH) {
+    throw new InvalidArgumentError(`task title 不可空（至少 ${TITLE_MIN_LENGTH} 字）`, {
+      titleLength: typeof title === 'string' ? title.length : 'not-string',
+    });
+  }
+  if (title.length > TITLE_MAX_LENGTH) {
+    throw new InvalidArgumentError(
+      `task title 超過長度上限（${TITLE_MAX_LENGTH} 字）`,
+      { titleLength: title.length, max: TITLE_MAX_LENGTH }
+    );
+  }
+}
+
 export async function createTask(db: DbClient, input: CreateTaskInput): Promise<Task> {
+  validateTitle(input.title);
   const writerHost = input.writerHost ?? resolveWriterHost();
 
   const status = input.status ?? 'open';
@@ -177,6 +196,11 @@ export async function updateTask(
       current: currentStatus,
       expected: options.expectedStatus,
     });
+  }
+
+  // Step 2.5：patch 欄位 pre-validation（title 長度）
+  if (patch.title !== undefined) {
+    validateTitle(patch.title);
   }
 
   // Step 3：狀態矩陣檢查（若 patch 有 status 變更）

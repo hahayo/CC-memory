@@ -470,6 +470,42 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 8 finding #2：title length pre-validation ---------
+  describe('title length validation (service layer pre-check)', () => {
+    it('createTask 空 title → InvalidArgumentError（不落到 DB CHECK）', async () => {
+      await expect(
+        createTask(db, { projectId: testPrefix + '-tlen', title: '' })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('createTask title > 500 字 → InvalidArgumentError', async () => {
+      const tooLong = 'x'.repeat(501);
+      await expect(
+        createTask(db, { projectId: testPrefix + '-tlen', title: tooLong })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('createTask title = 500 字 → 成功', async () => {
+      const maxTitle = 'x'.repeat(500);
+      const t = await createTask(db, { projectId: testPrefix + '-tlen', title: maxTitle });
+      expect(t.title).toBe(maxTitle);
+    });
+
+    it('updateTask patch.title 超長 → InvalidArgumentError（不落到 DB）', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-tlen2', title: 'ok' });
+      await expect(
+        updateTask(db, t.id, { title: 'x'.repeat(501) }, { expectedStatus: 'open' })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('updateTask patch.title 空字串 → InvalidArgumentError', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-tlen3', title: 'ok' });
+      await expect(
+        updateTask(db, t.id, { title: '' }, { expectedStatus: 'open' })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+  });
+
   // --------- Codex review round 5 finding #1：updateTask projectId scope ---------
   describe('updateTask project scope guard', () => {
     it('projectId mismatch → NotFoundError（不洩露存在性）', async () => {
