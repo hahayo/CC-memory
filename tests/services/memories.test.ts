@@ -549,6 +549,44 @@ describe('searchMemories envelope shape (unit)', () => {
     expect(vi.isMockFunction(embedding.generateQueryEmbedding)).toBe(true);
   });
 
+  // --------- Codex review round 14 P2：hybrid scores 必為 null ---------
+  it('hybrid mode scores 必為 null（不混 RRF weights 進 search_feedback.scores）', async () => {
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+    // mock generateQueryEmbedding 回真 vector 讓 hybrid 真走到 RRF
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(
+      new Array(1536).fill(0.1)
+    );
+
+    const env = await searchMemories(mockDb as never, {
+      query: 'drizzle',
+      mode: 'hybrid',
+      projectId: 'my-project',
+    });
+
+    expect(env.effectiveMode).toBe('hybrid');
+    expect(env.rankingMeta.scores).toBeNull();
+    expect(env.rankingMeta.rankPositions.length).toBe(env.results.length);
+  });
+
+  it('semantic mode scores 非 null（保留 similarity 語意）', async () => {
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(
+      new Array(1536).fill(0.1)
+    );
+
+    const env = await searchMemories(mockDb as never, {
+      query: 'drizzle',
+      mode: 'semantic',
+      projectId: 'my-project',
+    });
+
+    expect(env.effectiveMode).toBe('semantic');
+    if (env.results.length > 0) {
+      expect(env.rankingMeta.scores).not.toBeNull();
+      expect(env.rankingMeta.scores!.length).toBe(env.results.length);
+    }
+  });
+
   // --------- Codex review round 1 finding #2：embedding enabled 但 API 失敗降級 ---------
   it('requested semantic + embedding enabled but generateQueryEmbedding fails → effectiveMode=keyword, scores=null', async () => {
     vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);

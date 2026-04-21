@@ -178,8 +178,17 @@ export async function listTasks(db: DbClient, input: ListTasksInput): Promise<Ta
     // 預設：排除 cancelled
     conditions.push(sql`${tasks.status} <> 'cancelled'`);
   } else if (Array.isArray(status)) {
-    conditions.push(inArray(tasks.status, status));
+    // 空陣列視為「沒指定過濾」→ 套預設（排除 cancelled），避免 drizzle
+    // inArray 產出 `IN ()` 這種無效 SQL 變 INTERNAL（codex review round 14 P2）。
+    if (status.length === 0) {
+      conditions.push(sql`${tasks.status} <> 'cancelled'`);
+    } else {
+      // 同步驗 enum，壞值早拋 InvalidArgumentError（不靠 DB CHECK）
+      for (const s of status) validateEnum(s, VALID_STATUSES, 'status');
+      conditions.push(inArray(tasks.status, status));
+    }
   } else {
+    validateEnum(status, VALID_STATUSES, 'status');
     conditions.push(eq(tasks.status, status));
   }
 

@@ -65,10 +65,10 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
     );
   }
 
-  // project_path 必須是絕對路徑（codex review round 11 P1）。
-  // 相對路徑（例如 '.'）會被 resolveProjectId 用 server 的 cwd 解析 →
-  // 退化到 "MCP server cwd" 漏洞，失去 fail-fast 的意義。
-  if (hasPath && !isAbsolute(rawPath as string)) {
+  // project_path 必須是絕對路徑 — 但只在「path 會被用來解析 projectId」時才驗。
+  // 若 client 有明示 project_id（authoritative），即使同時傳了相對 path 也 OK
+  //（舊 client 常同時帶兩個欄位，不該因 path 格式拒絕）。codex review round 14 P1。
+  if (hasPath && !hasId && !isAbsolute(rawPath as string)) {
     throw new InvalidArgumentError(
       'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
       { project_path: rawPath }
@@ -76,7 +76,7 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   }
 
   const cwd = hasPath ? (rawPath as string) : process.cwd();
-  const explicit = hasId ? (rawId as string) : null;
+  const explicit = hasId ? (rawId as string).trim() : null;
   const projectId = resolveProjectId({ explicit, cwd });
   return { cwd, projectId };
 }

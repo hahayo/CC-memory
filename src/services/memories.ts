@@ -387,7 +387,11 @@ export async function searchMemories(
     results = items.map((i) => i.row);
     scores = items.map((i) => i.score);
   } else {
-    // hybrid
+    // hybrid：用 RRF 合併 keyword + semantic 來決定排序；但 scores 欄位不存
+    // RRF weights（它不是 similarity，與 semantic mode 的 cosine similarity
+    // 不可比較，會污染 eval dataset）。hybrid 結果的 scores 一律 null，讓
+    // search_feedback.scores 語意一致：semantic 有 similarity、keyword 與
+    // hybrid 皆 null（codex review round 14 P2）。
     const items = await hybridSearchScoredWithEmbedding(
       db,
       input.query,
@@ -397,7 +401,7 @@ export async function searchMemories(
       limit
     );
     results = items.map((i) => i.row);
-    scores = items.map((i) => i.score);
+    scores = null;
   }
 
   const rankPositions: number[] = results.map((_, i) => i + 1);

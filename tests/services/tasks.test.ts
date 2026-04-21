@@ -470,6 +470,36 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 14 P2：listTasks status=[] 不該 IN () ---------
+  describe('listTasks empty status array', () => {
+    it('status=[] 視為預設過濾（排除 cancelled），不生 IN () 無效 SQL', async () => {
+      const proj = testPrefix + '-emptystatus';
+      await createTask(db, { projectId: proj, title: 'open-t' });
+      await createTask(db, { projectId: proj, title: 'done-t', status: 'done' });
+      await createTask(db, { projectId: proj, title: 'cancel-t', status: 'cancelled' });
+
+      const rows = await listTasks(db, { projectId: proj, status: [] });
+      // 預設排除 cancelled → 2 筆（open + done）
+      expect(rows.length).toBe(2);
+      expect(rows.map((r) => r.title).sort()).toEqual(['done-t', 'open-t']);
+    });
+
+    it('status=[\'open\'] 只回 open', async () => {
+      const proj = testPrefix + '-onestatus';
+      await createTask(db, { projectId: proj, title: 'o1' });
+      await createTask(db, { projectId: proj, title: 'd1', status: 'done' });
+      const rows = await listTasks(db, { projectId: proj, status: ['open'] });
+      expect(rows.length).toBe(1);
+      expect(rows[0].title).toBe('o1');
+    });
+
+    it('status=[\'bogus\'] → InvalidArgumentError（不進 DB）', async () => {
+      await expect(
+        listTasks(db, { projectId: testPrefix + '-bogus', status: ['bogus' as never] })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+  });
+
   // --------- Codex review round 9 findings：enum / empty idempotency_key ---------
   describe('input validation (round 9)', () => {
     it('createTask 空字串 idempotency_key 視為 undefined（不污染 unique）', async () => {
