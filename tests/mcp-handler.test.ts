@@ -317,6 +317,67 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_ARGUMENT');
   });
 
+  // --------- Codex review round 11：input validation tightening ---------
+  it('相對 project_path → JSON error INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall('cc_memory_list', { project_path: '.' }, testDb);
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/絕對路徑/);
+  });
+
+  it('相對 project_path（../foo）→ JSON error INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_path: '../something', title: 't' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_memory_search 傳空字串 project_id → JSON error INVALID_ARGUMENT（不默默變全專案）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: 'x', project_id: '', mode: 'keyword' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/project_id/);
+  });
+
+  it('cc_task_create due_date 無 TZ → JSON error INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'no tz', due_date: '2026-04-22T10:00' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_task_create due_date 帶 Z → 成功', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'with z', due_date: '2026-04-22T10:00Z' },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
+  it('cc_task_create due_date 帶 +08:00 offset → 成功', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'with offset', due_date: '2026-04-22T10:00:00+08:00' },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
   it('cc_task_create 傳合法 ISO due_date → 成功', async () => {
     const res = await handleToolCall(
       'cc_task_create',

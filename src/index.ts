@@ -20,6 +20,7 @@ import {
   CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 
+import { isAbsolute } from 'node:path';
 import { db } from './db/client.js';
 import type { Memory, Task } from './db/schema.js';
 
@@ -61,6 +62,16 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
     );
   }
 
+  // project_path 必須是絕對路徑（codex review round 11 P1）。
+  // 相對路徑（例如 '.'）會被 resolveProjectId 用 server 的 cwd 解析 →
+  // 退化到 "MCP server cwd" 漏洞，失去 fail-fast 的意義。
+  if (hasPath && !isAbsolute(rawPath as string)) {
+    throw new InvalidArgumentError(
+      'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
+      { project_path: rawPath }
+    );
+  }
+
   const cwd = hasPath ? (rawPath as string) : process.cwd();
   const explicit = hasId ? (rawId as string) : null;
   const projectId = resolveProjectId({ explicit, cwd });
@@ -81,8 +92,11 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
  *     到 Mar 3 的無效日期；JS Date 會隱式接受造成 task 截止日漂移）
  *   - 帶 Time 或 TZ 的 ISO 輸入已由 regex 保證形狀，靠 new Date() NaN 檢查剩餘
  */
+// 當有 T (timed) 部分時，TZ (Z 或 ±HH:MM) 強制必填（codex review round 11 P2）。
+// 沒 TZ 的 "2026-04-22T10:00" 會被 new Date() 用 server local TZ 解析 →
+// 不同時區的 server 存到不同 instant，跨機器排序 / 顯示會漂移。
 const ISO_8601_REGEX =
-  /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+  /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
 
 function parseDueDate(raw: unknown): Date | null | undefined {
   if (raw === null) return null;
@@ -453,16 +467,33 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_search': {
-        // cc_memory_search 保留 cross-project 搜尋能力：
+        // cc_memory_search 保留 cross-project 搜尋能力，但契約嚴格：
+        //   - 若 project_id 有傳但空字串 → 拒（client UI 把 unset 序列化成 ""
+        //     不應默默廣域搜尋暴露他 project 資料，codex review round 11 P2）
         //   - 明示 project_id 非空 → 用該 id
-        //   - 只傳 project_path → 解析 id
-        //   - 兩者都沒 → projectId undefined（全專案搜尋，search_feedback.query_project_id = NULL）
-        const explicitId = typeof args.project_id === 'string' && args.project_id.length > 0
-          ? (args.project_id as string)
-          : null;
-        const rawPath = typeof args.project_path === 'string' && args.project_path.length > 0
-          ? (args.project_path as string)
-          : null;
+        //   - 只傳 project_path → 驗絕對路徑後解析 id
+        //   - 兩者都沒 → projectId undefined（全專案搜尋，
+        //     search_feedback.query_project_id = NULL）
+        if (typeof args.project_id === 'string' && args.project_id.length === 0) {
+          throw new InvalidArgumentError(
+            'project_id 若提供不可為空字串（若要全專案搜尋請省略此欄位）',
+            { project_id: args.project_id }
+          );
+        }
+        const explicitId =
+          typeof args.project_id === 'string' && args.project_id.length > 0
+            ? (args.project_id as string)
+            : null;
+        const rawPath =
+          typeof args.project_path === 'string' && args.project_path.length > 0
+            ? (args.project_path as string)
+            : null;
+        if (rawPath !== null && !isAbsolute(rawPath)) {
+          throw new InvalidArgumentError(
+            'project_path 必須為絕對路徑',
+            { project_path: rawPath }
+          );
+        }
         let projectId: string | undefined;
         if (explicitId !== null) {
           projectId = explicitId;
