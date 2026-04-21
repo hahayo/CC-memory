@@ -1,23 +1,5 @@
 // src/tools/delete.ts
-import { projectMemories } from '../db/schema.js';
-import { eq, SQL } from 'drizzle-orm';
+//
+// v0.3 Stage 1 Track M：改成薄殼，實作搬到 src/services/memories.ts。
 
-type DbClient = {
-  update: (table: typeof projectMemories) => {
-    set: (data: { status: string }) => {
-      where: (condition: SQL) => Promise<unknown>;
-    };
-  };
-};
-
-export async function deleteMemory(
-  database: DbClient,
-  id: string
-): Promise<boolean> {
-  await database
-    .update(projectMemories)
-    .set({ status: 'archived' })
-    .where(eq(projectMemories.id, id));
-
-  return true;
-}
+export { deleteMemory } from '../services/memories.js';

@@ -1,26 +1,5 @@
 // src/tools/get.ts
-import { projectMemories, Memory } from '../db/schema.js';
-import { eq, SQL } from 'drizzle-orm';
+//
+// v0.3 Stage 1 Track M：改成薄殼，實作搬到 src/services/memories.ts。
 
-type DbClient = {
-  select: () => {
-    from: (table: typeof projectMemories) => {
-      where: (condition: SQL) => {
-        limit: (n: number) => Promise<Memory[]>;
-      };
-    };
-  };
-};
-
-export async function getMemory(
-  database: DbClient,
-  id: string
-): Promise<Memory | null> {
-  const [result] = await database
-    .select()
-    .from(projectMemories)
-    .where(eq(projectMemories.id, id))
-    .limit(1);
-
-  return result || null;
-}
+export { getMemory } from '../services/memories.js';
