@@ -69,6 +69,15 @@ function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
 const TITLE_MIN_LENGTH = 1;
 const TITLE_MAX_LENGTH = 500;
 
+const VALID_STATUSES: readonly TaskStatus[] = [
+  'open',
+  'in_progress',
+  'done',
+  'cancelled',
+];
+const VALID_PRIORITIES = ['low', 'normal', 'high'] as const;
+const VALID_SOURCES = ['manual', 'telegram', 'claude-code', 'codex', 'mcp'] as const;
+
 function validateTitle(title: string): void {
   // DB CHECK 最終防線；service 層先擋避免 INTERNAL 變成 protocol error
   if (typeof title !== 'string' || title.length < TITLE_MIN_LENGTH) {
@@ -84,23 +93,54 @@ function validateTitle(title: string): void {
   }
 }
 
+function validateEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  field: string
+): T {
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    throw new InvalidArgumentError(
+      `${field} 必須為 ${allowed.join(' | ')}`,
+      { field, value, allowed: [...allowed] }
+    );
+  }
+  return value as T;
+}
+
+/**
+ * normalize idempotency_key：空字串 / 只含空白 → undefined（不進冪等流程）。
+ * 防止 client 把 '' 當 key 造成首次 create 成功後永久污染 tasks_idempotency_key_unique
+ * （codex review round 9 P2）。
+ */
+function normalizeIdempotencyKey(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export async function createTask(db: DbClient, input: CreateTaskInput): Promise<Task> {
   validateTitle(input.title);
+  // enum 驗證：以明示傳入為準；fallback default 不必驗
+  const status = input.status === undefined ? 'open' : validateEnum(input.status, VALID_STATUSES, 'status');
+  const priority =
+    input.priority === undefined ? 'normal' : validateEnum(input.priority, VALID_PRIORITIES, 'priority');
+  const source =
+    input.source === undefined ? 'manual' : validateEnum(input.source, VALID_SOURCES, 'source');
+  const normalizedKey = normalizeIdempotencyKey(input.idempotencyKey);
   const writerHost = input.writerHost ?? resolveWriterHost();
 
-  const status = input.status ?? 'open';
   const row = {
     projectId: input.projectId,
     projectPath: input.projectPath,
     title: input.title,
     description: input.description,
     status,
-    priority: input.priority ?? 'normal',
+    priority,
     dueDate: input.dueDate,
     tags: input.tags ?? [],
-    source: input.source ?? 'manual',
+    source,
     sourceRef: input.sourceRef,
-    idempotencyKey: input.idempotencyKey,
+    idempotencyKey: normalizedKey,
     writerHost,
     metadata: input.metadata ?? {},
     // 建立時若 status 已是 'done'，需設 completed_at = now()，
@@ -115,10 +155,10 @@ export async function createTask(db: DbClient, input: CreateTaskInput): Promise<
     const [inserted] = await db.insert(tasks).values(row).returning();
     return inserted as Task;
   } catch (err) {
-    if (input.idempotencyKey && isUniqueViolation(err, 'tasks_idempotency_key_unique')) {
+    if (normalizedKey && isUniqueViolation(err, 'tasks_idempotency_key_unique')) {
       throw new IdempotencyConflictError(
         'Task with this idempotency_key already exists',
-        { idempotencyKey: input.idempotencyKey }
+        { idempotencyKey: normalizedKey }
       );
     }
     throw err;
@@ -198,9 +238,17 @@ export async function updateTask(
     });
   }
 
-  // Step 2.5：patch 欄位 pre-validation（title 長度）
+  // Step 2.5：patch 欄位 pre-validation（title 長度 + enum 驗證）
+  //   把 enum 驗證放在狀態矩陣之前，避免 `status: "paused"` 這種壞值被誤判成
+  //   "INVALID_TRANSITION"（codex review round 9 P3）
   if (patch.title !== undefined) {
     validateTitle(patch.title);
+  }
+  if (patch.status !== undefined) {
+    validateEnum(patch.status, VALID_STATUSES, 'status');
+  }
+  if (patch.priority !== undefined) {
+    validateEnum(patch.priority, VALID_PRIORITIES, 'priority');
   }
 
   // Step 3：狀態矩陣檢查（若 patch 有 status 變更）

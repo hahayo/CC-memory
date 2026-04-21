@@ -470,6 +470,69 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 9 findings：enum / empty idempotency_key ---------
+  describe('input validation (round 9)', () => {
+    it('createTask 空字串 idempotency_key 視為 undefined（不污染 unique）', async () => {
+      const proj = testPrefix + '-emptykey';
+      const t1 = await createTask(db, { projectId: proj, title: 'a', idempotencyKey: '' });
+      const t2 = await createTask(db, { projectId: proj, title: 'b', idempotencyKey: '' });
+      expect(t1.id).not.toBe(t2.id);
+      expect(t1.idempotencyKey).toBeNull();
+      expect(t2.idempotencyKey).toBeNull();
+    });
+
+    it('createTask whitespace-only idempotency_key 視為 undefined', async () => {
+      const proj = testPrefix + '-wskey';
+      const t1 = await createTask(db, { projectId: proj, title: 'a', idempotencyKey: '   ' });
+      const t2 = await createTask(db, { projectId: proj, title: 'b', idempotencyKey: '\t\n' });
+      expect(t1.id).not.toBe(t2.id);
+    });
+
+    it('createTask 無效 status → InvalidArgumentError（非 INTERNAL）', async () => {
+      await expect(
+        createTask(db, {
+          projectId: testPrefix + '-bad',
+          title: 'x',
+          status: 'paused' as never,
+        })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('createTask 無效 priority → InvalidArgumentError', async () => {
+      await expect(
+        createTask(db, {
+          projectId: testPrefix + '-bad',
+          title: 'x',
+          priority: 'urgent' as never,
+        })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('createTask 無效 source → InvalidArgumentError', async () => {
+      await expect(
+        createTask(db, {
+          projectId: testPrefix + '-bad',
+          title: 'x',
+          source: 'slack' as never,
+        })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('updateTask 無效 status → InvalidArgumentError（不被當 INVALID_TRANSITION）', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-up', title: 'x' });
+      await expect(
+        updateTask(db, t.id, { status: 'paused' as never }, { expectedStatus: 'open' })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('updateTask 無效 priority → InvalidArgumentError（不落到 DB INTERNAL）', async () => {
+      const t = await createTask(db, { projectId: testPrefix + '-up2', title: 'x' });
+      await expect(
+        updateTask(db, t.id, { priority: 'urgent' as never }, { expectedStatus: 'open' })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+  });
+
   // --------- Codex review round 8 finding #2：title length pre-validation ---------
   describe('title length validation (service layer pre-check)', () => {
     it('createTask 空 title → InvalidArgumentError（不落到 DB CHECK）', async () => {
