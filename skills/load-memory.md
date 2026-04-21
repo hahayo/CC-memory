@@ -9,9 +9,16 @@ description: 載入專案記憶並顯示摘要
 
 ## 步驟 1: 偵測當前專案
 
-從當前工作目錄推斷專案 ID：
-- 優先檢查 CLAUDE.md 中是否有 `<!-- cc-memory: project="xxx" -->` 標記
-- 如果沒有，使用目錄名稱
+傳 `project_path`（當前工作目錄絕對路徑）給 MCP tool，server 端會用以下 5 層優先序解析 project_id：
+
+1. 明示的 `project_id` 參數
+2. 環境變數 `CC_MEMORY_PROJECT_ID`
+3. CLAUDE.md 中的 `<!-- cc-memory: project="xxx" -->` 標記
+4. git origin remote（`owner/repo` 格式，跨電腦一致）
+5. basename(project_path)
+
+> v0.3 起 MCP server 的 `process.cwd()` 不可靠（是 server 啟動目錄），
+> 因此 skill 必須在每次呼叫都傳 `project_path`。
 
 ## 步驟 2: 取得專案統計
 
@@ -19,7 +26,7 @@ description: 載入專案記憶並顯示摘要
 
 ```
 cc_memory_stats({
-  project_id: "{偵測到的專案 ID}"
+  project_path: "{當前工作目錄絕對路徑}"
 })
 ```
 
@@ -29,7 +36,7 @@ cc_memory_stats({
 
 ```
 cc_memory_list({
-  project_id: "{偵測到的專案 ID}",
+  project_path: "{當前工作目錄絕對路徑}",
   limit: 5
 })
 ```
@@ -40,7 +47,7 @@ cc_memory_list({
 
 ```
 cc_memory_list({
-  project_id: "{偵測到的專案 ID}",
+  project_path: "{當前工作目錄絕對路徑}",
   type: "decision",
   limit: 3
 })

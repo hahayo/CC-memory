@@ -6,6 +6,7 @@ import {
   timestamp,
   jsonb,
   index,
+  uniqueIndex,
   vector,
   check,
   integer,
@@ -43,6 +44,14 @@ export const projectMemories = pgTable(
     status: text('status').default('active'),
     mergedInto: uuid('merged_into'),
 
+    // 冪等 + 跨電腦稽核（v0.3）
+    // idempotencyKey：client 送出的冪等鍵，partial unique（NULL 可重複）
+    // contentHash：sha256(projectId||type||summary||keywords) 用於衝突時區分「同 key 同 payload（真冪等）」vs「同 key 不同 payload（靜默吞 bug）」
+    // writerHost：寫入者 hostname，跨電腦同步審計
+    idempotencyKey: text('idempotency_key'),
+    contentHash: text('content_hash'),
+    writerHost: text('writer_host'),
+
     // 元資料
     metadata: jsonb('metadata').default({}),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -55,6 +64,10 @@ export const projectMemories = pgTable(
     index('project_id_idx').on(table.projectId),
     // 狀態索引
     index('status_idx').on(table.status),
+    // 冪等 partial unique index：idempotency_key IS NOT NULL 時唯一；NULL 可重複
+    uniqueIndex('project_memories_idempotency_idx')
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );
 
@@ -81,6 +94,7 @@ export const tasks = pgTable(
     source: text('source').notNull().default('manual'),
     sourceRef: text('source_ref'),
     idempotencyKey: text('idempotency_key').unique(),
+    writerHost: text('writer_host'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -133,6 +147,14 @@ export const searchFeedback = pgTable(
     check(
       'search_feedback_thumbs_check',
       sql`${table.thumbs} IS NULL OR ${table.thumbs} IN ('up','down')`
+    ),
+    // v0.3：四陣列長度對齊（scores 可 NULL；非 NULL 時長度須對齊）
+    // 防止 MCP handler 拼錯欄位時靜默寫入 misaligned ranking，讓 eval 報表漂移
+    check(
+      'search_feedback_arrays_same_length',
+      sql`cardinality(${table.resultIds}) = cardinality(${table.resultProjectIds})
+          AND cardinality(${table.resultIds}) = cardinality(${table.rankPositions})
+          AND (${table.scores} IS NULL OR cardinality(${table.scores}) = cardinality(${table.resultIds}))`
     ),
     index('search_feedback_created_idx').on(table.createdAt.desc()),
     index('search_feedback_mode_idx').on(table.mode, table.thumbs),

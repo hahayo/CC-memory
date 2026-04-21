@@ -168,29 +168,28 @@ CREATE TABLE bot_user_state (
 
 **v1.1 → v1.3 變動**：env 從 #2 升到顯式 override；新增 `repo_name` 層。
 
-### `repo_name` 解析
+### `repo_name` 解析（v0.3：`owner/repo` 格式）
 
-`src/utils/repo-name.ts`。為避免 shell injection，**禁用 `exec()` 字串拼接**，
-改用 Node 的 `execFileSync`：
+`src/utils/repo-name.ts`。為避免 shell injection，一律使用 Node 的 `execFileSync`
+（參數以 argv 陣列傳入，不經 shell 展開）。**回傳 `owner/repo` 而非僅 `repo`**，
+解決 fork vs upstream / 不同 org 同名 repo 漂移問題。實作細節見
+`src/utils/repo-name.ts` 與 `tests/utils/repo-name.test.ts`，要點：
 
-```ts
-import { execFileSync } from 'node:child_process';
+- 支援 https / scp-like ssh / ssh:// 三種 remote URL，自動去 `.git` 尾綴
+- 非 git dir、無 origin、解析不出 owner/repo → 回 null → fallback 下一層
+- 多 remote（origin + upstream）→ **一律取 origin**，不猜 upstream
+- `execFileSync` 配 argv 陣列 + 2s timeout，避免 shell 展開與掛死
 
-export function resolveRepoName(cwd: string): string | null {
-  try {
-    // -C <cwd> 讓 git 切到該目錄；所有參數作為獨立 argv 陣列，不經 shell
-    const url = execFileSync('git', ['-C', cwd, 'remote', 'get-url', 'origin'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    // https://github.com/hahayo/CC-memory.git → CC-memory
-    // git@github.com:hahayo/CC-memory.git    → CC-memory
-    return url.match(/[/:]([^/]+?)(?:\.git)?\s*$/)?.[1] ?? null;
-  } catch { return null; }
-}
-```
+### MCP client 必須傳 `project_path`（v0.3 Phase A 必做）
 
-不是 git repo 或無 remote → 回 null → 繼續下一層 fallback。
+MCP stdio server 的 `process.cwd()` 是 server process 啟動目錄（非 client 的專案目錄），
+因此 client 必須在每個 tool 呼叫時傳 optional `project_path`，否則 resolveProjectId
+無法讀 CLAUDE.md marker 或解析 repo_name。
+
+- 每個 MCP tool 的 `inputSchema` 都有 optional `project_path: string` 欄位
+- MCP handler 統一：`const cwd = args.project_path ?? process.cwd();`
+- Skills（`/save-memory` `/load-memory`）在 call tool 時必須填入當前工作目錄
+- 不嗅探 MCP session metadata（標準未保證）、不用 env 綁死 cwd
 
 ### `listProjects()` 來源定義
 

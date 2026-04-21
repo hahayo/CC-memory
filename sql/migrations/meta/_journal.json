@@ -15,6 +15,13 @@
       "when": 1776709850740,
       "tag": "0001_add_tasks_feedback_bot_state",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776793116043,
+      "tag": "0002_add_idempotency_and_writer",
+      "breakpoints": true
     }
   ]
 }

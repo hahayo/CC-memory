@@ -46,7 +46,7 @@ description: 儲存當前 session 的記憶到資料庫
 
 ```
 cc_memory_save({
-  project_path: "{當前工作目錄}",
+  project_path: "{當前工作目錄的絕對路徑}",  // 必填：v0.3 起，MCP server 依此解析 project_id
   type: "session",
   summary: "你分析出的摘要",
   keywords: ["關鍵字1", "關鍵字2", ...],
@@ -54,6 +54,10 @@ cc_memory_save({
   next_steps: ["下一步1", "下一步2", ...]
 })
 ```
+
+> **重要 (v0.3)**：`project_path` 必須傳入當前工作目錄。MCP server 的 `process.cwd()`
+> 是 server process 啟動目錄而非 client 端，若不傳 server 無法讀 CLAUDE.md marker
+> 或解析 git origin。若明確已知 `project_id`，可改傳 `project_id` 參數跳過解析。
 
 ## 步驟 4: 確認結果
 

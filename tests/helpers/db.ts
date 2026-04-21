@@ -1,0 +1,51 @@
+// tests/helpers/db.ts
+//
+// 測試 DB 連線 + cleanup 共用 helper。
+// Cleanup 順序：tasks → search_feedback → project_memories → bot_user_state（避免 FK / 未來擴展的依賴）。
+
+import postgres from 'postgres';
+
+export const TEST_DB_URL =
+  process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test';
+
+export type Sql = ReturnType<typeof postgres>;
+
+/**
+ * 建立測試 PG 連線；連不上就 fail-loud（不要 silent skip）。
+ */
+export async function connectTestDb(): Promise<Sql> {
+  try {
+    const probe = postgres(TEST_DB_URL, { max: 1, idle_timeout: 2, connect_timeout: 2 });
+    await probe`SELECT 1`;
+    await probe.end();
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `\nTest PostgreSQL is not reachable at ${TEST_DB_URL}.\n` +
+        `啟動本機 test DB：\n` +
+        `  docker compose -f docker-compose.test.yml up -d\n` +
+        `  npx drizzle-kit push --config drizzle.test.config.ts\n\n` +
+        `或指定現有 test PG（例如 CI）：\n` +
+        `  export TEST_DATABASE_URL=postgres://user:pass@host:port/db\n\n` +
+        `原始錯誤：${cause}`
+    );
+  }
+  return postgres(TEST_DB_URL, { max: 1 });
+}
+
+/**
+ * 清空四張表；順序：tasks → search_feedback → project_memories → bot_user_state。
+ */
+export async function resetAllTables(sql: Sql): Promise<void> {
+  await sql`DELETE FROM tasks`;
+  await sql`DELETE FROM search_feedback`;
+  await sql`DELETE FROM project_memories`;
+  await sql`DELETE FROM bot_user_state`;
+}
+
+/**
+ * 只清 project_memories（保留 tasks / search_feedback）。
+ */
+export async function resetProjectMemories(sql: Sql): Promise<void> {
+  await sql`DELETE FROM project_memories`;
+}

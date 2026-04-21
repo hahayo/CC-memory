@@ -9,6 +9,7 @@
     "dev": "tsc --watch",
     "start": "node build/index.js",
     "test": "vitest",
+    "test:ci": "vitest run",
     "lint": "eslint src/**/*.ts",
     "clean": "rm -rf build",
     "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts"
