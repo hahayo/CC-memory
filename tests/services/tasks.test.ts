@@ -25,6 +25,7 @@ import {
   StaleTaskError,
   NotFoundError,
   InvalidArgumentError,
+  IdempotencyConflictError,
 } from '../../src/services/errors.js';
 import { connectTestDb, type Sql } from '../helpers/db.js';
 
@@ -450,6 +451,41 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
       const prefix = t.id.slice(0, 8);
       const result = await resolveTaskByShortId(db, prefix, projB);
       expect(result.kind).toBe('NOT_FOUND');
+    });
+  });
+
+  // --------- Codex review round 1 finding #3：重複 idempotency_key ----------
+  describe('createTask idempotency_key duplicate handling', () => {
+    it('duplicate idempotency_key → throws IdempotencyConflictError (非 INTERNAL)', async () => {
+      const proj = testPrefix + '-idemp';
+      const key = `idem-${randomUUID()}`;
+      await createTask(db, {
+        projectId: proj,
+        title: 'first',
+        idempotencyKey: key,
+      });
+      await expect(
+        createTask(db, {
+          projectId: proj,
+          title: 'second (different payload)',
+          idempotencyKey: key,
+        })
+      ).rejects.toThrow(IdempotencyConflictError);
+    });
+
+    it('different idempotency_keys → both succeed', async () => {
+      const proj = testPrefix + '-idemp2';
+      const t1 = await createTask(db, {
+        projectId: proj,
+        title: 'a',
+        idempotencyKey: `idem-${randomUUID()}`,
+      });
+      const t2 = await createTask(db, {
+        projectId: proj,
+        title: 'b',
+        idempotencyKey: `idem-${randomUUID()}`,
+      });
+      expect(t1.id).not.toBe(t2.id);
     });
   });
 });

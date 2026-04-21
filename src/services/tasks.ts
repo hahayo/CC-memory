@@ -41,6 +41,8 @@ import {
   StaleTaskError,
   NotFoundError,
   InvalidArgumentError,
+  IdempotencyConflictError,
+  isUniqueViolation,
 } from './errors.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 
@@ -83,8 +85,21 @@ export async function createTask(db: DbClient, input: CreateTaskInput): Promise<
     metadata: input.metadata ?? {},
   };
 
-  const [inserted] = await db.insert(tasks).values(row).returning();
-  return inserted as Task;
+  // tasks 的 idempotency_key 是 hard unique（無 content_hash），因此重複 key
+  // 全部視為 IdempotencyConflictError（不像 memory 有「同 payload 回舊 id」分支）。
+  // 這樣 MCP/HTTP caller 能收到明確的 protocol-level error，而非 INTERNAL。
+  try {
+    const [inserted] = await db.insert(tasks).values(row).returning();
+    return inserted as Task;
+  } catch (err) {
+    if (input.idempotencyKey && isUniqueViolation(err, 'tasks_idempotency_key_unique')) {
+      throw new IdempotencyConflictError(
+        'Task with this idempotency_key already exists',
+        { idempotencyKey: input.idempotencyKey }
+      );
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

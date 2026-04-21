@@ -163,6 +163,84 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_TRANSITION');
   });
 
+  // ---------- Codex review round 1 fixes ----------
+
+  it('cc_memory_search 不傳 project_id 也不傳 project_path → cross-project 搜尋（search_feedback.query_project_id = NULL）', async () => {
+    // 在兩個不同 projectId 下各寫一筆
+    const p1 = `${tp}-xp1`;
+    const p2 = `${tp}-xp2`;
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${p1}, 'session', 'alpha in p1')`;
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${p2}, 'session', 'alpha in p2')`;
+
+    const beforeCount = (await sql<{ c: number }[]>`
+      SELECT COUNT(*)::int AS c FROM search_feedback WHERE query_project_id IS NULL
+    `)[0].c;
+
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: 'alpha', mode: 'keyword' }, // 注意：無 project_id / project_path
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    const feedbackRows = await sql<{ query_project_id: string | null }[]>`
+      SELECT query_project_id FROM search_feedback
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    // 最新一筆 feedback 的 query_project_id 應為 NULL（跨專案搜尋）
+    expect(feedbackRows[0].query_project_id).toBeNull();
+
+    const afterCount = (await sql<{ c: number }[]>`
+      SELECT COUNT(*)::int AS c FROM search_feedback WHERE query_project_id IS NULL
+    `)[0].c;
+    expect(afterCount).toBeGreaterThan(beforeCount);
+
+    // cleanup
+    await sql`DELETE FROM project_memories WHERE project_id IN (${p1}, ${p2})`;
+  });
+
+  it('cc_memory_get 找不到 id → JSON error code=NOT_FOUND（非 INTERNAL）', async () => {
+    const fakeId = randomUUID();
+    const res = await handleToolCall('cc_memory_get', { id: fakeId }, testDb);
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error).toBeDefined();
+    expect(parsed.error.code).toBe('NOT_FOUND');
+    expect(parsed.error.details).toEqual(expect.objectContaining({ id: fakeId }));
+  });
+
+  it('cc_task_create 重複 idempotency_key → JSON error code=IDEMPOTENCY_CONFLICT（非 INTERNAL）', async () => {
+    const key = `idem-mcp-${randomUUID()}`;
+    const res1 = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'first', idempotency_key: key },
+      testDb
+    );
+    expect(res1.isError).not.toBe(true);
+
+    const res2 = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'second', idempotency_key: key },
+      testDb
+    );
+    expect(res2.isError).toBe(true);
+    const parsed = JSON.parse((res2.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('IDEMPOTENCY_CONFLICT');
+    expect(parsed.error.details).toEqual(
+      expect.objectContaining({ idempotencyKey: key })
+    );
+  });
+
+  it('未知 tool → JSON error code=INVALID_ARGUMENT（非 INTERNAL）', async () => {
+    const res = await handleToolCall('cc_nonexistent_tool_v2', {}, testDb);
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toContain('未知的工具');
+  });
+
   // ---------- project_path contract ----------
 
   it('cc_memory_list 傳 project_path 但不傳 project_id → resolveProjectId 走 basename 解析', async () => {

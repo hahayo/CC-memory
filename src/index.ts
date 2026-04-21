@@ -34,7 +34,7 @@ import {
 import { createTask, listTasks, updateTask } from './services/tasks.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
-import { BaseServiceError } from './services/errors.js';
+import { BaseServiceError, NotFoundError, InvalidArgumentError } from './services/errors.js';
 import type { McpError, TaskStatus } from './services/types.js';
 
 // ---------------------------------------------------------------------------
@@ -380,7 +380,24 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_search': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        // cc_memory_search 保留 cross-project 搜尋能力：
+        //   - 明示 project_id 非空 → 用該 id
+        //   - 只傳 project_path → 解析 id
+        //   - 兩者都沒 → projectId undefined（全專案搜尋，search_feedback.query_project_id = NULL）
+        const explicitId = typeof args.project_id === 'string' && args.project_id.length > 0
+          ? (args.project_id as string)
+          : null;
+        const rawPath = typeof args.project_path === 'string' && args.project_path.length > 0
+          ? (args.project_path as string)
+          : null;
+        let projectId: string | undefined;
+        if (explicitId !== null) {
+          projectId = explicitId;
+        } else if (rawPath !== null) {
+          projectId = resolveProjectId({ cwd: rawPath });
+        } else {
+          projectId = undefined;
+        }
         const envelope = await searchMemories(database, {
           query: args.query as string,
           projectId,
@@ -438,11 +455,7 @@ export async function handleToolCall(
         const id = args.id as string;
         const memory = await getMemory(database, id);
         if (!memory) {
-          return errorResponse(
-            Object.assign(new Error(`找不到記憶 (ID: ${id})`), {
-              code: 'NOT_FOUND',
-            })
-          );
+          throw new NotFoundError(`找不到記憶 (ID: ${id})`, { id });
         }
         return { content: [{ type: 'text', text: formatMemory(memory) }] };
       }
@@ -561,9 +574,7 @@ export async function handleToolCall(
       }
 
       default:
-        return errorResponse(
-          Object.assign(new Error(`未知的工具: ${name}`), { code: 'INVALID_ARGUMENT' })
-        );
+        throw new InvalidArgumentError(`未知的工具: ${name}`, { tool: name });
     }
   } catch (err) {
     return errorResponse(err);

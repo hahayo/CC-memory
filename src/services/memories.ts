@@ -36,7 +36,7 @@ import type {
   SearchQueryContext,
   ListMemoriesInput,
 } from './types.js';
-import { IdempotencyConflictError, InvalidArgumentError } from './errors.js';
+import { IdempotencyConflictError, InvalidArgumentError, isUniqueViolation } from './errors.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 import {
   generateEmbedding,
@@ -77,17 +77,7 @@ function computeContentHash(
   return createHash('sha256').update(text).digest('hex');
 }
 
-/**
- * 偵測 postgres-js 的 unique violation（sqlstate 23505）。
- * drizzle-orm 0.38 對 postgres-js driver 不包裝錯誤，原生 PostgresError 有 .code / .constraint_name。
- */
-function isUniqueViolation(err: unknown, constraint?: string): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: string; constraint_name?: string };
-  if (e.code !== '23505') return false;
-  if (constraint && e.constraint_name && e.constraint_name !== constraint) return false;
-  return true;
-}
+// isUniqueViolation 從 errors.ts 共用 import（tasks.ts 也會用）。
 
 // ---------------------------------------------------------------------------
 // saveMemory — 冪等三分支
@@ -225,20 +215,18 @@ async function keywordSearchRows(
   return filtered.slice(0, limit);
 }
 
-async function semanticSearchScored(
+/**
+ * 用「已計算好的 query embedding」跑 semantic search。
+ * caller 保證 embedding 非 null；null 情況的 downgrade 在 searchMemories 上層處理，
+ * 避免本函式回假的 score=0 結果讓 envelope.effectiveMode 說謊。
+ */
+async function semanticSearchScoredWithEmbedding(
   db: DbClient,
-  query: string,
+  queryEmbedding: number[],
   projectId: string | undefined,
   type: string | undefined,
   limit: number
 ): Promise<ScoredSearchItem[]> {
-  const queryEmbedding = await generateQueryEmbedding(query);
-  if (!queryEmbedding) {
-    // 降級：keyword rows without scores
-    const rows = await keywordSearchRows(db, query, projectId, type, limit);
-    return rows.map((row) => ({ row, score: 0 }));
-  }
-
   const conditions: SQL[] = [
     eq(projectMemories.status, 'active'),
     isNotNull(projectMemories.embedding),
@@ -280,16 +268,17 @@ async function semanticSearchScored(
   });
 }
 
-async function hybridSearchScored(
+async function hybridSearchScoredWithEmbedding(
   db: DbClient,
   query: string,
+  queryEmbedding: number[],
   projectId: string | undefined,
   type: string | undefined,
   limit: number
 ): Promise<ScoredSearchItem[]> {
   const [keywordRows, semanticItems] = await Promise.all([
     keywordSearchRows(db, query, projectId, type, limit),
-    semanticSearchScored(db, query, projectId, type, limit),
+    semanticSearchScoredWithEmbedding(db, queryEmbedding, projectId, type, limit),
   ]);
 
   const k = 60;
@@ -322,9 +311,17 @@ export async function searchMemories(
   const limit = input.limit ?? 10;
   const querySurface = input.querySurface ?? 'mcp';
 
-  // 若 embedding disabled 且 requested semantic/hybrid → downgrade keyword
+  // 計算 effectiveMode：
+  //   - isEmbeddingEnabled() === false → 直接降 keyword（不浪費 API call）
+  //   - requestedMode 是 semantic/hybrid 但 generateQueryEmbedding 失敗 → 也降 keyword
+  //   這樣 envelope.effectiveMode 不會謊報（避免 search_feedback.mode 記錯）
+  const needsEmbedding = requestedMode !== 'keyword';
+  let queryEmbedding: number[] | null = null;
+  if (needsEmbedding && isEmbeddingEnabled()) {
+    queryEmbedding = await generateQueryEmbedding(input.query);
+  }
   const effectiveMode: SearchMode =
-    !isEmbeddingEnabled() && requestedMode !== 'keyword' ? 'keyword' : requestedMode;
+    needsEmbedding && queryEmbedding === null ? 'keyword' : requestedMode;
 
   let results: Memory[];
   let scores: number[] | null;
@@ -333,12 +330,25 @@ export async function searchMemories(
     results = await keywordSearchRows(db, input.query, input.projectId, input.type, limit);
     scores = null;
   } else if (effectiveMode === 'semantic') {
-    const items = await semanticSearchScored(db, input.query, input.projectId, input.type, limit);
+    const items = await semanticSearchScoredWithEmbedding(
+      db,
+      queryEmbedding!,
+      input.projectId,
+      input.type,
+      limit
+    );
     results = items.map((i) => i.row);
     scores = items.map((i) => i.score);
   } else {
     // hybrid
-    const items = await hybridSearchScored(db, input.query, input.projectId, input.type, limit);
+    const items = await hybridSearchScoredWithEmbedding(
+      db,
+      input.query,
+      queryEmbedding!,
+      input.projectId,
+      input.type,
+      limit
+    );
     results = items.map((i) => i.row);
     scores = items.map((i) => i.score);
   }

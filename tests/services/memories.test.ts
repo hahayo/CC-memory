@@ -440,4 +440,37 @@ describe('searchMemories envelope shape (unit)', () => {
     expect(vi.isMockFunction(embedding.generateEmbedding)).toBe(true);
     expect(vi.isMockFunction(embedding.generateQueryEmbedding)).toBe(true);
   });
+
+  // --------- Codex review round 1 finding #2：embedding enabled 但 API 失敗降級 ---------
+  it('requested semantic + embedding enabled but generateQueryEmbedding fails → effectiveMode=keyword, scores=null', async () => {
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(null);
+
+    const env = await searchMemories(mockDb as never, {
+      query: 'hello',
+      mode: 'semantic',
+      projectId: 'my-project',
+    });
+
+    expect(env.queryContext.requestedMode).toBe('semantic');
+    // 關鍵：embedding 實際沒算出來，effectiveMode 不可謊報 'semantic'
+    expect(env.effectiveMode).toBe('keyword');
+    // scores 必為 null（若 semantic 失敗後仍有 scores，recordSearchQuery 會誤寫）
+    expect(env.rankingMeta.scores).toBeNull();
+  });
+
+  it('requested hybrid + embedding enabled but API fails → effectiveMode=keyword, scores=null', async () => {
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(null);
+
+    const env = await searchMemories(mockDb as never, {
+      query: 'hello',
+      mode: 'hybrid',
+      projectId: 'my-project',
+    });
+
+    expect(env.queryContext.requestedMode).toBe('hybrid');
+    expect(env.effectiveMode).toBe('keyword');
+    expect(env.rankingMeta.scores).toBeNull();
+  });
 });

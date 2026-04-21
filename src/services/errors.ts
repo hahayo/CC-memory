@@ -62,3 +62,18 @@ export class NotFoundError extends BaseServiceError {
 export class AmbiguousShortIdError extends BaseServiceError {
   readonly code = 'AMBIGUOUS';
 }
+
+/**
+ * postgres-js unique violation 偵測。drizzle-orm 對 postgres-js driver 不包裝錯誤，
+ * 原生 PostgresError 有 `.code` (sqlstate) + `.constraint_name`。
+ * @param err - 抓到的錯誤
+ * @param constraint - 可選；指定 constraint name 時只配對該 constraint，
+ *                     不指定則任何 23505 都算 true
+ */
+export function isUniqueViolation(err: unknown, constraint?: string): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; constraint_name?: string };
+  if (e.code !== '23505') return false;
+  if (constraint && e.constraint_name && e.constraint_name !== constraint) return false;
+  return true;
+}
