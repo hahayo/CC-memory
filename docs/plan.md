@@ -277,6 +277,10 @@ export function resolveWriterHost(): string {
 
 **Red-Green-Refactor**：Phase 2a schema 補完必須先紅（測試先失敗）再綠。其他 service layer 測試跟隨 TDD。
 
+> **Phase 執行紀律**：TDD 紀律與完整 Phase 執行流程（brainstorm / context7 /
+> simplify / code review / codex-review 順序）見
+> `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`。
+
 **Test PG**：使用 `docker-compose.test.yml` 起本地 PG；CI 走 GitHub Actions service container。
 
 ---
@@ -373,21 +377,21 @@ Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立
 
 ### Endpoints
 
-| Method | Path | Scope | 語意 / 錯誤 |
-|---|---|---|---|
-| `GET /health` | any | — | 200 |
-| `GET /api/memories?project=X` | bot + admin | bot scope 強制 `project = c.var.activeProjectId`（query 參數忽略）|
-| `POST /api/memories` | bot + admin | 409 若 idempotency_key 重複（回舊 id）; bot scope 強制 project = active |
-| `GET /api/memories/:id` | any | 404 若不存在；bot scope 額外 404 若跨 project |
-| `DELETE /api/memories/:id` | **admin only** | 404 / 200 no-op on archived |
-| `DELETE /api/memories/by-idempotency/:key` | bot + admin | 404 / 403 若超過 10 秒 |
-| `GET /api/tasks?project=X` | bot + admin | 同 memories project 強制 |
-| `POST /api/tasks` | bot + admin | 409 若 idempotency_key 重複 |
-| `PATCH /api/tasks/:id` | bot + admin | body 需 `expected_status`; 409 若狀態違規 / stale |
-| `GET /api/projects` | **admin only** | union list |
-| `POST /api/feedback` | any | 201；service 驗 array 長度與 rank |
-| `GET /api/bot/state/:telegram_user_id` | bot only | bot scope 只能讀自己 id（header 對得上）；404 若無記錄 |
-| `PUT /api/bot/state/:telegram_user_id` | bot only | body `{ active_project_id }`；驗 projectExists；同上只能改自己 |
+| Method   | Path                                | Scope          | 語意 / 錯誤                                                             |
+| -------- | ----------------------------------- | -------------- | ----------------------------------------------------------------------- |
+| `GET`    | `/health`                           | —              | 200                                                                     |
+| `GET`    | `/api/memories?project=X`           | bot + admin    | bot scope 強制 `project = c.var.activeProjectId`（query 參數忽略）      |
+| `POST`   | `/api/memories`                     | bot + admin    | 409 若 idempotency_key 重複（回舊 id）; bot scope 強制 project = active |
+| `GET`    | `/api/memories/:id`                 | any            | 404 若不存在；bot scope 額外 404 若跨 project                           |
+| `DELETE` | `/api/memories/:id`                 | **admin only** | 404 / 200 no-op on archived                                             |
+| `DELETE` | `/api/memories/by-idempotency/:key` | bot + admin    | 404 / 403 若超過 10 秒                                                  |
+| `GET`    | `/api/tasks?project=X`              | bot + admin    | 同 memories project 強制                                                |
+| `POST`   | `/api/tasks`                        | bot + admin    | 409 若 idempotency_key 重複                                             |
+| `PATCH`  | `/api/tasks/:id`                    | bot + admin    | body 需 `expected_status`; 409 若狀態違規 / stale                       |
+| `GET`    | `/api/projects`                     | **admin only** | union list                                                              |
+| `POST`   | `/api/feedback`                     | any            | 201；service 驗 array 長度與 rank                                       |
+| `GET`    | `/api/bot/state/:telegram_user_id`  | bot only       | bot scope 只能讀自己 id（header 對得上）；404 若無記錄                  |
+| `PUT`    | `/api/bot/state/:telegram_user_id`  | bot only       | body `{ active_project_id }`；驗 projectExists；同上只能改自己          |
 
 ### HTTP 錯誤碼
 

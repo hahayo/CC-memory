@@ -3,6 +3,10 @@
 > Spec 版本：**1.3** · 依 Phase 0-5 拆解 · Gate 未過不進下個 phase
 >
 > **Phase 劃分（2026-04-21 修訂）：**
+>
+> **執行紀律**：每個 Phase 開工前讀 `~/.claude/rules/sdd-workflow.md` 的
+> `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
+>
 > - **Phase A — 本期交付**：Phase 0 ✅ + Phase 1 ✅ + Phase 2 + Phase 5-A
 > - **Phase B — 後續階段**：Phase 3 (HTTP) + Phase 4 (Telegram) + Phase 5-B
 > - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；Phase 5-A Gate 指定三區塊；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
