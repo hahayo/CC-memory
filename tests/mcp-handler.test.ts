@@ -514,18 +514,57 @@ describe('MCP handler (Stage 2)', () => {
 
   // ---------- project_path contract ----------
 
-  it('cc_memory_list 傳 project_path 但不傳 project_id → resolveProjectId 走 basename 解析', async () => {
-    const uniqueBase = `basename-test-${randomUUID().slice(0, 6)}`;
-    const cwd = `/tmp/${uniqueBase}`;
-    // basename(cwd) 會是 uniqueBase；insert 一筆對應的 project_id 驗證 handler 真的用了
-    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${uniqueBase}, 'session', 's')`;
+  it('cc_memory_list 傳存在的 project_path 但不傳 project_id → 走 basename 解析', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const cwd = mkdtempSync(join(tmpdir(), 'cc-memory-basename-'));
+    try {
+      const basename = cwd.split('/').pop()!;
+      await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${basename}, 'session', 's')`;
 
-    const res = await handleToolCall('cc_memory_list', { project_path: cwd }, testDb);
-    expect(res.isError).not.toBe(true);
-    const text = (res.content[0] as { text: string }).text;
-    expect(text).toContain(uniqueBase);
+      const res = await handleToolCall('cc_memory_list', { project_path: cwd }, testDb);
+      expect(res.isError).not.toBe(true);
+      const text = (res.content[0] as { text: string }).text;
+      expect(text).toContain(basename);
 
-    // cleanup
-    await sql`DELETE FROM project_memories WHERE project_id = ${uniqueBase}`;
+      await sql`DELETE FROM project_memories WHERE project_id = ${basename}`;
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  // ---------- Codex review round 16 P2：project_path 不存在 fail-fast ----------
+  it('cc_memory_list 傳不存在的 project_path → JSON error INVALID_ARGUMENT（不 fallback basename）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_list',
+      { project_path: '/tmp/cc-memory-nonexistent-xxxxxxxx' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/不存在|不是目錄/);
+  });
+
+  it('cc_memory_list 傳 project_path 指向檔案（非目錄）→ INVALID_ARGUMENT', async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-filedir-'));
+    const filePath = join(dir, 'a-file');
+    writeFileSync(filePath, 'hi');
+    try {
+      const res = await handleToolCall(
+        'cc_memory_list',
+        { project_path: filePath },
+        testDb
+      );
+      expect(res.isError).toBe(true);
+      const parsed = JSON.parse((res.content[0] as { text: string }).text);
+      expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

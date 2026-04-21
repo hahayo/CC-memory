@@ -21,6 +21,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { isAbsolute } from 'node:path';
+import { statSync } from 'node:fs';
 import { db } from './db/client.js';
 import type { Memory, Task } from './db/schema.js';
 
@@ -65,14 +66,32 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
     );
   }
 
-  // project_path 必須是絕對路徑 — 但只在「path 會被用來解析 projectId」時才驗。
-  // 若 client 有明示 project_id（authoritative），即使同時傳了相對 path 也 OK
-  //（舊 client 常同時帶兩個欄位，不該因 path 格式拒絕）。codex review round 14 P1。
-  if (hasPath && !hasId && !isAbsolute(rawPath as string)) {
-    throw new InvalidArgumentError(
-      'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
-      { project_path: rawPath }
-    );
+  // project_path 驗證 — 僅在「path 會被用來解析 projectId」時執行
+  // （有 explicit project_id 時跳過，path 只是附帶資訊）。
+  if (hasPath && !hasId) {
+    if (!isAbsolute(rawPath as string)) {
+      throw new InvalidArgumentError(
+        'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
+        { project_path: rawPath }
+      );
+    }
+    // path 存在檢查（codex review round 16 P2）：避免 typo / 舊 cwd
+    // 靜默 fallback 到 basename 造成 memories 寫到虛構 project。
+    try {
+      const stat = statSync(rawPath as string);
+      if (!stat.isDirectory()) {
+        throw new InvalidArgumentError(
+          'project_path 不是目錄',
+          { project_path: rawPath }
+        );
+      }
+    } catch (err) {
+      if (err instanceof InvalidArgumentError) throw err;
+      throw new InvalidArgumentError(
+        'project_path 不存在或無法讀取',
+        { project_path: rawPath, cause: String(err) }
+      );
+    }
   }
 
   const cwd = hasPath ? (rawPath as string) : process.cwd();

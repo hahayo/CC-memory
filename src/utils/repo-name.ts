@@ -47,10 +47,13 @@ export function parseRepoOwnerRepoFromRemoteUrl(url: string): string | null {
 
   const parts = path.split('/').filter(Boolean);
   if (parts.length < 2) return null;
-  const [repo, owner] = [parts[parts.length - 1], parts[parts.length - 2]];
-  if (!repo || !owner) return null;
-  if (repo.includes(' ') || owner.includes(' ')) return null;
-  return `${owner}/${repo}`;
+  // 保留 host 後的完整 path，避免把 group-a/sub/repo 跟 group-b/sub/repo
+  // 都壓成 sub/repo（codex review round 16 P1）。
+  // 合法字元僅 [A-Za-z0-9._-]，否則視為不可信輸入 → null
+  for (const p of parts) {
+    if (!/^[A-Za-z0-9._-]+$/.test(p)) return null;
+  }
+  return parts.join('/');
 }
 
 /**

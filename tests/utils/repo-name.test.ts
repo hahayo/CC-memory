@@ -32,9 +32,18 @@ describe('parseRepoOwnerRepoFromRemoteUrl', () => {
       .toBe('my-org/my-repo');
   });
 
-  it('handles GitLab style paths (uses last two segments)', () => {
+  it('preserves full path for GitLab nested groups (not just last 2 segments)', () => {
+    // codex review round 16 P1：不同 group 同 sub/repo 不可被壓成同 id
     expect(parseRepoOwnerRepoFromRemoteUrl('https://gitlab.com/group/sub/repo.git'))
-      .toBe('sub/repo');
+      .toBe('group/sub/repo');
+  });
+
+  it('distinguishes group-a/sub/repo vs group-b/sub/repo', () => {
+    const a = parseRepoOwnerRepoFromRemoteUrl('https://gitlab.com/group-a/sub/repo.git');
+    const b = parseRepoOwnerRepoFromRemoteUrl('https://gitlab.com/group-b/sub/repo.git');
+    expect(a).not.toBe(b);
+    expect(a).toBe('group-a/sub/repo');
+    expect(b).toBe('group-b/sub/repo');
   });
 
   it('returns null for unparseable URL', () => {
