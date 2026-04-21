@@ -143,6 +143,9 @@ export const searchFeedback = pgTable(
     resultProjectIds: text('result_project_ids').array().notNull(),
     rankPositions: integer('rank_positions').array().notNull(),
     scores: real('scores').array(),
+    // v0.3 round 17：cc_memory_search 的 type filter（'session' / 'decision' / NULL=no filter）
+    // 納入 search_feedback 讓 eval 區分「同 query 不同 type filter」的 runs
+    filterType: text('filter_type'),
     selectedId: uuid('selected_id'),
     selectedRank: integer('selected_rank'),
     thumbs: text('thumbs'),
@@ -151,6 +154,10 @@ export const searchFeedback = pgTable(
   (table) => [
     check('search_feedback_surface_check', sql`${table.querySurface} IN ('telegram','mcp','http')`),
     check('search_feedback_mode_check', sql`${table.mode} IN ('keyword','semantic','hybrid')`),
+    check(
+      'search_feedback_filter_type_check',
+      sql`${table.filterType} IS NULL OR ${table.filterType} IN ('session','decision')`
+    ),
     check(
       'search_feedback_thumbs_check',
       sql`${table.thumbs} IS NULL OR ${table.thumbs} IN ('up','down')`

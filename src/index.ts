@@ -69,29 +69,7 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   // project_path 驗證 — 僅在「path 會被用來解析 projectId」時執行
   // （有 explicit project_id 時跳過，path 只是附帶資訊）。
   if (hasPath && !hasId) {
-    if (!isAbsolute(rawPath as string)) {
-      throw new InvalidArgumentError(
-        'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
-        { project_path: rawPath }
-      );
-    }
-    // path 存在檢查（codex review round 16 P2）：避免 typo / 舊 cwd
-    // 靜默 fallback 到 basename 造成 memories 寫到虛構 project。
-    try {
-      const stat = statSync(rawPath as string);
-      if (!stat.isDirectory()) {
-        throw new InvalidArgumentError(
-          'project_path 不是目錄',
-          { project_path: rawPath }
-        );
-      }
-    } catch (err) {
-      if (err instanceof InvalidArgumentError) throw err;
-      throw new InvalidArgumentError(
-        'project_path 不存在或無法讀取',
-        { project_path: rawPath, cause: String(err) }
-      );
-    }
+    validateProjectPathForResolution(rawPath as string);
   }
 
   const cwd = hasPath ? (rawPath as string) : process.cwd();
@@ -159,6 +137,33 @@ function parseDueDate(raw: unknown): Date | null | undefined {
     }
   }
   return d;
+}
+
+/**
+ * 驗證 project_path 可用於解析 projectId：
+ *   - 必須是絕對路徑（避免 fallback 到 MCP server 的 cwd）
+ *   - 必須是存在的目錄（避免 typo 走 basename fallback 到虛構 project）
+ * 不符 → throw InvalidArgumentError。
+ */
+function validateProjectPathForResolution(path: string): void {
+  if (!isAbsolute(path)) {
+    throw new InvalidArgumentError(
+      'project_path 必須為絕對路徑（相對路徑會落到 MCP server 的 cwd 解析）',
+      { project_path: path }
+    );
+  }
+  try {
+    const stat = statSync(path);
+    if (!stat.isDirectory()) {
+      throw new InvalidArgumentError('project_path 不是目錄', { project_path: path });
+    }
+  } catch (err) {
+    if (err instanceof InvalidArgumentError) throw err;
+    throw new InvalidArgumentError(
+      'project_path 不存在或無法讀取',
+      { project_path: path, cause: String(err) }
+    );
+  }
 }
 
 function errorResponse(err: unknown): CallToolResult {
@@ -540,11 +545,10 @@ export async function handleToolCall(
           typeof args.project_path === 'string' && args.project_path.trim().length > 0
             ? (args.project_path as string)
             : null;
-        if (rawPath !== null && !isAbsolute(rawPath)) {
-          throw new InvalidArgumentError(
-            'project_path 必須為絕對路徑',
-            { project_path: rawPath }
-          );
+        if (rawPath !== null) {
+          // 同 resolveCwdAndProjectId 的嚴格驗證：絕對路徑 + 目錄存在
+          // （codex review round 17 P2：cc_memory_search 用自己分支不能漏）
+          validateProjectPathForResolution(rawPath);
         }
         let projectId: string | undefined;
         if (explicitId !== null) {

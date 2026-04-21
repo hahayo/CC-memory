@@ -431,6 +431,7 @@ export async function searchMemories(
     limit,
     projectId: input.projectId ?? null,
     querySurface,
+    filterType: input.type ?? null,
   };
 
   return {

@@ -86,11 +86,17 @@ async function fetchJaccard(
 ): Promise<JaccardRow[]> {
   // group by (query, projectId, mode)；按 created_at ASC 排序；相鄰 2 次計 Jaccard。
   // 用 result_ids::text[]（pg uuid[] → string[]）。
+  // 群組 key 納入 limit + filter_type，避免同 query 不同 limit / filter
+  // 被錯當同一組比 Jaccard（codex review round 17 P3）：
+  //   - limit=5 → limit=20 即使 top-5 一致，limit=20 的聯集會被稀釋
+  //   - filter_type='decision' vs no filter 結果集本就不同
   const rows = await sql<
     {
       query_project_id: string;
       query: string;
       mode: string;
+      limit: number;
+      filter_type: string | null;
       result_ids: string[];
     }[]
   >`
@@ -98,11 +104,13 @@ async function fetchJaccard(
       query_project_id,
       query,
       mode,
+      "limit"::int AS "limit",
+      filter_type,
       (result_ids)::text[] AS result_ids
     FROM search_feedback
     WHERE created_at >= NOW() - (${DAYS}::int || ' days')::interval
       AND query_project_id IS NOT NULL
-    ORDER BY query_project_id, query, mode, created_at ASC
+    ORDER BY query_project_id, query, mode, "limit", filter_type NULLS LAST, created_at ASC
   `;
 
   // group by (query_project_id, query, mode)，相鄰比對
@@ -116,7 +124,8 @@ async function fetchJaccard(
     // NULL cross-project rows 已由 SQL WHERE 過濾掉（穩定度無意義）；
     // 能走到這裡的 row 保證 query_project_id 非 null（codex review round 5 P2）。
     const projectKey = r.query_project_id!;
-    const key = `${projectKey}\0${r.query}\0${r.mode}`;
+    // 納入 limit + filter_type 進 group key（codex review round 17 P3）
+    const key = `${projectKey}\0${r.query}\0${r.mode}\0${r.limit}\0${r.filter_type ?? ''}`;
     if (key === prevKey && prevIds) {
       const j = jaccard(prevIds, r.result_ids);
       const cur = perProject.get(projectKey) ?? { sum: 0, samples: 0 };

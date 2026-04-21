@@ -79,5 +79,7 @@ export async function recordSearchQuery(
     resultProjectIds,
     rankPositions: rankingMeta.rankPositions,
     scores: rankingMeta.scores,
+    // type filter（session / decision / null）— 讓 eval 能區分不同 filter 的 runs
+    filterType: queryContext.filterType,
   });
 }

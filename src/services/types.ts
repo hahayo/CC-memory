@@ -40,6 +40,12 @@ export interface SearchQueryContext {
   limit: number;
   projectId: string | null;
   querySurface: 'telegram' | 'mcp' | 'http';
+  /**
+   * cc_memory_search 的 type filter（null = 沒過濾，回傳 session/decision 都有）。
+   * 存入 search_feedback.filter_type 讓 eval 能區分同 query 不同 filter 的 runs
+   * （codex review round 17 P2）。
+   */
+  filterType: MemoryType | null;
 }
 
 /**

@@ -29,6 +29,13 @@
       "when": 1776800614337,
       "tag": "0003_scope_idempotency_per_project",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776814246320,
+      "tag": "0004_add_search_feedback_filter_type",
+      "breakpoints": true
     }
   ]
 }

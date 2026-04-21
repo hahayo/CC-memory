@@ -1,0 +1,2 @@
+ALTER TABLE "search_feedback" ADD COLUMN "filter_type" text;--> statement-breakpoint
+ALTER TABLE "search_feedback" ADD CONSTRAINT "search_feedback_filter_type_check" CHECK ("search_feedback"."filter_type" IS NULL OR "search_feedback"."filter_type" IN ('session','decision'));

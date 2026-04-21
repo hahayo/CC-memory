@@ -60,6 +60,7 @@ function makeEnvelope(
       limit: 10,
       projectId,
       querySurface: 'mcp',
+      filterType: null,
     },
     ...overrides,
   };
@@ -135,6 +136,45 @@ describe('recordSearchQuery (DB integration)', () => {
     expect(row.scores![2]).toBeCloseTo(0.7, 5);
   });
 
+  // --------- Codex review round 17 P2：filterType 寫入 search_feedback ---------
+  it('filterType=decision 寫入 search_feedback.filter_type', async () => {
+    const envelope = makeEnvelope({
+      queryContext: {
+        query: 'decision search',
+        requestedMode: 'hybrid',
+        effectiveMode: 'hybrid',
+        limit: 10,
+        projectId: `${testPrefix}-ft-dec`,
+        querySurface: 'mcp',
+        filterType: 'decision',
+      },
+    });
+    await recordSearchQuery(db, envelope);
+    const rows = await sql<{ filter_type: string | null }[]>`
+      SELECT filter_type FROM search_feedback WHERE query_project_id = ${envelope.queryContext.projectId}
+    `;
+    expect(rows[0].filter_type).toBe('decision');
+  });
+
+  it('filterType=null 時 filter_type column 亦 null', async () => {
+    const envelope = makeEnvelope({
+      queryContext: {
+        query: 'no filter',
+        requestedMode: 'hybrid',
+        effectiveMode: 'hybrid',
+        limit: 10,
+        projectId: `${testPrefix}-ft-null`,
+        querySurface: 'mcp',
+        filterType: null,
+      },
+    });
+    await recordSearchQuery(db, envelope);
+    const rows = await sql<{ filter_type: string | null }[]>`
+      SELECT filter_type FROM search_feedback WHERE query_project_id = ${envelope.queryContext.projectId}
+    `;
+    expect(rows[0].filter_type).toBeNull();
+  });
+
   it('writes effectiveMode (not requestedMode) — downgrade signal preserved', async () => {
     const envelope = makeEnvelope({
       effectiveMode: 'keyword',
@@ -145,6 +185,7 @@ describe('recordSearchQuery (DB integration)', () => {
         limit: 5,
         projectId: `${testPrefix}-downgrade`,
         querySurface: 'telegram',
+        filterType: null,
       },
     });
     await recordSearchQuery(db, envelope);
@@ -172,6 +213,7 @@ describe('recordSearchQuery (DB integration)', () => {
         limit: 3,
         projectId: `${testPrefix}-scoresnull`,
         querySurface: 'http',
+        filterType: null,
       },
       effectiveMode: 'keyword',
     });
@@ -204,6 +246,7 @@ describe('recordSearchQuery (DB integration)', () => {
         limit: 1,
         projectId: null,
         querySurface: 'mcp',
+        filterType: null,
       },
     };
     await recordSearchQuery(db, envelope);
@@ -269,6 +312,7 @@ describe('recordSearchQuery (DB integration)', () => {
         limit: 5,
         projectId,
         querySurface: 'mcp',
+        filterType: null,
       },
     };
     // 合法情境：rankPositions 長度 = results 長度（2 == 2）。
