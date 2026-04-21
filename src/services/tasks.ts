@@ -69,12 +69,13 @@ function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
 export async function createTask(db: DbClient, input: CreateTaskInput): Promise<Task> {
   const writerHost = input.writerHost ?? resolveWriterHost();
 
+  const status = input.status ?? 'open';
   const row = {
     projectId: input.projectId,
     projectPath: input.projectPath,
     title: input.title,
     description: input.description,
-    status: input.status ?? 'open',
+    status,
     priority: input.priority ?? 'normal',
     dueDate: input.dueDate,
     tags: input.tags ?? [],
@@ -83,6 +84,9 @@ export async function createTask(db: DbClient, input: CreateTaskInput): Promise<
     idempotencyKey: input.idempotencyKey,
     writerHost,
     metadata: input.metadata ?? {},
+    // 建立時若 status 已是 'done'，需設 completed_at = now()，
+    // 否則稽核 / reopen 邏輯會把這筆當「未完成」（對齊 updateTask 的副作用）
+    ...(status === 'done' ? { completedAt: new Date() } : {}),
   };
 
   // tasks 的 idempotency_key 是 hard unique（無 content_hash），因此重複 key
@@ -189,7 +193,10 @@ export async function updateTask(
   if (patch.metadata !== undefined) setPayload.metadata = patch.metadata;
 
   // Step 5：completed_at 副作用
-  if (patch.status === 'done') {
+  //   只在「真的轉入 done」時才設 completed_at = now()；
+  //   已是 done 的 no-op update（status='done' 同 currentStatus='done'）
+  //   不可覆寫原完成時間（否則稽核時間漂移）。
+  if (patch.status === 'done' && currentStatus !== 'done') {
     setPayload.completedAt = new Date();
   } else if (patch.status === 'open' && currentStatus === 'done') {
     setPayload.completedAt = null;

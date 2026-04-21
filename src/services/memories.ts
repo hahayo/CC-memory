@@ -62,19 +62,34 @@ export interface ProjectStats {
 // ---------------------------------------------------------------------------
 
 /**
- * content_hash = sha256(projectId || '\n' || type || '\n' || summary || '\n' || JSON.stringify(keywords || []))。
+ * content_hash 涵蓋所有 caller-persisted 欄位：
+ * sha256(projectId || type || summary || keywords || decisions || nextSteps)。
  *
  * 用途：同 idempotency_key 入庫時檢查 payload 是否一致。若一致 → 真冪等（idempotent=true）；
  * 若不一致 → 丟 IdempotencyConflictError，避免靜默吞 bug。
+ *
+ * Codex review round 2 finding：hash 若只含 summary/keywords，caller 用同 key
+ * 改 decisions 或 nextSteps 會被當「同 payload 回舊 id」，新內容靜默遺失。
+ * 修正：把 decisions / nextSteps 一併納入 hash。metadata 不入 hash（客戶端
+ * 慣常放 transient 資訊如 timestamps，納入會造成冪等無意義失效）。
  */
 function computeContentHash(
   projectId: string,
   type: string,
   summary: string,
-  keywords: string[] | undefined
+  keywords: string[] | undefined,
+  decisions: string[] | undefined,
+  nextSteps: string[] | undefined
 ): string {
-  const text = `${projectId}\n${type}\n${summary}\n${JSON.stringify(keywords ?? [])}`;
-  return createHash('sha256').update(text).digest('hex');
+  const parts = [
+    projectId,
+    type,
+    summary,
+    JSON.stringify(keywords ?? []),
+    JSON.stringify(decisions ?? []),
+    JSON.stringify(nextSteps ?? []),
+  ];
+  return createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
 // isUniqueViolation 從 errors.ts 共用 import（tasks.ts 也會用）。
@@ -100,7 +115,14 @@ export async function saveMemory(
   // 3. 有 idempotencyKey → 走冪等流程；content_hash 一併寫入
   const hasKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0;
   const contentHash = hasKey
-    ? computeContentHash(input.projectId, input.type, input.summary, input.keywords)
+    ? computeContentHash(
+        input.projectId,
+        input.type,
+        input.summary,
+        input.keywords,
+        input.decisions,
+        input.nextSteps
+      )
     : null;
 
   const baseValues: NewMemory = {

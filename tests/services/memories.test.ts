@@ -95,6 +95,46 @@ describe('services/memories.ts integration (real PG)', () => {
       expect(rows[0].c).toBe(1);
     });
 
+    it('same key + different decisions → IdempotencyConflictError (round 2 fix)', async () => {
+      const key = `idem-dec-${randomUUID()}`;
+      await saveMemory(db, {
+        projectId: TRACK_M_PREFIX + '-dec',
+        type: 'session',
+        summary: 'same summary',
+        decisions: ['decision A'],
+        idempotencyKey: key,
+      });
+      await expect(
+        saveMemory(db, {
+          projectId: TRACK_M_PREFIX + '-dec',
+          type: 'session',
+          summary: 'same summary',
+          decisions: ['decision B'], // 只改 decisions，其他同
+          idempotencyKey: key,
+        })
+      ).rejects.toThrow(IdempotencyConflictError);
+    });
+
+    it('same key + different nextSteps → IdempotencyConflictError (round 2 fix)', async () => {
+      const key = `idem-ns-${randomUUID()}`;
+      await saveMemory(db, {
+        projectId: TRACK_M_PREFIX + '-ns',
+        type: 'session',
+        summary: 'same summary',
+        nextSteps: ['step A'],
+        idempotencyKey: key,
+      });
+      await expect(
+        saveMemory(db, {
+          projectId: TRACK_M_PREFIX + '-ns',
+          type: 'session',
+          summary: 'same summary',
+          nextSteps: ['step B'], // 只改 nextSteps
+          idempotencyKey: key,
+        })
+      ).rejects.toThrow(IdempotencyConflictError);
+    });
+
     it('same key + different payload → second call throws IdempotencyConflictError', async () => {
       const projectId = `${TRACK_M_PREFIX}-idem2`;
       const key = `key-${randomUUID()}`;

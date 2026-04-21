@@ -454,6 +454,85 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 2 finding：createTask + updateTask completed_at ----------
+  describe('completed_at lifecycle (round 2 fix)', () => {
+    it('createTask with status=done auto-sets completed_at', async () => {
+      const t = await createTask(db, {
+        projectId: testPrefix + '-cdone',
+        title: 'already done',
+        status: 'done',
+      });
+      expect(t.completedAt).not.toBeNull();
+      expect(t.completedAt).toBeInstanceOf(Date);
+    });
+
+    it('createTask with default status=open keeps completed_at null', async () => {
+      const t = await createTask(db, {
+        projectId: testPrefix + '-copen',
+        title: 'open',
+      });
+      expect(t.completedAt).toBeNull();
+    });
+
+    it('updateTask no-op done→done does NOT reset completed_at', async () => {
+      // 直接建一筆 done task（completed_at 會自動填）
+      const t = await createTask(db, {
+        projectId: testPrefix + '-noop',
+        title: 'x',
+        status: 'done',
+      });
+      const originalCompleted = t.completedAt!;
+      // 稍等一個 tick 再更新，確保如果 bug 存在會看到時間差
+      await new Promise((r) => setTimeout(r, 50));
+
+      const updated = await updateTask(
+        db,
+        t.id,
+        { status: 'done', title: 'x (updated)' },
+        { expectedStatus: 'done' }
+      );
+
+      expect(updated.title).toBe('x (updated)');
+      // completed_at 必須維持原時間（ms 級比對）
+      expect(updated.completedAt?.getTime()).toBe(originalCompleted.getTime());
+    });
+
+    it('updateTask real transition in_progress→done sets completed_at', async () => {
+      const t = await createTask(db, {
+        projectId: testPrefix + '-tip',
+        title: 'working',
+        status: 'in_progress',
+      });
+      expect(t.completedAt).toBeNull();
+
+      const updated = await updateTask(
+        db,
+        t.id,
+        { status: 'done' },
+        { expectedStatus: 'in_progress' }
+      );
+      expect(updated.completedAt).not.toBeNull();
+      expect(updated.completedAt).toBeInstanceOf(Date);
+    });
+
+    it('updateTask done→open clears completed_at', async () => {
+      const t = await createTask(db, {
+        projectId: testPrefix + '-reopen',
+        title: 'will reopen',
+        status: 'done',
+      });
+      expect(t.completedAt).not.toBeNull();
+
+      const updated = await updateTask(
+        db,
+        t.id,
+        { status: 'open' },
+        { expectedStatus: 'done' }
+      );
+      expect(updated.completedAt).toBeNull();
+    });
+  });
+
   // --------- Codex review round 1 finding #3：重複 idempotency_key ----------
   describe('createTask idempotency_key duplicate handling', () => {
     it('duplicate idempotency_key → throws IdempotencyConflictError (非 INTERNAL)', async () => {
