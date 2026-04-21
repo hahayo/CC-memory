@@ -98,13 +98,25 @@ function computeContentHash(
 // saveMemory — 冪等三分支
 // ---------------------------------------------------------------------------
 
+/**
+ * normalize idempotency_key：空字串 / 只含空白 → undefined（不進冪等流程）。
+ * 同 tasks 的處理；防止 client 把 '' 當 key 污染 partial-unique index
+ * （codex review round 10 P2）。
+ */
+function normalizeIdempotencyKey(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export async function saveMemory(
   db: DbClient,
   input: SaveMemoryInput
 ): Promise<SaveMemoryResult> {
   const writerHost = input.writerHost ?? resolveWriterHost();
 
-  const hasKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0;
+  const normalizedKey = normalizeIdempotencyKey(input.idempotencyKey);
+  const hasKey = normalizedKey !== undefined;
   const contentHash = hasKey
     ? computeContentHash(
         input.projectId,
@@ -123,7 +135,7 @@ export async function saveMemory(
     const preExistingRows = (await db
       .select()
       .from(projectMemories)
-      .where(eq(projectMemories.idempotencyKey, input.idempotencyKey!))
+      .where(eq(projectMemories.idempotencyKey, normalizedKey!))
       .limit(1)) as Memory[];
     const preExisting = preExistingRows[0];
     if (preExisting) {
@@ -137,7 +149,7 @@ export async function saveMemory(
       throw new IdempotencyConflictError(
         'Same idempotency key with different payload',
         {
-          idempotencyKey: input.idempotencyKey!,
+          idempotencyKey: normalizedKey!,
           existingId: preExisting.id,
         }
       );
@@ -162,7 +174,7 @@ export async function saveMemory(
     nextSteps: input.nextSteps ?? [],
     embedding: embeddingVec,
     metadata: input.metadata ?? {},
-    idempotencyKey: hasKey ? input.idempotencyKey! : null,
+    idempotencyKey: hasKey ? normalizedKey! : null,
     contentHash,
     writerHost,
   };
@@ -186,7 +198,7 @@ export async function saveMemory(
     const existingRows = (await db
       .select()
       .from(projectMemories)
-      .where(eq(projectMemories.idempotencyKey, input.idempotencyKey!))
+      .where(eq(projectMemories.idempotencyKey, normalizedKey!))
       .limit(1)) as Memory[];
     const existing = existingRows[0];
     if (!existing) {

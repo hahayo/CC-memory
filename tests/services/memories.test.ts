@@ -96,6 +96,42 @@ describe('services/memories.ts integration (real PG)', () => {
     });
 
     // --------- Codex review round 4 P3：冪等命中跳過 embedding ---------
+    it('saveMemory empty idempotencyKey 視為 undefined（不污染 partial-unique index）', async () => {
+      const proj = TRACK_M_PREFIX + '-emptyidem';
+      const r1 = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'a',
+        idempotencyKey: '',
+      });
+      const r2 = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'b',
+        idempotencyKey: '',
+      });
+      expect(r1.id).not.toBe(r2.id);
+      expect(r1.idempotent).toBe(false);
+      expect(r2.idempotent).toBe(false);
+    });
+
+    it('saveMemory whitespace-only idempotencyKey 視為 undefined', async () => {
+      const proj = TRACK_M_PREFIX + '-wsidem';
+      const r1 = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'a',
+        idempotencyKey: '   ',
+      });
+      const r2 = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'b',
+        idempotencyKey: '\t\n',
+      });
+      expect(r1.id).not.toBe(r2.id);
+    });
+
     it('idempotent hit does NOT call generateEmbedding (pre-check skips embedding)', async () => {
       vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
       vi.mocked(embedding.generateEmbedding).mockClear();

@@ -283,6 +283,40 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_ARGUMENT');
   });
 
+  it('cc_task_create 傳 Feb 31 → JSON error INVALID_ARGUMENT（不靜默 rollover 到 Mar 3）', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'bad date', due_date: '2026-02-31' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/2026-02-31/);
+  });
+
+  it('cc_task_create 傳 space-separated datetime → INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'bad date', due_date: '2026-04-22 10:00' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_task_create 傳英文長日期格式 → INVALID_ARGUMENT', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'bad date', due_date: 'March 1, 2026' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
   it('cc_task_create 傳合法 ISO due_date → 成功', async () => {
     const res = await handleToolCall(
       'cc_task_create',

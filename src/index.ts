@@ -73,9 +73,17 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
 
 /**
  * 解析 due_date 輸入：null → null（清空）；undefined → undefined（不動）；
- * 字串 → Date，但驗證非 NaN；其他或無效字串 → throw InvalidArgumentError。
- * Codex review round 4 finding：不驗會讓 postgres-js 序列化失敗回 INTERNAL。
+ * 字串必須為 ISO 8601 格式且日期合法；否則 → throw InvalidArgumentError。
+ *
+ * 嚴格驗證（codex review round 4 / 10 累積）：
+ *   - Regex 鎖住 ISO 8601 形狀（拒 "2026-04-22 10:00"、"March 1, 2026" 等非 ISO）
+ *   - Date-only 輸入額外驗 Y/M/D roundtrip（拒 "2026-02-31" 這種 rollover
+ *     到 Mar 3 的無效日期；JS Date 會隱式接受造成 task 截止日漂移）
+ *   - 帶 Time 或 TZ 的 ISO 輸入已由 regex 保證形狀，靠 new Date() NaN 檢查剩餘
  */
+const ISO_8601_REGEX =
+  /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+
 function parseDueDate(raw: unknown): Date | null | undefined {
   if (raw === null) return null;
   if (raw === undefined) return undefined;
@@ -83,11 +91,29 @@ function parseDueDate(raw: unknown): Date | null | undefined {
     throw new InvalidArgumentError('due_date 必須是 ISO 8601 字串或 null', { due_date: raw });
   }
   if (raw.length === 0) return undefined;
+  if (!ISO_8601_REGEX.test(raw)) {
+    throw new InvalidArgumentError(
+      `due_date 不是有效的 ISO 8601 字串: ${raw}`,
+      { due_date: raw, hint: 'YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss[.sss][Z|±HH:MM]' }
+    );
+  }
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) {
-    throw new InvalidArgumentError(`due_date 不是有效的 ISO 8601 字串: ${raw}`, {
-      due_date: raw,
-    });
+    throw new InvalidArgumentError(`due_date 不是有效日期: ${raw}`, { due_date: raw });
+  }
+  // Date-only roundtrip：防 "2026-02-31" 被 Date 靜默 rollover 成 "2026-03-03"
+  // 比較輸入字串的 Y/M/D 與 parsed Date 的 UTC Y/M/D（date-only 輸入 new Date 走 UTC）
+  const dateOnlyMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const [, ys, ms, ds] = dateOnlyMatch;
+    const y = Number(ys);
+    const m = Number(ms);
+    const dd = Number(ds);
+    if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m || d.getUTCDate() !== dd) {
+      throw new InvalidArgumentError(`due_date 包含無效日期（如 2026-02-31）: ${raw}`, {
+        due_date: raw,
+      });
+    }
   }
   return d;
 }
