@@ -388,7 +388,7 @@ Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立
 | `GET`    | `/api/tasks?project=X`              | bot + admin    | 同 memories project 強制                                                |
 | `POST`   | `/api/tasks`                        | bot + admin    | 409 若 idempotency_key 重複                                             |
 | `PATCH`  | `/api/tasks/:id`                    | bot + admin    | body 需 `expected_status`; 409 若狀態違規 / stale                       |
-| `GET`    | `/api/projects`                     | **admin only** | union list                                                              |
+| `GET`    | `/api/projects`                     | bot + admin    | bot scope 回 `listProjects()` union list（不接受跨專案特權參數）           |
 | `POST`   | `/api/feedback`                     | any            | 201；service 驗 array 長度與 rank                                       |
 | `GET`    | `/api/bot/state/:telegram_user_id`  | bot only       | bot scope 只能讀自己 id（header 對得上）；404 若無記錄                  |
 | `PUT`    | `/api/bot/state/:telegram_user_id`  | bot only       | body `{ active_project_id }`；驗 projectExists；同上只能改自己          |
@@ -427,7 +427,7 @@ Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立
 | `/projects` | 列出 `listProjects()` 結果 | OK |
 | `/switch <name>` | 切換 active project（**必須 `listProjects` 裡存在**） | OK |
 | `/here` | 顯示目前 active project | OK |
-| `/search <q>` | 限定 active project 搜尋；帶 `--all` 跨專案（需 ADMIN token） | OK（可跨） |
+| `/search <q>` | 限定 active project 搜尋（跨專案查詢改由 admin HTTP API 提供） | **拒絕，提示 `/switch`** |
 | `/note <text>` | 記錄 memory | **拒絕，提示 `/switch`** |
 | `/todo <text>` | 新增 todo | **拒絕，提示 `/switch`** |
 | `/todos` | 列未完成 todo（當前 project） | **拒絕** |

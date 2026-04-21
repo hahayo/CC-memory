@@ -51,6 +51,8 @@
 
 ### 2b Service layer 抽出
 
+> **TDD 順序**：每個 sub-task 先寫紅測跑失敗 → 實作到綠 → refactor。測試覆蓋 audit 見 2d。
+
 - [ ] `src/utils/repo-name.ts`（`execFileSync` 無 shell；不是 git repo 回 null）
 - [ ] `src/utils/writer-host.ts`（env `CC_MEMORY_WRITER` 或 `os.hostname()`）
 - [ ] `src/services/projects.ts`：`resolveProjectId` 實作 5 層優先序
@@ -72,6 +74,8 @@
 
 ### 2c MCP 改 call service
 
+> **TDD 順序**：每個新增 tool 先寫紅測跑失敗 → 實作到綠。既有 6 個 memory tool 走 regression。
+
 - [ ] `src/index.ts` 改 call `services/*`（不再 import `db` client）
 - [ ] 新增 MCP tool：`cc_task_create`
 - [ ] 新增 MCP tool：`cc_task_list`
@@ -79,7 +83,7 @@
 - [ ] `src/tools/*.ts` 保留當薄殼
 - [ ] 既有 6 個 memory tool 輸入輸出格式不動
 
-### 2d 測試
+### 2d 測試 audit（覆蓋率檢查，測試本身於 2b/2c 邊做邊寫）
 
 - [ ] Unit：`services/tasks.ts` 狀態轉移 13 種組合 + optimistic locking
 - [ ] Unit：`services/projects.ts` 5 層優先序 + `listProjects` union
@@ -99,6 +103,8 @@
 
 ## Phase 5-A — Retrieval Eval（Phase A，0.5d）
 
+> **TDD 順序**：每個 sub-task 先寫紅測跑失敗 → 實作到綠 → refactor。
+
 - [ ] `src/services/feedback.ts`：`recordSearchQuery(input)` — 每次 MCP search 自動 call，寫入 query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores
 - [ ] `src/index.ts`：`cc_memory_search` handler 呼叫完 search 後 fire-and-forget `recordSearchQuery`
 - [ ] 選用：`ALTER TABLE search_feedback ADD CONSTRAINT search_feedback_arrays_same_length CHECK (...)`
@@ -107,9 +113,16 @@
 - [ ] 文件：`docs/retrieval-eval.md`
 - [ ] Codex MCP 驗證：`codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
 
+### 5-A 測試 audit
+- [ ] Unit：`services/feedback.ts:recordSearchQuery` 9 欄完整 row 斷言
+- [ ] Integration：MCP `cc_memory_search` 觸發後 `search_feedback` row 存在
+- [ ] Regression：既有 search / save / list 測試全綠
+
 ### Gate
 - [ ] 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到該 row
 - [ ] `scripts/eval-retrieval.ts` 能產出 markdown 報告，含「每日查詢數」「mode 分佈」「結果穩定度」三個區塊
+- [ ] 報告含 Phase A 指標數值，能用於 Go/No-Go 判斷：每日查詢數（目標 > 3）、結果穩定度（目標 > 70%）
+- [ ] Codex MCP：`codex mcp add cc-memory` 後能從 Codex CLI 呼叫 `cc_memory_search`
 
 ---
 
@@ -120,6 +133,8 @@
 ---
 
 ## Phase 3 — HTTP API（Phase B，1.5d）
+
+> **TDD 順序**：每個 middleware / endpoint 先寫紅測（integration test 預期 4xx）跑失敗 → 實作到綠。3d 為最終覆蓋率 audit。
 
 ### 3a 基礎 + Auth
 
@@ -139,7 +154,7 @@
 - [ ] `routes/memories.ts`：GET / POST / GET:id / DELETE:id (admin) / DELETE by-idempotency
   - [ ] bot scope 強制 `project = c.var.activeProjectId`
 - [ ] `routes/tasks.ts`：GET / POST / PATCH:id（需 `expected_status`）
-- [ ] `routes/projects.ts`：GET（admin only，union list）
+- [ ] `routes/projects.ts`：GET（bot + admin，bot scope 回 `listProjects()` union list，不接受跨專案特權參數）
 - [ ] `routes/feedback.ts`：POST（service 驗 array 長度 + rank）
 - [ ] `routes/botstate.ts`：`GET|PUT /api/bot/state/:telegram_user_id`
   - [ ] 只能讀寫 header 對得上的 user id（否則 403）
@@ -154,7 +169,7 @@
 - [ ] Zeabur 新增 `cc-memory-api` service，設 start command
 - [ ] Deploy 後 smoke：`curl /health`
 
-### 3d 測試
+### 3d 測試 audit（cross-cutting 覆蓋率檢查，每個 route 單測於 3b 邊做邊寫）
 
 - [ ] Integration：每個 endpoint 兩種 token 各一次
 - [ ] Integration：bot token 呼 admin endpoint 收 403
@@ -169,6 +184,8 @@
 ---
 
 ## Phase 4 — Telegram Bot（Phase B，1d）
+
+> **TDD 順序**：每個 command handler / undo 邏輯先 mock `bot/client.ts` 寫紅測跑失敗 → 實作到綠。
 
 ### 4a 基礎
 
@@ -186,7 +203,7 @@
 - [ ] `/projects` 列 `listProjects()`
 - [ ] `/switch <name>` `PUT /api/bot/state/:me`（API 驗 exists）
 - [ ] `/here` 顯示當前 active
-- [ ] `/search <q>` 限 active project；`--all` 需 ADMIN token
+- [ ] `/search <q>` 限 active project（無 active 時拒絕，提示 `/switch`；跨專案查詢改由 admin HTTP API 提供）
 - [ ] `/note <text>` 帶 `idempotency_key` POST memories
 - [ ] `/todo <text>` 帶 `idempotency_key` POST tasks
 - [ ] `/todos` 列未完成 todo
@@ -206,6 +223,13 @@
 
 - [ ] Zeabur 新增 `cc-memory-bot` service
 
+### 4e 測試 audit
+- [ ] Unit：`bot/client.ts` headers 帶 Authorization + X-Telegram-User-Id
+- [ ] Unit：command handler 對無 active project 時回正確錯誤訊息
+- [ ] Unit：`/done` / `/cancel` 呼叫 `resolveTaskByShortId` 的 0 筆 / 1 筆 / 多筆三分支
+- [ ] Integration：白名單拒絕、undo 10 秒內 / 超時 / 重複 三 case
+- [ ] CI grep gate：`src/bot/` 無 `from '..?/(db|services)/`
+
 ### Gate
 - [ ] 手機發 `/switch X` 無 X → 收錯
 - [ ] `/note` 無 active → 收錯
@@ -218,14 +242,22 @@
 
 ## Phase 5-B — Feedback 回寫 + 部署文件（Phase B，0.5d）
 
+> **TDD 順序**：feedback endpoint 與 eval 擴充指標先寫紅測跑失敗 → 實作到綠。
+
 - [ ] `POST /api/feedback` 實作（service 層驗長度 + rank；寫入時 UPDATE 對應 search_feedback row 的 selected_id / selected_rank / thumbs）
 - [ ] Telegram bot 搜尋後附 inline button [👍][👎][#1][#2][#3]，callback 打 `POST /api/feedback`
 - [ ] `scripts/eval-retrieval.ts`：補上 Phase B 指標計算（接受率 / 拒絕率 / Top-1 / Mode 勝率 / 撤銷率 / Bot silent error）
 - [ ] 文件：`docs/http-api.md` / `docs/telegram-bot.md` / `docs/zeabur-deploy.md`
 
+### 5-B 測試 audit
+- [ ] Unit：`services/feedback.ts:recordFeedback` array 長度 / rank out of range validation
+- [ ] Integration：inline button callback → feedback row 有 thumbs + selected_rank
+- [ ] Regression：eval script 在新指標擴充後不破舊輸出
+
 ### Gate
 - [ ] 端對端 demo：bot → HTTP → DB（跨電腦），每筆 row 都有 `writer_host`
 - [ ] Phase B 指標全部有 signal（接受率 / 撤銷率等不是 N/A）
+- [ ] Undo：10 秒內撤銷成功；超時 403；重複撤銷 no-op
 
 ---
 

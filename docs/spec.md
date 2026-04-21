@@ -105,7 +105,7 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
 **作為** 離開電腦時會想查或新增的人，**我希望** 用 Telegram bot `/search`、`/note`、`/todo`、`/todos`，**以便** 不用每次都回去開電腦。
 
-- `/search <q>` 限 active project；`--all` 需 ADMIN token
+- `/search <q>` 限 active project（無 active 時拒絕，提示 `/switch`；跨專案查詢改由 admin HTTP API `/api/memories?project=X` 提供）
 - `/note`、`/todo` 寫入後桌機 `cc_memory_list` / `cc_task_list` 即時可見
 - `/todos` 列當前 project 未完成任務；`/done <id前6>` / `/cancel <id前6>` 完成或取消
 - 對應 Goal 3
