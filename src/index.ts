@@ -333,11 +333,15 @@ const tools: Tool[] = [
   {
     name: 'cc_task_update',
     description:
-      '更新任務（帶 optimistic locking）。必須提供 expected_status；違反狀態轉移或同時寫入會收到 CONFLICT / INVALID_TRANSITION。',
+      '更新任務（帶 optimistic locking）。必須提供 project_id / project_path（任一）+ expected_status；違反狀態轉移或同時寫入會收到 CONFLICT / INVALID_TRANSITION。',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: '任務 ID' },
+        project_id: {
+          type: 'string',
+          description: '專案 ID（project_path 和 project_id 擇一必傳，避免跨 project UUID 改動）',
+        },
         project_path: projectPathProp,
         expected_status: {
           type: 'string',

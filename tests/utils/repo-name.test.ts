@@ -41,6 +41,24 @@ describe('parseRepoOwnerRepoFromRemoteUrl', () => {
     expect(parseRepoOwnerRepoFromRemoteUrl('not a url')).toBeNull();
   });
 
+  // --------- Codex review round 6 P2：local-path remote 不可假裝成 owner/repo ---------
+  it('returns null for absolute local path remote', () => {
+    expect(parseRepoOwnerRepoFromRemoteUrl('/srv/git/CC-memory.git')).toBeNull();
+  });
+
+  it('returns null for relative local path remote', () => {
+    expect(parseRepoOwnerRepoFromRemoteUrl('../mirror/CC-memory.git')).toBeNull();
+  });
+
+  it('returns null for bare directory remote', () => {
+    expect(parseRepoOwnerRepoFromRemoteUrl('./foo/bar')).toBeNull();
+  });
+
+  it('parses ssh:// URL', () => {
+    expect(parseRepoOwnerRepoFromRemoteUrl('ssh://git@github.com/hahayo/CC-memory.git'))
+      .toBe('hahayo/CC-memory');
+  });
+
   it('returns null for empty string', () => {
     expect(parseRepoOwnerRepoFromRemoteUrl('')).toBeNull();
   });

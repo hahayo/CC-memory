@@ -32,14 +32,17 @@ export function parseRepoOwnerRepoFromRemoteUrl(url: string): string | null {
     // scp-like ssh: user@host:owner/repo → 取 first colon 後
     const colonIdx = s.indexOf(':');
     path = s.slice(colonIdx + 1);
-  } else if (s.startsWith('ssh://')) {
+  } else if (s.startsWith('ssh://') || s.startsWith('git://')) {
     const schemeEnd = s.indexOf('://');
     const rest = s.slice(schemeEnd + 3);
     const firstSlash = rest.indexOf('/');
     if (firstSlash < 0) return null;
     path = rest.slice(firstSlash + 1);
   } else {
-    path = s;
+    // 其餘格式（裸路徑 /srv/git/foo.git、相對路徑 ../mirror/foo.git 等）
+    // 都不是可跨裝置穩定的 owner/repo → 回 null，讓 resolveProjectId
+    // 走下一層 basename fallback（codex review round 6 P2）
+    return null;
   }
 
   const parts = path.split('/').filter(Boolean);
