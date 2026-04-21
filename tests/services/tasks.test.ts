@@ -729,6 +729,23 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
       ).rejects.toThrow(IdempotencyConflictError);
     });
 
+    // --------- Codex review round 15 P1：task idempotency scope by project ---------
+    it('same idempotency_key + different projects → 兩個 task 各自成功（cross-project 不衝突）', async () => {
+      const key = `idem-tasks-xp-${randomUUID()}`;
+      const t1 = await createTask(db, {
+        projectId: testPrefix + '-tA',
+        title: 'in proj A',
+        idempotencyKey: key,
+      });
+      const t2 = await createTask(db, {
+        projectId: testPrefix + '-tB',
+        title: 'in proj B',
+        idempotencyKey: key,
+      });
+      expect(t1.id).not.toBe(t2.id);
+      expect(t1.projectId).not.toBe(t2.projectId);
+    });
+
     it('different idempotency_keys → both succeed', async () => {
       const proj = testPrefix + '-idemp2';
       const t1 = await createTask(db, {

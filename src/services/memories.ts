@@ -135,7 +135,12 @@ export async function saveMemory(
     const preExistingRows = (await db
       .select()
       .from(projectMemories)
-      .where(eq(projectMemories.idempotencyKey, normalizedKey!))
+      .where(
+        and(
+          eq(projectMemories.projectId, input.projectId),
+          eq(projectMemories.idempotencyKey, normalizedKey!)
+        )
+      )
       .limit(1)) as Memory[];
     const preExisting = preExistingRows[0];
     if (preExisting) {
@@ -198,7 +203,12 @@ export async function saveMemory(
     const existingRows = (await db
       .select()
       .from(projectMemories)
-      .where(eq(projectMemories.idempotencyKey, normalizedKey!))
+      .where(
+        and(
+          eq(projectMemories.projectId, input.projectId),
+          eq(projectMemories.idempotencyKey, normalizedKey!)
+        )
+      )
       .limit(1)) as Memory[];
     const existing = existingRows[0];
     if (!existing) {

@@ -509,8 +509,16 @@ export async function handleToolCall(
           typeof args.project_id === 'string' && args.project_id.trim().length > 0
             ? (args.project_id.trim() as string)
             : null;
+        // 同步對 project_path 做 trim（codex review round 15 P2）；whitespace-only
+        // path 不該 slip through 讓 search 變全專案模式。
+        if (typeof args.project_path === 'string' && args.project_path.trim().length === 0 && args.project_path.length > 0) {
+          throw new InvalidArgumentError(
+            'project_path 若提供不可為空白（若要全專案搜尋請省略此欄位）',
+            { project_path: args.project_path }
+          );
+        }
         const rawPath =
-          typeof args.project_path === 'string' && args.project_path.length > 0
+          typeof args.project_path === 'string' && args.project_path.trim().length > 0
             ? (args.project_path as string)
             : null;
         if (rawPath !== null && !isAbsolute(rawPath)) {

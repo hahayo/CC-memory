@@ -64,9 +64,12 @@ export const projectMemories = pgTable(
     index('project_id_idx').on(table.projectId),
     // 狀態索引
     index('status_idx').on(table.status),
-    // 冪等 partial unique index：idempotency_key IS NOT NULL 時唯一；NULL 可重複
+    // 冪等 partial unique index：scope by (project_id, idempotency_key)
+    // 讓 client 可在不同 project 重用同一把 key（例如 `save-${sessionId}`），
+    // 不會被誤判成跨 project retry（codex review round 15 P1）。
+    // idempotency_key IS NOT NULL 才進 index；NULL 可隨意重複。
     uniqueIndex('project_memories_idempotency_idx')
-      .on(table.idempotencyKey)
+      .on(table.projectId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );
@@ -93,7 +96,9 @@ export const tasks = pgTable(
     tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
     source: text('source').notNull().default('manual'),
     sourceRef: text('source_ref'),
-    idempotencyKey: text('idempotency_key').unique(),
+    // idempotency_key 由 table-level partial unique index 綁 (project_id, idempotency_key)，
+    // 不是 column-level global unique（codex review round 15 P1）。
+    idempotencyKey: text('idempotency_key'),
     writerHost: text('writer_host'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -109,8 +114,10 @@ export const tasks = pgTable(
     index('tasks_due_date_idx')
       .on(table.dueDate)
       .where(sql`${table.dueDate} IS NOT NULL AND ${table.status} <> 'done'`),
-    index('tasks_idempotency_idx')
-      .on(table.idempotencyKey)
+    // 冪等 partial unique index：scope by (project_id, idempotency_key)
+    // 同一客戶端 key 可在不同 project 重用（codex review round 15 P1）。
+    uniqueIndex('tasks_idempotency_project_key_idx')
+      .on(table.projectId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );

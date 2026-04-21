@@ -203,6 +203,48 @@ describe('services/memories.ts integration (real PG)', () => {
       ).rejects.toThrow(IdempotencyConflictError);
     });
 
+    // --------- Codex review round 15 P1：idempotency scope by project ---------
+    it('same key + different projects → each project gets its own row (not idempotent hit)', async () => {
+      const key = `idem-xproj-${randomUUID()}`;
+      const projA = TRACK_M_PREFIX + '-xpA';
+      const projB = TRACK_M_PREFIX + '-xpB';
+      const a = await saveMemory(db, {
+        projectId: projA,
+        type: 'session',
+        summary: 'same summary',
+        idempotencyKey: key,
+      });
+      const b = await saveMemory(db, {
+        projectId: projB,
+        type: 'session',
+        summary: 'same summary',
+        idempotencyKey: key,
+      });
+      // 不同 project 可以重用 key；各自有獨立 row
+      expect(a.id).not.toBe(b.id);
+      expect(a.idempotent).toBe(false);
+      expect(b.idempotent).toBe(false);
+    });
+
+    it('same key + same project + same payload → idempotent hit（與 cross-project 行為區別）', async () => {
+      const key = `idem-sameproj-${randomUUID()}`;
+      const proj = TRACK_M_PREFIX + '-sp';
+      const a = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'same summary',
+        idempotencyKey: key,
+      });
+      const b = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 'same summary',
+        idempotencyKey: key,
+      });
+      expect(b.id).toBe(a.id);
+      expect(b.idempotent).toBe(true);
+    });
+
     it('same key + different payload → second call throws IdempotencyConflictError', async () => {
       const projectId = `${TRACK_M_PREFIX}-idem2`;
       const key = `key-${randomUUID()}`;

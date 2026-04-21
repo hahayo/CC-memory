@@ -155,10 +155,13 @@ export async function createTask(db: DbClient, input: CreateTaskInput): Promise<
     const [inserted] = await db.insert(tasks).values(row).returning();
     return inserted as Task;
   } catch (err) {
-    if (normalizedKey && isUniqueViolation(err, 'tasks_idempotency_key_unique')) {
+    // constraint name 跟著 schema.ts 的新 composite partial unique index 命名
+    // （tasks_idempotency_project_key_idx），舊的 tasks_idempotency_key_unique
+    // 隨 migration 0003 drop 掉
+    if (normalizedKey && isUniqueViolation(err, 'tasks_idempotency_project_key_idx')) {
       throw new IdempotencyConflictError(
-        'Task with this idempotency_key already exists',
-        { idempotencyKey: normalizedKey }
+        'Task with this idempotency_key already exists in this project',
+        { idempotencyKey: normalizedKey, projectId: input.projectId }
       );
     }
     throw err;
