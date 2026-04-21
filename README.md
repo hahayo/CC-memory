@@ -41,6 +41,11 @@ export DATABASE_URL=postgresql://user:password@host:5432/cc_memory
 npx drizzle-kit push
 ```
 
+> **Schema 真相來源**：`src/db/schema.ts`（Drizzle ORM）。
+> `sql/migrations/` 目錄放 `drizzle-kit generate` 產出的版本化 SQL，**禁止手寫
+> `CREATE TABLE` 或 SQL function 維護**。舊有 `sql/schema.sql`（Supabase 版）
+> 已於 v0.2 Phase 0 刪除。
+
 ### 3. 配置 Claude Code
 
 ```bash
