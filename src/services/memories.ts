@@ -102,17 +102,8 @@ export async function saveMemory(
   db: DbClient,
   input: SaveMemoryInput
 ): Promise<SaveMemoryResult> {
-  // 1. Embedding（失敗不阻擋）
-  let embeddingVec: number[] | null = null;
-  if (isEmbeddingEnabled()) {
-    const text = composeEmbeddingText(input.summary, input.keywords, input.decisions);
-    embeddingVec = await generateEmbedding(text);
-  }
-
-  // 2. writer_host：明示覆蓋優先；否則 resolveWriterHost()
   const writerHost = input.writerHost ?? resolveWriterHost();
 
-  // 3. 有 idempotencyKey → 走冪等流程；content_hash 一併寫入
   const hasKey = typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0;
   const contentHash = hasKey
     ? computeContentHash(
@@ -124,6 +115,42 @@ export async function saveMemory(
         input.nextSteps
       )
     : null;
+
+  // 冪等 pre-check：有 key 時先 SELECT，若命中且 hash 一致 → 直接回舊 id，
+  // **完全不跑 embedding**（Codex review round 4 P3：避免重試流浪費 embedding API call
+  // 與受 transient 失敗影響）。不一致則早期 throw conflict，還省了 embedding + insert 成本。
+  if (hasKey) {
+    const preExistingRows = (await db
+      .select()
+      .from(projectMemories)
+      .where(eq(projectMemories.idempotencyKey, input.idempotencyKey!))
+      .limit(1)) as Memory[];
+    const preExisting = preExistingRows[0];
+    if (preExisting) {
+      if (preExisting.contentHash === contentHash) {
+        return {
+          id: preExisting.id,
+          hasEmbedding: preExisting.embedding !== null,
+          idempotent: true,
+        };
+      }
+      throw new IdempotencyConflictError(
+        'Same idempotency key with different payload',
+        {
+          idempotencyKey: input.idempotencyKey!,
+          existingId: preExisting.id,
+        }
+      );
+    }
+    // pre-check miss → fall through 跑完整 insert（需算 embedding）
+  }
+
+  // Embedding（失敗不阻擋；在 pre-check miss 之後才算，避免冪等重試時重算）
+  let embeddingVec: number[] | null = null;
+  if (isEmbeddingEnabled()) {
+    const text = composeEmbeddingText(input.summary, input.keywords, input.decisions);
+    embeddingVec = await generateEmbedding(text);
+  }
 
   const baseValues: NewMemory = {
     projectId: input.projectId,
@@ -140,20 +167,6 @@ export async function saveMemory(
     writerHost,
   };
 
-  if (!hasKey) {
-    // 無 key：一般 insert，無冪等保證
-    const inserted = (await db
-      .insert(projectMemories)
-      .values(baseValues)
-      .returning({ id: projectMemories.id })) as Array<{ id: string }>;
-    return {
-      id: inserted[0]!.id,
-      hasEmbedding: embeddingVec !== null,
-      idempotent: false,
-    };
-  }
-
-  // 有 key：嘗試 insert；若命中 unique violation 再區分 idempotent vs conflict
   try {
     const inserted = (await db
       .insert(projectMemories)
@@ -165,10 +178,11 @@ export async function saveMemory(
       idempotent: false,
     };
   } catch (err) {
-    if (!isUniqueViolation(err, 'project_memories_idempotency_idx')) {
+    if (!hasKey || !isUniqueViolation(err, 'project_memories_idempotency_idx')) {
       throw err;
     }
-    // 查現有 row 比對 content_hash
+    // Race handler：pre-check miss 但在 embedding + insert 期間有其他 writer 搶先
+    // 以同 key insert 了。重查一次比對。
     const existingRows = (await db
       .select()
       .from(projectMemories)
@@ -176,7 +190,6 @@ export async function saveMemory(
       .limit(1)) as Memory[];
     const existing = existingRows[0];
     if (!existing) {
-      // 極少數 race：unique 撞了但已經被刪掉；保留 throw 讓上層處理
       throw err;
     }
     if (existing.contentHash === contentHash) {

@@ -233,6 +233,46 @@ describe('MCP handler (Stage 2)', () => {
     );
   });
 
+  // --------- Codex review round 4 finding #1：due_date 驗證 ---------
+  it('cc_task_create 傳無效 due_date → JSON error INVALID_ARGUMENT（非 INTERNAL）', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      { project_id: tp, title: 'bad due', due_date: 'tomorrow' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+    expect(parsed.error.message).toMatch(/due_date/);
+  });
+
+  it('cc_task_update 傳無效 due_date → JSON error INVALID_ARGUMENT', async () => {
+    const id = randomUUID();
+    await sql`INSERT INTO tasks (id, project_id, title, status) VALUES (${id}, ${tp}, 'ok', 'open')`;
+
+    const res = await handleToolCall(
+      'cc_task_update',
+      { id, expected_status: 'open', due_date: '2026-99-99' },
+      testDb
+    );
+    expect(res.isError).toBe(true);
+    const parsed = JSON.parse((res.content[0] as { text: string }).text);
+    expect(parsed.error.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cc_task_create 傳合法 ISO due_date → 成功', async () => {
+    const res = await handleToolCall(
+      'cc_task_create',
+      {
+        project_id: tp,
+        title: 'valid due',
+        due_date: '2026-12-31T23:59:59Z',
+      },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
   // --------- Codex review round 3 finding #1：fail-fast if no project selector ---------
   it('cc_memory_list 無 project_id 也無 project_path → JSON error INVALID_ARGUMENT（不 fallback process.cwd()）', async () => {
     const res = await handleToolCall('cc_memory_list', {}, testDb);

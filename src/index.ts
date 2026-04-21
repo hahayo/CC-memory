@@ -71,6 +71,27 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
 // 輔助：錯誤 JSON response（取代 `錯誤: ${msg}` 字串拼接）
 // ---------------------------------------------------------------------------
 
+/**
+ * 解析 due_date 輸入：null → null（清空）；undefined → undefined（不動）；
+ * 字串 → Date，但驗證非 NaN；其他或無效字串 → throw InvalidArgumentError。
+ * Codex review round 4 finding：不驗會讓 postgres-js 序列化失敗回 INTERNAL。
+ */
+function parseDueDate(raw: unknown): Date | null | undefined {
+  if (raw === null) return null;
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    throw new InvalidArgumentError('due_date 必須是 ISO 8601 字串或 null', { due_date: raw });
+  }
+  if (raw.length === 0) return undefined;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) {
+    throw new InvalidArgumentError(`due_date 不是有效的 ISO 8601 字串: ${raw}`, {
+      due_date: raw,
+    });
+  }
+  return d;
+}
+
 function errorResponse(err: unknown): CallToolResult {
   let mcpError: McpError;
   if (err instanceof BaseServiceError) {
@@ -508,7 +529,7 @@ export async function handleToolCall(
       // ---------------- Task ----------------
       case 'cc_task_create': {
         const { projectId } = resolveCwdAndProjectId(args);
-        const dueRaw = args.due_date as string | undefined;
+        const parsedDue = parseDueDate(args.due_date);
         const task = await createTask(database, {
           projectId,
           projectPath: args.project_path as string | undefined,
@@ -516,7 +537,7 @@ export async function handleToolCall(
           description: args.description as string | undefined,
           status: args.status as TaskStatus | undefined,
           priority: args.priority as 'low' | 'normal' | 'high' | undefined,
-          dueDate: dueRaw ? new Date(dueRaw) : undefined,
+          dueDate: parsedDue === null ? undefined : parsedDue,
           tags: args.tags as string[] | undefined,
           source:
             (args.source as 'manual' | 'telegram' | 'claude-code' | 'codex' | 'mcp' | undefined) ??
@@ -565,16 +586,16 @@ export async function handleToolCall(
       case 'cc_task_update': {
         const id = args.id as string;
         const expected = args.expected_status as TaskStatus;
-        const dueRaw = args.due_date;
         const patch: Record<string, unknown> = {};
         if (args.title !== undefined) patch.title = args.title;
         if (args.description !== undefined) patch.description = args.description;
         if (args.status !== undefined) patch.status = args.status;
         if (args.priority !== undefined) patch.priority = args.priority;
         if (args.tags !== undefined) patch.tags = args.tags;
-        // dueDate 明示 null 時清空；明示字串時設為 Date；未傳時不動
-        if (dueRaw === null) patch.dueDate = null;
-        else if (typeof dueRaw === 'string') patch.dueDate = new Date(dueRaw);
+        // dueDate 用 parseDueDate 驗：明示 null 清空；有效 ISO → Date；
+        // 無效字串 → throw InvalidArgumentError（不落到 postgres 變 INTERNAL）
+        const parsedDue = parseDueDate(args.due_date);
+        if (parsedDue !== undefined) patch.dueDate = parsedDue;
 
         const updated = await updateTask(database, id, patch, { expectedStatus: expected });
         return {

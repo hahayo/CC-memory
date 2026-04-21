@@ -95,6 +95,38 @@ describe('services/memories.ts integration (real PG)', () => {
       expect(rows[0].c).toBe(1);
     });
 
+    // --------- Codex review round 4 P3：冪等命中跳過 embedding ---------
+    it('idempotent hit does NOT call generateEmbedding (pre-check skips embedding)', async () => {
+      vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+      vi.mocked(embedding.generateEmbedding).mockClear();
+      vi.mocked(embedding.generateEmbedding).mockResolvedValue(null);
+
+      const key = `idem-skipembed-${randomUUID()}`;
+      const proj = TRACK_M_PREFIX + '-skipembed';
+
+      // 第一次 insert：會 call generateEmbedding
+      await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 's',
+        idempotencyKey: key,
+      });
+      const callsAfterFirst = vi.mocked(embedding.generateEmbedding).mock.calls.length;
+      expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
+
+      // 第二次 insert（同 key 同 payload）：pre-check 命中，不該再 call generateEmbedding
+      const result = await saveMemory(db, {
+        projectId: proj,
+        type: 'session',
+        summary: 's',
+        idempotencyKey: key,
+      });
+      expect(result.idempotent).toBe(true);
+
+      const callsAfterSecond = vi.mocked(embedding.generateEmbedding).mock.calls.length;
+      expect(callsAfterSecond).toBe(callsAfterFirst); // 沒新增 call
+    });
+
     it('same key + different decisions → IdempotencyConflictError (round 2 fix)', async () => {
       const key = `idem-dec-${randomUUID()}`;
       await saveMemory(db, {
