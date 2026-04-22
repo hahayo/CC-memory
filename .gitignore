@@ -31,3 +31,6 @@ coverage/
 tmp/
 temp/
 tests/tmp-migrations/
+
+# Claude Code agent metadata（含 worktree locks、local settings）
+.claude/
