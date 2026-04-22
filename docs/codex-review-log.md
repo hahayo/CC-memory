@@ -11,7 +11,74 @@
 - **Build / Lint**：乾淨
 - **Migrations**：0002 / 0003 / 0004 / 0005 全部已 commit
 - **Loop 狀態**：✅ 收斂完成（round 24 codex 無新 findings）
-- **下一步**：收尾 Stage 3 + 寫 Phase A 完工 commit / tag
+- **下一步**：收尾 Stage 3 + 寫 Phase A 完工 commit / tag（下 session 做）
+
+## 下 session 接手清單（Phase A 完工前）
+
+### 現況快照（給新 session）
+
+- `main` 在 origin/main **前面 6 commits**，尚未 push：round 19～24 共 5 個 fix commit + 1 個 round 24 收斂 doc commit
+- Latest HEAD：`523e8e1 docs(v0.3 Stage 3): round 24 codex review loop 收斂`
+- `v0.3-phase-a-r18` tag 已過時（指向 round 18），**Phase A 完工 tag 尚未打**
+- Codex review loop 正式收斂，無剩餘 findings
+
+### 新 session 第一件事：環境重建（避免 docker / test DB 踩坑）
+
+```bash
+# 1. 確認 Docker Desktop 已啟動（WSL2 下 docker 指令要能用）
+docker info >/dev/null 2>&1 || echo "啟動 Docker Desktop 先"
+
+# 2. 若 5433 port 被 VS Code devcontainer 的 cc_project_devcontainer-db-1 佔用，
+#    先停掉（它是 postgres:15 沒 pgvector，不能借用）
+docker ps | grep -q cc_project_devcontainer-db-1 \
+  && docker stop cc_project_devcontainer-db-1
+
+# 3. 啟 test DB
+docker compose -f docker-compose.test.yml up -d --force-recreate
+until docker exec cc-memory-test-pg pg_isready -U test -d cc_memory_test >/dev/null 2>&1; do sleep 1; done
+
+# 4. ⚠️ drizzle-kit push 不會跑 SQL migrations 也不會啟 extension
+docker exec cc-memory-test-pg psql -U test -d cc_memory_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+npx drizzle-kit push --config drizzle.test.config.ts
+```
+
+### 本 session 踩過、下次要避開的坑
+
+1. **drizzle-kit push ≠ migration**：push 只看 schema.ts diff，不會啟 `pgvector` extension，也不會
+   重建「只改 WHERE 子句」的 partial unique index（round 19 的 migration 0005）。如果 test DB
+   是舊有 volume，partial unique index 的 WHERE 不會更新 → 手動 `DROP INDEX` + `CREATE`
+   （migration 0005 內容），或 `docker compose down -v` 清 volume 重建。
+2. **test DB port 5433 衝突**：VS Code devcontainer 若開著會搶 port（`cc_project_devcontainer-db-1`）。
+3. **Round 19 Finding 3 反駁已被 codex 接受**（round 20 起不再提 formatDueDate UTC 午夜問題）。
+
+### 端對端驗收清單（走完才打 Phase A tag）
+
+對照 `docs/plan.md` Verification 區，逐一驗：
+
+- [ ] **跨電腦冪等 + writer_host 稽核**：A 機呼 `cc_memory_save`（帶 idempotency_key）→
+      B 機 `cc_memory_list` 能看到 A 機的 `writer_host`（hostname 不同）
+- [ ] **Codex CLI 呼 cc_memory_search** 能拿到結果（keyword / semantic / hybrid 三 mode 各試一次）
+- [ ] **`npx tsx scripts/eval-retrieval.ts`** 能跑並產出 retrieval 報表（需 Phase 5-A 被動收集過的 feedback）
+- [ ] **DB smoke**：
+  - idempotency 二次 INSERT 同 (project_id, key) → 命中 pre-check 回 idempotent=true
+  - `search_feedback` 四陣列（resultIds / resultProjectIds / rankPositions / scores）長度 CHECK 生效
+  - `writer_host` column 在 memories / tasks 兩表皆有值
+
+### 完工步驟
+
+```bash
+# 1. 端對端驗收（上面清單）全打勾
+
+# 2. 打 Phase A 完工 tag（建議名稱；實際由使用者決定）
+git tag -a v0.3-phase-a -m "v0.3 Phase A 完工：MCP + telemetry + codex review loop 收斂（Stage 3 round 24）"
+
+# 3. Push（依使用者 CLAUDE.md 規則：用 GitHub MCP，不用 git push）
+#    → 讓 Claude 呼 mcp__github__push_files 一起推 commits + tag
+
+# 4. 若無法 MCP push tag（MCP 只推 commits），退路：
+#    git push origin main   （依 .claude/rules/git-workflow.md 授權）
+#    git push origin v0.3-phase-a
+```
 
 ## 跑 codex review 的指令
 
