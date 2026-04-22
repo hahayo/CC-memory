@@ -500,6 +500,34 @@ describe('services/tasks — createTask / listTasks / getTask / updateTask / res
     });
   });
 
+  // --------- Codex review round 20 P2：limit/offset pre-check ---------
+  describe('listTasks negative limit/offset pre-check', () => {
+    it('limit=-1 → InvalidArgumentError（不讓 Postgres 爆成 INTERNAL）', async () => {
+      await expect(
+        listTasks(db, { projectId: testPrefix + '-neg1', limit: -1 })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('offset=-5 → InvalidArgumentError', async () => {
+      await expect(
+        listTasks(db, { projectId: testPrefix + '-neg2', offset: -5 })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('limit=0 仍合法（使用者明示要 0 筆）', async () => {
+      const proj = testPrefix + '-neg3';
+      await createTask(db, { projectId: proj, title: 'x' });
+      const rows = await listTasks(db, { projectId: proj, limit: 0 });
+      expect(rows).toEqual([]);
+    });
+
+    it('limit 非整數（1.5）→ InvalidArgumentError', async () => {
+      await expect(
+        listTasks(db, { projectId: testPrefix + '-neg4', limit: 1.5 })
+      ).rejects.toThrow(InvalidArgumentError);
+    });
+  });
+
   // --------- Codex review round 9 findings：enum / empty idempotency_key ---------
   describe('input validation (round 9)', () => {
     it('createTask 空字串 idempotency_key 視為 undefined（不污染 unique）', async () => {

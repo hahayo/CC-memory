@@ -175,6 +175,15 @@ export async function createTask(db: DbClient, input: CreateTaskInput): Promise<
 export async function listTasks(db: DbClient, input: ListTasksInput): Promise<Task[]> {
   const { projectId, status, limit = 20, offset = 0 } = input;
 
+  // 預驗證 limit / offset 非負（codex review round 20 P2）：Postgres 拒負數
+  // 會 bubble 成 INTERNAL；pre-check 讓 caller 收到 INVALID_ARGUMENT。
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new InvalidArgumentError('listTasks: limit 必須為非負整數', { limit });
+  }
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new InvalidArgumentError('listTasks: offset 必須為非負整數', { offset });
+  }
+
   const conditions = [eq(tasks.projectId, projectId)];
 
   if (status === undefined) {

@@ -74,7 +74,10 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
 
   const cwd = hasPath ? (rawPath as string) : process.cwd();
   const explicit = hasId ? (rawId as string).trim() : null;
-  const projectId = resolveProjectId({ explicit, cwd });
+  // cwdIsExplicit：caller 送 project_path → 跳過 env layer，讓 path 本身 derive
+  // project（codex review round 20 P1：env 是 server 不知道自己在哪的 fallback，
+  // 不該覆蓋 caller 明示送進來的 path）
+  const projectId = resolveProjectId({ explicit, cwd, cwdIsExplicit: hasPath });
   return { cwd, projectId };
 }
 
@@ -558,7 +561,9 @@ export async function handleToolCall(
           // 需要 path 做 resolve 時才驗：絕對路徑 + 目錄存在
           // （codex review round 17 P2：cc_memory_search 用自己分支不能漏）
           validateProjectPathForResolution(rawPath);
-          projectId = resolveProjectId({ cwd: rawPath });
+          // 同 resolveCwdAndProjectId：caller 明示 path → cwdIsExplicit 跳過 env
+          // （codex review round 20 P1）
+          projectId = resolveProjectId({ cwd: rawPath, cwdIsExplicit: true });
         } else {
           projectId = undefined;
         }

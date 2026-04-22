@@ -133,6 +133,44 @@ describe('resolveProjectId (5-layer priority)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // --------- Codex review round 20 P1：cwdIsExplicit 跳過 env layer ---------
+  it('cwdIsExplicit=true → env 被跳過，改用 path-derived marker/repo/basename', () => {
+    // caller 明示送 path + server 也有 env 時，path 勝出
+    process.env.CC_MEMORY_PROJECT_ID = 'from-env-should-be-ignored';
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-explicit-'));
+    try {
+      writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      const id = resolveProjectId({ cwd: dir, cwdIsExplicit: true });
+      expect(id).toBe('from-marker');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cwdIsExplicit=false（預設）→ env 仍 override path-derived', () => {
+    process.env.CC_MEMORY_PROJECT_ID = 'from-env';
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-nonexplicit-'));
+    try {
+      writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      const id = resolveProjectId({ cwd: dir });
+      expect(id).toBe('from-env');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cwdIsExplicit=true 且 explicit project_id 也傳 → explicit 仍勝出（layer 1 不受影響）', () => {
+    process.env.CC_MEMORY_PROJECT_ID = 'from-env';
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-both-'));
+    try {
+      writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      const id = resolveProjectId({ explicit: 'from-caller', cwd: dir, cwdIsExplicit: true });
+      expect(id).toBe('from-caller');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('listProjects / projectExists (DB integration)', () => {

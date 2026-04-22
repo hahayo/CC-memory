@@ -6,11 +6,11 @@
 
 ## 當前狀態
 
-- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 19 round fixes
-- **測試**：233 / 233 tests 綠（baseline 143 + codex-driven +90 tests）
+- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 20 round fixes
+- **測試**：240 / 240 tests 綠（baseline 143 + codex-driven +97 tests）
 - **Build / Lint**：乾淨
 - **Migrations**：0002 / 0003 / 0004 / 0005 全部已 commit
-- **下一步**：跑 round 20 codex review 驗 round 19 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
+- **下一步**：跑 round 21 codex review 驗 round 20 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
 
 ## 跑 codex review 的指令
 
@@ -167,6 +167,13 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 | P2 | `src/services/memories.ts` saveMemory + partial unique index | archived row 被當 idempotent hit；archive 後同 key 無法再 save | ✅ 採納（migration 0005 + pre-check/race handler 加 `status='active'` filter） |
 | P2 | `src/index.ts` formatDueDate | UTC 午夜 timed due_date 被壓成 date-only 顯示 | ❌ 反駁（Date 物件無法還原意圖；需加 schema column 存意圖，成本效益不符；round 12 收斂過 date-only 邏輯） |
 
+### Round 20 — 2 findings（1 P1 + 1 P2；全採納；Round 19 Finding 3 反駁被 codex 接受）
+
+| 嚴重度 | 位置 | 摘要 | 處置 |
+|---|---|---|---|
+| P1 | `src/services/projects.ts` resolveProjectId + `src/index.ts` resolveCwdAndProjectId / cc_memory_search | caller 送 explicit project_path 時 env `CC_MEMORY_PROJECT_ID` 仍 override → 跨 project misroute | ✅ 採納（新增 `cwdIsExplicit` flag，true 時跳過 layer 2 env） |
+| P2 | `src/services/tasks.ts` listTasks | limit/offset 未驗證非負整數，Postgres 拒負數會 bubble 成 INTERNAL | ✅ 採納（listTasks pre-check `Number.isInteger && >= 0`） |
+
 ## 主要主題歸納
 
 | 主題 | 出現 rounds | 說明 |
@@ -195,7 +202,7 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 
 > 直到雙方遇見趨於一致且 codex 沒有 review 出新 bug or risks，就可以結束 loop
 
-目前 round 19 有新 findings（1 採納 P1 + 1 採納 P2 + 1 反駁 P2）→ 尚未收斂，繼續 round 20 驗證。
+目前 round 20 仍有新 findings（2 全採納）→ 尚未收斂，繼續 round 21。Round 19 Finding 3 反駁被 codex 接受（不再提）。
 
 ## 反駁紀錄（回送給 codex 的論點）
 
