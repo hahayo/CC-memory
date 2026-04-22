@@ -16,7 +16,7 @@
 // = 已知答案，env 不該覆蓋掉答案造成跨 project misroute。
 
 import { readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { eq, ne, and, sql } from 'drizzle-orm';
 import { projectMemories, tasks } from '../db/schema.js';
 import { resolveRepoName } from '../utils/repo-name.js';
@@ -48,12 +48,24 @@ function nonEmpty(s: string | null | undefined): string | null {
 }
 
 function tryReadClaudeMdMarker(cwd: string, readFn: ReadFileSyncFn): string | null {
-  try {
-    const content = readFn(join(cwd, 'CLAUDE.md'));
-    const match = content.match(/<!--\s*cc-memory:\s*project="([^"]+)"\s*-->/);
-    if (match) return match[1];
-  } catch {
-    // CLAUDE.md 不存在或不可讀，往下 fallback
+  // 從 cwd 逐層往上找 CLAUDE.md（到 filesystem root 停）。
+  // 理由（codex review round 21 P2）：caller 常從 repo subdirectory 呼叫
+  // （例 `~/repo/src/tools`），repo-root CLAUDE.md 的 marker 若只看 cwd 會漏，
+  // 造成同 project 從不同子目錄解出不同 ID（子目錄走 git origin owner/repo、
+  // repo root 走 marker 的 "custom-id"）。
+  let current = cwd;
+  // 最多走 64 層，防 symbolic link 循環或奇怪 path
+  for (let i = 0; i < 64; i++) {
+    try {
+      const content = readFn(join(current, 'CLAUDE.md'));
+      const match = content.match(/<!--\s*cc-memory:\s*project="([^"]+)"\s*-->/);
+      if (match) return match[1];
+    } catch {
+      // CLAUDE.md 不存在 / 不可讀 → 往上一層找
+    }
+    const parent = dirname(current);
+    if (parent === current) break; // filesystem root
+    current = parent;
   }
   return null;
 }

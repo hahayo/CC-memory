@@ -5,7 +5,7 @@
 // 5 層優先序：explicit > env CC_MEMORY_PROJECT_ID > CLAUDE.md marker > repo_name (owner/repo) > basename(cwd)
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -169,6 +169,48 @@ describe('resolveProjectId (5-layer priority)', () => {
       expect(id).toBe('from-caller');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // --------- Codex review round 21 P2：CLAUDE.md marker 往上層找 ---------
+  it('CLAUDE.md marker 從 subdirectory 也能找到（往上層走）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-walkup-'));
+    try {
+      writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="repo-root-id" -->');
+      const subdir = join(root, 'src', 'tools', 'deep');
+      mkdirSync(subdir, { recursive: true });
+      // 從 deep subdir 解析，應找到 root 的 marker（不是 fallback 到 basename）
+      const id = resolveProjectId({ cwd: subdir });
+      expect(id).toBe('repo-root-id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('cwd 本身有 CLAUDE.md marker → 就地用（不繼續往上找）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-local-'));
+    try {
+      const subdir = join(root, 'sub');
+      mkdirSync(subdir, { recursive: true });
+      writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="parent" -->');
+      writeFileSync(join(subdir, 'CLAUDE.md'), '<!-- cc-memory: project="child" -->');
+      // cwd 的 marker 優先（最近的一個）
+      const id = resolveProjectId({ cwd: subdir });
+      expect(id).toBe('child');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('沒有任何 CLAUDE.md marker 在路徑上 → 落到 layer 4/5', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-nomarker-'));
+    try {
+      // 無 CLAUDE.md → 走 basename 或 git origin
+      const id = resolveProjectId({ cwd: root });
+      const parts = root.replace(/\\/g, '/').split('/').filter(Boolean);
+      expect(id).toBe(parts[parts.length - 1]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
