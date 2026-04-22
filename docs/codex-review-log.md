@@ -6,11 +6,11 @@
 
 ## 當前狀態
 
-- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 21 round fixes
-- **測試**：243 / 243 tests 綠（baseline 143 + codex-driven +100 tests）
+- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 22 round fixes
+- **測試**：247 / 247 tests 綠（baseline 143 + codex-driven +104 tests）
 - **Build / Lint**：乾淨
 - **Migrations**：0002 / 0003 / 0004 / 0005 全部已 commit
-- **下一步**：跑 round 22 codex review 驗 round 21 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
+- **下一步**：跑 round 23 codex review 驗 round 22 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
 
 ## 跑 codex review 的指令
 
@@ -180,6 +180,13 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 |---|---|---|---|
 | P2 | `src/services/projects.ts` tryReadClaudeMdMarker | 只讀 `${cwd}/CLAUDE.md`；caller 從 subdirectory 呼叫時 repo-root marker 被漏 → 同 project 依 cwd 解出不同 ID | ✅ 採納（從 cwd 往上層逐層找 CLAUDE.md，最多 64 層到 filesystem root） |
 
+### Round 22 — 2 findings（1 P1 + 1 P2；全採納；Round 21 walk-up 引入的新 bug）
+
+| 嚴重度 | 位置 | 摘要 | 處置 |
+|---|---|---|---|
+| P1 | `src/services/projects.ts` tryReadClaudeMdMarker | Round 21 walk-up 無邊界，走到 filesystem root 會撿 `~/CLAUDE.md` / monorepo 父目錄的 marker → misroute 到陌生 project | ✅ 採納（在 `.git` 目錄出現的 repo boundary 停止 walk-up） |
+| P2 | `src/services/memories.ts` deleteMemory | 不過濾 `status='active'` → 重複 delete 已 archived 的 row 仍 UPDATE 到並回 true，違反 MCP handler 的 NOT_FOUND 契約 | ✅ 採納（deleteMemory 加 `status='active'` filter） |
+
 ## 主要主題歸納
 
 | 主題 | 出現 rounds | 說明 |
@@ -208,7 +215,7 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 
 > 直到雙方遇見趨於一致且 codex 沒有 review 出新 bug or risks，就可以結束 loop
 
-目前 round 21 仍有新 findings（1 P2，採納）→ 尚未收斂，繼續 round 22。findings 數量遞減（19:3 → 20:2 → 21:1），收斂中。
+目前 round 22 仍有新 findings（1 P1 + 1 P2，全採納）→ 尚未收斂，繼續 round 23。findings 走勢：19:3 → 20:2 → 21:1 → 22:2（round 21 walk-up fix 引入新 bug，round 22 抓到並修掉）。
 
 ## 反駁紀錄（回送給 codex 的論點）
 

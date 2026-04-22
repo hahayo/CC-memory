@@ -15,7 +15,7 @@
 // 理由：env 的角色是「server 不知道自己在哪」的 fallback；caller 明確送 path
 // = 已知答案，env 不該覆蓋掉答案造成跨 project misroute。
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { eq, ne, and, sql } from 'drizzle-orm';
 import { projectMemories, tasks } from '../db/schema.js';
@@ -24,6 +24,7 @@ import type { DbClient } from './types.js';
 
 type ReadFileSyncFn = (path: string) => string;
 type ResolveRepoNameFn = (cwd: string) => string | null;
+type ExistsSyncFn = (path: string) => boolean;
 
 export interface ResolveProjectIdInput {
   explicit?: string | null;
@@ -36,9 +37,10 @@ export interface ResolveProjectIdInput {
   cwdIsExplicit?: boolean;
   /** 允許測試 override env；production code 應不傳此參數 */
   envOverride?: string | null;
-  /** DI hooks；production 預設為 fs.readFileSync / resolveRepoName */
+  /** DI hooks；production 預設為 fs.readFileSync / resolveRepoName / fs.existsSync */
   readFileSyncFn?: ReadFileSyncFn;
   resolveRepoNameFn?: ResolveRepoNameFn;
+  existsSyncFn?: ExistsSyncFn;
 }
 
 function nonEmpty(s: string | null | undefined): string | null {
@@ -47,12 +49,19 @@ function nonEmpty(s: string | null | undefined): string | null {
   return t.length > 0 ? t : null;
 }
 
-function tryReadClaudeMdMarker(cwd: string, readFn: ReadFileSyncFn): string | null {
-  // 從 cwd 逐層往上找 CLAUDE.md（到 filesystem root 停）。
-  // 理由（codex review round 21 P2）：caller 常從 repo subdirectory 呼叫
-  // （例 `~/repo/src/tools`），repo-root CLAUDE.md 的 marker 若只看 cwd 會漏，
-  // 造成同 project 從不同子目錄解出不同 ID（子目錄走 git origin owner/repo、
-  // repo root 走 marker 的 "custom-id"）。
+function tryReadClaudeMdMarker(
+  cwd: string,
+  readFn: ReadFileSyncFn,
+  existsFn: ExistsSyncFn
+): string | null {
+  // 從 cwd 逐層往上找 CLAUDE.md，在 repo boundary 停（`.git` 目錄出現的那層）。
+  // 理由：
+  //   - codex round 21 P2：caller 常從 repo subdirectory 呼叫；只讀 ${cwd}/CLAUDE.md
+  //     會漏 repo-root marker，造成同 project 因子目錄不同解出不同 ID。
+  //   - codex round 22 P1：無邊界走到 filesystem root 會撿到 `~/CLAUDE.md` 或 monorepo
+  //     父目錄的 marker → 同 repo 被 misroute 到陌生 project ID。
+  // 策略：每一層先讀 CLAUDE.md，有 marker 即回；再檢查 `.git`（視為 repo root），
+  // 找到 repo root 後停止繼續往上（不越出 repo 邊界）。
   let current = cwd;
   // 最多走 64 層，防 symbolic link 循環或奇怪 path
   for (let i = 0; i < 64; i++) {
@@ -61,8 +70,10 @@ function tryReadClaudeMdMarker(cwd: string, readFn: ReadFileSyncFn): string | nu
       const match = content.match(/<!--\s*cc-memory:\s*project="([^"]+)"\s*-->/);
       if (match) return match[1];
     } catch {
-      // CLAUDE.md 不存在 / 不可讀 → 往上一層找
+      // CLAUDE.md 不存在 / 不可讀 → 檢查 .git / 往上
     }
+    // 若這層是 repo root（有 .git），停止 walk-up，不再撿外層 marker
+    if (existsFn(join(current, '.git'))) break;
     const parent = dirname(current);
     if (parent === current) break; // filesystem root
     current = parent;
@@ -89,6 +100,7 @@ export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
     envOverride,
     readFileSyncFn = (p: string) => readFileSync(p, 'utf-8'),
     resolveRepoNameFn = resolveRepoName,
+    existsSyncFn = existsSync,
   } = input;
 
   // layer 1: explicit
@@ -103,7 +115,7 @@ export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
   }
 
   // layer 3: CLAUDE.md marker
-  const lvl3 = nonEmpty(tryReadClaudeMdMarker(cwd, readFileSyncFn));
+  const lvl3 = nonEmpty(tryReadClaudeMdMarker(cwd, readFileSyncFn, existsSyncFn));
   if (lvl3) return lvl3;
 
   // layer 4: git origin → owner/repo

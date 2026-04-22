@@ -213,6 +213,43 @@ describe('resolveProjectId (5-layer priority)', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // --------- Codex review round 22 P1：walk-up 在 .git 邊界停 ---------
+  it('walk-up 碰到 .git 就停（repo 本身無 marker → 不撿父目錄的 marker）', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'cc-memory-boundary-'));
+    try {
+      // parent 目錄有 CLAUDE.md（模擬 ~/CLAUDE.md 或 monorepo 父層）
+      writeFileSync(join(parent, 'CLAUDE.md'), '<!-- cc-memory: project="outer-stranger" -->');
+      // repo 本身無 CLAUDE.md，但有 .git
+      const repo = join(parent, 'my-repo');
+      mkdirSync(join(repo, '.git'), { recursive: true });
+      const subdir = join(repo, 'src', 'tools');
+      mkdirSync(subdir, { recursive: true });
+      // 從 subdir 解析，walk-up 應在 repo (`.git`) 邊界停；不會拿 parent 的 marker
+      const id = resolveProjectId({ cwd: subdir });
+      // 該掉到 layer 4 git origin 失敗 → layer 5 basename（= 'tools'）
+      expect(id).not.toBe('outer-stranger');
+      expect(id).toBe('tools');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('walk-up 碰到 .git 但該層有 marker → 用該 marker（而非更上層）', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'cc-memory-boundary-ok-'));
+    try {
+      writeFileSync(join(parent, 'CLAUDE.md'), '<!-- cc-memory: project="outer-ignored" -->');
+      const repo = join(parent, 'my-repo');
+      mkdirSync(join(repo, '.git'), { recursive: true });
+      writeFileSync(join(repo, 'CLAUDE.md'), '<!-- cc-memory: project="repo-marker" -->');
+      const subdir = join(repo, 'src');
+      mkdirSync(subdir, { recursive: true });
+      const id = resolveProjectId({ cwd: subdir });
+      expect(id).toBe('repo-marker');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('listProjects / projectExists (DB integration)', () => {

@@ -500,6 +500,33 @@ describe('services/memories.ts integration (real PG)', () => {
       expect(stats.sessionCount).toBe(0);
     });
 
+    // --------- Codex review round 22 P2：deleteMemory 不重複 archive ---------
+    it('第二次 deleteMemory 已 archived 的 row → 回 false（不讓重複 delete 看似成功）', async () => {
+      const projectId = `${TRACK_M_PREFIX}-double-del`;
+      const saved = await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: 'delete twice',
+      });
+      const first = await deleteMemory(db, saved.id);
+      expect(first).toBe(true);
+      const second = await deleteMemory(db, saved.id);
+      expect(second).toBe(false); // 已 archived → 非 active → 不匹配 → false
+    });
+
+    it('第二次 deleteMemory 帶 projectId scope 已 archived row → 仍回 false', async () => {
+      const projectId = `${TRACK_M_PREFIX}-double-del-scoped`;
+      const saved = await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: 'delete twice scoped',
+      });
+      const first = await deleteMemory(db, saved.id, projectId);
+      expect(first).toBe(true);
+      const second = await deleteMemory(db, saved.id, projectId);
+      expect(second).toBe(false);
+    });
+
     it('getProjectStats counts session vs decision', async () => {
       const projectId = `${TRACK_M_PREFIX}-stats`;
       await saveMemory(db, { projectId, type: 'session', summary: 's1' });

@@ -499,20 +499,25 @@ export async function getMemory(
 /**
  * 軟刪除（status='archived'）。若 projectId 提供，只刪該 project 的 row；
  * 找不到時回 false（跨 project delete 嘗試 = 找不到）。codex review round 18 P1。
+ * 只對 status='active' 的 row 生效（codex review round 22 P2）：已 archived 的 row
+ * 再刪應回 false → MCP handler 回 NOT_FOUND，不讓重複 delete 看起來像 success。
  */
 export async function deleteMemory(
   db: DbClient,
   id: string,
   projectId?: string
 ): Promise<boolean> {
-  const conditions: SQL[] = [eq(projectMemories.id, id)];
+  const conditions: SQL[] = [
+    eq(projectMemories.id, id),
+    eq(projectMemories.status, 'active'),
+  ];
   if (projectId !== undefined) {
     conditions.push(eq(projectMemories.projectId, projectId));
   }
   const result = (await db
     .update(projectMemories)
     .set({ status: 'archived' })
-    .where(conditions.length > 1 ? and(...conditions) : conditions[0])
+    .where(and(...conditions))
     .returning({ id: projectMemories.id })) as Array<{ id: string }>;
   return result.length > 0;
 }
