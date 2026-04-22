@@ -2,15 +2,16 @@
 
 > Scope：`git diff 399018f..HEAD` — 本期 Phase 2（schema 補完 + service layer）+ Phase 5-A（retrieval eval 被動記錄）。
 > 指令：`codex exec review --base 399018f`
-> Loop 已進入 round 19。
+> **Loop 於 round 24 收斂結束**（codex 回「no actionable bugs, internally consistent」）。
 
 ## 當前狀態
 
-- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 23 round fixes
+- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 23 round fixes → Stage 3 收斂
 - **測試**：248 / 248 tests 綠（baseline 143 + codex-driven +105 tests）
 - **Build / Lint**：乾淨
 - **Migrations**：0002 / 0003 / 0004 / 0005 全部已 commit
-- **下一步**：跑 round 24 codex review 驗 round 23 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
+- **Loop 狀態**：✅ 收斂完成（round 24 codex 無新 findings）
+- **下一步**：收尾 Stage 3 + 寫 Phase A 完工 commit / tag
 
 ## 跑 codex review 的指令
 
@@ -193,6 +194,13 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 |---|---|---|---|
 | P1 | `src/services/projects.ts` tryReadClaudeMdMarker | cwd 不在 git repo 裡（例 `~/scratch/demo`）時，walk-up 仍一路走到 `~/CLAUDE.md` → 子目錄被解成祖先 marker 的陌生 project | ✅ 採納（先找 repo root；找不到 `.git` → marker 完全不適用，回 null 讓 layer 4/5 接手） |
 
+### Round 24 — ✅ 收斂（0 findings）
+
+Codex 回覆：
+> "I did not find any discrete, actionable bugs in the introduced changes that clearly break existing behavior or would warrant blocking the patch. The new service layer, migrations, and MCP handler rewiring appear internally consistent."
+
+Loop 終止條件達成：雙方意見一致、codex 無新 bug / risk 指摘。Stage 3 可收尾。
+
 ## 主要主題歸納
 
 | 主題 | 出現 rounds | 說明 |
@@ -221,7 +229,11 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 
 > 直到雙方遇見趨於一致且 codex 沒有 review 出新 bug or risks，就可以結束 loop
 
-目前 round 23 仍有新 findings（1 P1，採納；round 22 修復的漏網邊角 case）→ 尚未收斂，繼續 round 24。findings 走勢：19:3 → 20:2 → 21:1 → 22:2 → 23:1（walk-up 收斂中）。
+✅ **Round 24 收斂**：codex 無新 findings，雙方意見一致。Loop 結束。
+
+findings 走勢：19:3 → 20:2 → 21:1 → 22:2 → 23:1 → 24:0。
+
+Stage 3 共 6 rounds（19-24），累積採納 7 findings + 反駁 1 findings（round 19 Finding 3 formatDueDate UTC 午夜；codex round 20 起未再提 → 接受反駁）。
 
 ## 反駁紀錄（回送給 codex 的論點）
 
