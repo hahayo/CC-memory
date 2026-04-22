@@ -1,0 +1,2 @@
+DROP INDEX "project_memories_idempotency_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "project_memories_idempotency_idx" ON "project_memories" USING btree ("project_id","idempotency_key") WHERE "project_memories"."idempotency_key" IS NOT NULL AND "project_memories"."status" = 'active';

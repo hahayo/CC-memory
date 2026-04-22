@@ -2,15 +2,15 @@
 
 > Scope：`git diff 399018f..HEAD` — 本期 Phase 2（schema 補完 + service layer）+ Phase 5-A（retrieval eval 被動記錄）。
 > 指令：`codex exec review --base 399018f`
-> Loop 停在 round 18 commit `67dd32c`，**下 session 從 round 19 繼續**。
+> Loop 已進入 round 19。
 
 ## 當前狀態
 
-- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 18 round fixes 到 `67dd32c`
-- **測試**：229 / 229 tests 綠（baseline 143 + codex-driven +86 tests）
+- **Commits**：Stage 0 `26f8f47` → Stage 1 merges（3 worktree）→ Stage 2 `ebca384` → 19 round fixes
+- **測試**：233 / 233 tests 綠（baseline 143 + codex-driven +90 tests）
 - **Build / Lint**：乾淨
-- **Migrations**：0002 / 0003 / 0004 全部已 commit
-- **下一步**：跑 `codex exec review --base 399018f` 看 round 19 是否還有新 findings；若無即可收尾 Stage 3 並寫 Phase A 驗收 commit
+- **Migrations**：0002 / 0003 / 0004 / 0005 全部已 commit
+- **下一步**：跑 round 20 codex review 驗 round 19 修復；若無 blocking 即可收尾 Stage 3 並寫 Phase A 驗收 commit
 
 ## 跑 codex review 的指令
 
@@ -159,6 +159,14 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 | P2 | `src/index.ts` cc_memory_get | 不驗 project，跨 project UUID 可讀取 |
 | P2 | `src/services/memories.ts` deleteByIdempotencyKey | 沒 scope by project（配合 round 15 composite unique 後會撈錯） |
 
+### Round 19 — 3 findings（1 P1 + 2 P2；1 反駁）
+
+| 嚴重度 | 位置 | 摘要 | 處置 |
+|---|---|---|---|
+| P1 | `src/index.ts` cc_memory_search | 同時帶 project_id + project_path 時誤驗 path → regression | ✅ 採納 |
+| P2 | `src/services/memories.ts` saveMemory + partial unique index | archived row 被當 idempotent hit；archive 後同 key 無法再 save | ✅ 採納（migration 0005 + pre-check/race handler 加 `status='active'` filter） |
+| P2 | `src/index.ts` formatDueDate | UTC 午夜 timed due_date 被壓成 date-only 顯示 | ❌ 反駁（Date 物件無法還原意圖；需加 schema column 存意圖，成本效益不符；round 12 收斂過 date-only 邏輯） |
+
 ## 主要主題歸納
 
 | 主題 | 出現 rounds | 說明 |
@@ -187,6 +195,18 @@ codex exec review --base 399018f 2>&1 | tee /tmp/codex-review-round19.log | tail
 
 > 直到雙方遇見趨於一致且 codex 沒有 review 出新 bug or risks，就可以結束 loop
 
-目前 round 18 仍有新 findings → **未收斂，下 session 應繼續**。
+目前 round 19 有新 findings（1 採納 P1 + 1 採納 P2 + 1 反駁 P2）→ 尚未收斂，繼續 round 20 驗證。
 
-本 session 停在 07:53 AM，已觸及 codex usage limit（7:19 AM reset 後可再用）。
+## 反駁紀錄（回送給 codex 的論點）
+
+### Round 19 Finding 3 — formatDueDate UTC 午夜
+
+**Codex 主張**：`2026-04-22T00:00:00Z` 被渲染成 `2026-04-22`，混淆 date-only 和 timed-midnight 語意。
+
+**反駁要點**：
+1. `new Date("2026-04-22")` 和 `new Date("2026-04-22T00:00:00Z")` 產生同一個 Date 物件，DB 也存相同 timestamp。只從儲存值無法還原「使用者原始意圖」。
+2. 若要區分，須新增 schema column（`due_date_is_date_only: boolean` 或 `due_date_raw: text`）+ 全 call site 同步，含 migration、API schema、parseDueDate、formatDueDate。
+3. 當前邏輯是 round 12 收斂過的 date-only 顯示決定，改動會重新打開那輪已解決的 timezone 漂移問題。
+4. 成本效益不符：極邊角 case（恰好輸入 `T00:00:00Z` 想要 timed 語意的使用者），不值得加 schema column。
+
+**若 codex 仍堅持**：請說明為何邊角 case 值得 schema 複雜度，或提出不改 schema 的替代方案。

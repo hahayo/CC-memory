@@ -36,6 +36,13 @@
       "when": 1776814246320,
       "tag": "0004_add_search_feedback_filter_type",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1776824444894,
+      "tag": "0005_scope_idempotency_by_active_status",
+      "breakpoints": true
     }
   ]
 }

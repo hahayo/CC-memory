@@ -67,10 +67,13 @@ export const projectMemories = pgTable(
     // 冪等 partial unique index：scope by (project_id, idempotency_key)
     // 讓 client 可在不同 project 重用同一把 key（例如 `save-${sessionId}`），
     // 不會被誤判成跨 project retry（codex review round 15 P1）。
-    // idempotency_key IS NOT NULL 才進 index；NULL 可隨意重複。
+    // idempotency_key IS NOT NULL 且 status='active' 才進 index；
+    // archived row 不佔 unique slot，支援 undo → re-save 流程
+    // （codex review round 19 P2：deleteByIdempotencyKey 設 status='archived' 後，
+    //  同 key 再 save 應可建新 active row，而非撈到 archived row 回 idempotent=true）。
     uniqueIndex('project_memories_idempotency_idx')
       .on(table.projectId, table.idempotencyKey)
-      .where(sql`${table.idempotencyKey} IS NOT NULL`),
+      .where(sql`${table.idempotencyKey} IS NOT NULL AND ${table.status} = 'active'`),
   ]
 );
 

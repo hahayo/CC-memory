@@ -549,15 +549,15 @@ export async function handleToolCall(
           typeof args.project_path === 'string' && args.project_path.trim().length > 0
             ? (args.project_path as string)
             : null;
-        if (rawPath !== null) {
-          // 同 resolveCwdAndProjectId 的嚴格驗證：絕對路徑 + 目錄存在
-          // （codex review round 17 P2：cc_memory_search 用自己分支不能漏）
-          validateProjectPathForResolution(rawPath);
-        }
         let projectId: string | undefined;
         if (explicitId !== null) {
+          // project_id 已提供即為 authoritative；project_path 為多餘欄位，不驗證
+          // （codex review round 19 P1：client 同時送兩個欄位時不應被 INVALID_ARGUMENT 擋下）
           projectId = explicitId;
         } else if (rawPath !== null) {
+          // 需要 path 做 resolve 時才驗：絕對路徑 + 目錄存在
+          // （codex review round 17 P2：cc_memory_search 用自己分支不能漏）
+          validateProjectPathForResolution(rawPath);
           projectId = resolveProjectId({ cwd: rawPath });
         } else {
           projectId = undefined;

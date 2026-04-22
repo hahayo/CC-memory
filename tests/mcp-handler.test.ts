@@ -369,6 +369,32 @@ describe('MCP handler (Stage 2)', () => {
     expect(parsed.error.code).toBe('INVALID_ARGUMENT');
   });
 
+  // --------- Codex review round 19 P1：explicit project_id 時 project_path 不驗證 ---------
+  it('cc_memory_search 同時傳 project_id + 相對 project_path → 成功（project_id 為 authoritative）', async () => {
+    // 本例 project_id 已是 authoritative，即使 project_path 不是絕對路徑 / 目錄不存在，
+    // 也不該被 validateProjectPathForResolution 擋下（P1 regression）
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: 'x', project_id: tp, project_path: '.', mode: 'keyword' },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
+  it('cc_memory_search 同時傳 project_id + 不存在的 project_path → 成功（project_path 被忽略）', async () => {
+    const res = await handleToolCall(
+      'cc_memory_search',
+      {
+        query: 'x',
+        project_id: tp,
+        project_path: '/tmp/cc-memory-nonexistent-round19',
+        mode: 'keyword',
+      },
+      testDb
+    );
+    expect(res.isError).not.toBe(true);
+  });
+
   // --------- Codex review round 13：empty-string due_date + whitespace search project_id ---------
   it('cc_task_create due_date: "" → INVALID_ARGUMENT（不靜默變 undefined）', async () => {
     const res = await handleToolCall(

@@ -422,6 +422,63 @@ describe('services/memories.ts integration (real PG)', () => {
       `;
       expect(rows[0].status).toBe('active');
     });
+
+    // --------- Codex review round 19 P2：archive 後同 key 可重新 save ---------
+    it('archive 後同 key + 同 payload → 建立新 active row（非 idempotent 命中 archived）', async () => {
+      const projectId = `${TRACK_M_PREFIX}-re1`;
+      const key = `rekey-${randomUUID()}`;
+      const input = {
+        projectId,
+        type: 'session' as const,
+        summary: 'initial save',
+        idempotencyKey: key,
+      };
+      const first = await saveMemory(db, input);
+      expect(first.idempotent).toBe(false);
+
+      // 軟刪除
+      const deleted = await deleteByIdempotencyKey(db, projectId, key, 300);
+      expect(deleted).toBe(true);
+
+      // 再 save 同 key 同 payload → 應建新 active row，idempotent=false
+      const second = await saveMemory(db, input);
+      expect(second.idempotent).toBe(false);
+      expect(second.id).not.toBe(first.id);
+
+      // archived + new active 各 1 row
+      const rows = await sql<{ id: string; status: string }[]>`
+        SELECT id, status FROM project_memories
+        WHERE project_id = ${projectId} AND idempotency_key = ${key}
+        ORDER BY created_at ASC
+      `;
+      expect(rows).toHaveLength(2);
+      expect(rows[0].id).toBe(first.id);
+      expect(rows[0].status).toBe('archived');
+      expect(rows[1].id).toBe(second.id);
+      expect(rows[1].status).toBe('active');
+    });
+
+    it('archive 後同 key + 不同 payload → 建立新 active row（非 IdempotencyConflictError）', async () => {
+      const projectId = `${TRACK_M_PREFIX}-re2`;
+      const key = `rekey2-${randomUUID()}`;
+      const first = await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: 'original payload',
+        idempotencyKey: key,
+      });
+      await deleteByIdempotencyKey(db, projectId, key, 300);
+
+      // 同 key 但不同 payload，archive 後應 ok（因為 archived row 已不佔 active 冪等槽位）
+      const second = await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: 'new payload after undo',
+        idempotencyKey: key,
+      });
+      expect(second.idempotent).toBe(false);
+      expect(second.id).not.toBe(first.id);
+    });
   });
 
   // -------------------------------------------------------------------------

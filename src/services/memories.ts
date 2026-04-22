@@ -131,6 +131,9 @@ export async function saveMemory(
   // 冪等 pre-check：有 key 時先 SELECT，若命中且 hash 一致 → 直接回舊 id，
   // **完全不跑 embedding**（Codex review round 4 P3：避免重試流浪費 embedding API call
   // 與受 transient 失敗影響）。不一致則早期 throw conflict，還省了 embedding + insert 成本。
+  // 只認 status='active' 的 row（codex review round 19 P2）：archived row 是 undo 後的
+  // 墓碑，不應命中 idempotency hit 讓 caller 拿到已刪除 id；schema 的 partial unique
+  // 也改成 WHERE status='active'，allow archive 後同 key 再 save。
   if (hasKey) {
     const preExistingRows = (await db
       .select()
@@ -138,7 +141,8 @@ export async function saveMemory(
       .where(
         and(
           eq(projectMemories.projectId, input.projectId),
-          eq(projectMemories.idempotencyKey, normalizedKey!)
+          eq(projectMemories.idempotencyKey, normalizedKey!),
+          eq(projectMemories.status, 'active')
         )
       )
       .limit(1)) as Memory[];
@@ -200,13 +204,17 @@ export async function saveMemory(
     }
     // Race handler：pre-check miss 但在 embedding + insert 期間有其他 writer 搶先
     // 以同 key insert 了。重查一次比對。
+    // 同 pre-check：只認 status='active' row（codex review round 19 P2）；
+    // partial unique 已含 status='active' filter，unique violation 即代表有 active row
+    // 搶先，撈 active row 比對 hash。
     const existingRows = (await db
       .select()
       .from(projectMemories)
       .where(
         and(
           eq(projectMemories.projectId, input.projectId),
-          eq(projectMemories.idempotencyKey, normalizedKey!)
+          eq(projectMemories.idempotencyKey, normalizedKey!),
+          eq(projectMemories.status, 'active')
         )
       )
       .limit(1)) as Memory[];
