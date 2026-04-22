@@ -49,33 +49,50 @@ function nonEmpty(s: string | null | undefined): string | null {
   return t.length > 0 ? t : null;
 }
 
+const WALK_UP_MAX_DEPTH = 64; // 防 symlink 循環或奇怪 path
+
+function findRepoRoot(cwd: string, existsFn: ExistsSyncFn): string | null {
+  // 從 cwd 往上找第一個含 `.git` 的目錄（repo root）；找不到回 null。
+  let current = cwd;
+  for (let i = 0; i < WALK_UP_MAX_DEPTH; i++) {
+    if (existsFn(join(current, '.git'))) return current;
+    const parent = dirname(current);
+    if (parent === current) return null; // filesystem root
+    current = parent;
+  }
+  return null;
+}
+
 function tryReadClaudeMdMarker(
   cwd: string,
   readFn: ReadFileSyncFn,
   existsFn: ExistsSyncFn
 ): string | null {
-  // 從 cwd 逐層往上找 CLAUDE.md，在 repo boundary 停（`.git` 目錄出現的那層）。
-  // 理由：
+  // CLAUDE.md marker 只在 repo 內有效。演進：
   //   - codex round 21 P2：caller 常從 repo subdirectory 呼叫；只讀 ${cwd}/CLAUDE.md
-  //     會漏 repo-root marker，造成同 project 因子目錄不同解出不同 ID。
-  //   - codex round 22 P1：無邊界走到 filesystem root 會撿到 `~/CLAUDE.md` 或 monorepo
-  //     父目錄的 marker → 同 repo 被 misroute 到陌生 project ID。
-  // 策略：每一層先讀 CLAUDE.md，有 marker 即回；再檢查 `.git`（視為 repo root），
-  // 找到 repo root 後停止繼續往上（不越出 repo 邊界）。
+  //     會漏 repo-root marker → 加 walk-up 往上找。
+  //   - codex round 22 P1：walk-up 無邊界會撿 `~/CLAUDE.md` / monorepo 父目錄 marker
+  //     → 碰到 `.git` 的 repo root 停止。
+  //   - codex round 23 P1：cwd 不在 git repo 內時（例 `~/scratch/demo`），walk-up
+  //     仍會一路走到 `~/CLAUDE.md` → 把 demo 解成陌生 project。修法：先找 repo
+  //     root；找不到 repo root（非 git 目錄）→ marker 完全不適用，回 null 讓
+  //     layer 4/5 fallback 接手。
+  const repoRoot = findRepoRoot(cwd, existsFn);
+  if (repoRoot === null) return null;
+
+  // 在 [cwd, repoRoot] 範圍內逐層讀 CLAUDE.md，找 marker
   let current = cwd;
-  // 最多走 64 層，防 symbolic link 循環或奇怪 path
-  for (let i = 0; i < 64; i++) {
+  for (let i = 0; i < WALK_UP_MAX_DEPTH; i++) {
     try {
       const content = readFn(join(current, 'CLAUDE.md'));
       const match = content.match(/<!--\s*cc-memory:\s*project="([^"]+)"\s*-->/);
       if (match) return match[1];
     } catch {
-      // CLAUDE.md 不存在 / 不可讀 → 檢查 .git / 往上
+      // CLAUDE.md 不存在 / 不可讀 → 往上一層
     }
-    // 若這層是 repo root（有 .git），停止 walk-up，不再撿外層 marker
-    if (existsFn(join(current, '.git'))) break;
+    if (current === repoRoot) break; // 到 repo root 停止（不越出）
     const parent = dirname(current);
-    if (parent === current) break; // filesystem root
+    if (parent === current) break; // 理論上不會到（repoRoot 已限制），防禦性保留
     current = parent;
   }
   return null;

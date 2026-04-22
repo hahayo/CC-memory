@@ -115,6 +115,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj2e-'));
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      mkdirSync(join(dir, '.git'), { recursive: true }); // round 23：marker 需在 repo 內才生效
       const id = resolveProjectId({ cwd: dir });
       expect(id).toBe('from-marker');
     } finally {
@@ -141,6 +142,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-explicit-'));
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      mkdirSync(join(dir, '.git'), { recursive: true }); // round 23：marker 需在 repo 內才生效
       const id = resolveProjectId({ cwd: dir, cwdIsExplicit: true });
       expect(id).toBe('from-marker');
     } finally {
@@ -153,6 +155,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-nonexplicit-'));
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      mkdirSync(join(dir, '.git'), { recursive: true });
       const id = resolveProjectId({ cwd: dir });
       expect(id).toBe('from-env');
     } finally {
@@ -165,6 +168,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-both-'));
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
+      mkdirSync(join(dir, '.git'), { recursive: true });
       const id = resolveProjectId({ explicit: 'from-caller', cwd: dir, cwdIsExplicit: true });
       expect(id).toBe('from-caller');
     } finally {
@@ -173,10 +177,11 @@ describe('resolveProjectId (5-layer priority)', () => {
   });
 
   // --------- Codex review round 21 P2：CLAUDE.md marker 往上層找 ---------
-  it('CLAUDE.md marker 從 subdirectory 也能找到（往上層走）', () => {
+  it('CLAUDE.md marker 從 subdirectory 也能找到（往上層走，限 repo 內）', () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-memory-walkup-'));
     try {
       writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="repo-root-id" -->');
+      mkdirSync(join(root, '.git'), { recursive: true }); // 標記為 repo root
       const subdir = join(root, 'src', 'tools', 'deep');
       mkdirSync(subdir, { recursive: true });
       // 從 deep subdir 解析，應找到 root 的 marker（不是 fallback 到 basename）
@@ -190,6 +195,7 @@ describe('resolveProjectId (5-layer priority)', () => {
   it('cwd 本身有 CLAUDE.md marker → 就地用（不繼續往上找）', () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-memory-local-'));
     try {
+      mkdirSync(join(root, '.git'), { recursive: true }); // 標記為 repo root
       const subdir = join(root, 'sub');
       mkdirSync(subdir, { recursive: true });
       writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="parent" -->');
@@ -248,6 +254,24 @@ describe('resolveProjectId (5-layer priority)', () => {
       expect(id).toBe('repo-marker');
     } finally {
       rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  // --------- Codex review round 23 P1：非 git 目錄不應撿祖先 CLAUDE.md ---------
+  it('cwd 不在 git repo 裡 → 祖先的 CLAUDE.md marker 完全不適用（marker 只在 repo 內有效）', () => {
+    const ancestor = mkdtempSync(join(tmpdir(), 'cc-memory-non-repo-'));
+    try {
+      // 祖先有 CLAUDE.md（模擬 ~/CLAUDE.md）
+      writeFileSync(join(ancestor, 'CLAUDE.md'), '<!-- cc-memory: project="ancestor-marker" -->');
+      // 子目錄無 .git、無 CLAUDE.md（模擬 ~/scratch/demo）
+      const demo = join(ancestor, 'scratch', 'demo');
+      mkdirSync(demo, { recursive: true });
+      const id = resolveProjectId({ cwd: demo });
+      // marker 不適用 → fallback 到 layer 5 basename = 'demo'
+      expect(id).not.toBe('ancestor-marker');
+      expect(id).toBe('demo');
+    } finally {
+      rmSync(ancestor, { recursive: true, force: true });
     }
   });
 });
