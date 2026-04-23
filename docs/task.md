@@ -1,15 +1,17 @@
-# CC-memory v0.2 Task Breakdown
+# CC-memory Task Breakdown（v0.3 Phase A ✅ + v0.4 Phase C 規劃）
 
-> Spec 版本：**1.3** · 依 Phase 0-5 拆解 · Gate 未過不進下個 phase
+> **當前狀態**：Phase A 全 Gate 綠 ✅（tag `v0.3-phase-a`，248 tests）· Phase B ❌ 整塊取消 · Phase C 設計完成，pending implementation
 >
-> **Phase 劃分（2026-04-21 修訂）：**
+> **執行紀律**：每個 Milestone 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
 >
-> **執行紀律**：每個 Phase 開工前讀 `~/.claude/rules/sdd-workflow.md` 的
-> `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
+> **Phase 劃分（2026-04-23 更新）：**
+> - **Phase A** ✅：Phase 0 + 1 + 2 + 5-A
+> - ~~**Phase B**~~ ❌：Phase 3 / 4 / 5-B 整塊取消（見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Context）
+> - **Phase C — v0.4 自動採集**（pending）：M1 + M2 + M3 + M4 + M5（~7.5 日 + 2 週觀察）
 >
-> - **Phase A — 本期交付**：Phase 0 ✅ + Phase 1 ✅ + Phase 2 + Phase 5-A
-> - **Phase B — 後續階段**：Phase 3 (HTTP) + Phase 4 (Telegram) + Phase 5-B
-> - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；Phase 5-A Gate 指定三區塊；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
+> change log：
+> - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
+> - **v0.4（2026-04-23）**：Phase B 整塊標取消；新增 Phase C M1~M5；端對端驗收加 Phase C 清單
 
 ---
 
@@ -126,7 +128,7 @@
 
 ---
 
-# Phase B — 後續階段（HTTP + Telegram，可由其他 agent 承接）
+# ~~Phase B — 後續階段（HTTP + Telegram）~~ ❌ 2026-04-23 整塊取消（以下歷史）
 
 > 本期不實作，資料面支援（`idempotency_key`、`writer_host`、`bot_user_state` 表）在 Phase A 已就位。以下保留規劃但不排程。
 
@@ -261,22 +263,172 @@
 
 ---
 
+# Phase C — v0.4 自動採集（pending）
+
+> 完整設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Rollout Plan + §Success Criteria。
+> 每個 Milestone 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
+
+## M1 — Schema + Refine Tools MVP（~1d）
+
+- [ ] `src/db/schema.ts`：新增 `sessionSummaries` 表（`vector(768)` embedding + partial unique index `(project_id, session_id) WHERE status='active' AND session_id IS NOT NULL`）
+- [ ] `src/db/schema.ts`：新增 `refineAuditLog` 表
+- [ ] `src/db/schema.ts`：`projectMemories` 加 `source_summary_id uuid` REFERENCES
+- [ ] `drizzle-kit generate --name=session_summaries_refine_audit` → `sql/migrations/0003_*.sql`
+- [ ] 套用 local + Zeabur PG
+- [ ] `src/services/refine.ts`：delete / promote / merge / edit 四操作 + audit log 寫入
+- [ ] `src/tools/refine-{delete,promote,merge,edit}.ts`：MCP tool 註冊
+- [ ] `scripts/refine.ts` CLI：list / delete / promote / merge / edit / audit，`--dry-run` / `--yes` / `--project`
+- [ ] Unit + Integration tests（≥ 12 新測）
+
+### M1 Gate
+
+- [ ] migration 在 local PG / Zeabur PG 都成功
+- [ ] `project_memories.source_summary_id` 可 FK 到 `session_summaries.id`
+- [ ] 四個 refine MCP tool happy path 綠
+- [ ] CLI `refine list --where ...` 可讀、`refine audit --since ...` 可讀
+- [ ] 原 248 tests 全綠
+
+---
+
+## M2 — Capture Pipeline（~2.5d）
+
+- [ ] `src/llm/claude-cli.ts`：封裝 `spawn('claude', ['-p', ..., '--output-format', 'json', '--model', <m>])` + timeout 60s + retry 3 次指數退避 + stdout parse
+- [ ] `src/llm/gemini-embed.ts`：抽 Phase A 既有 embedding 邏輯成獨立模組（介面不變）
+- [ ] `src/services/summaries.ts`：`upsertSessionSummary`（首次 INSERT / 二次 UPDATE，`summarize_count++`）+ null session_id 降級
+- [ ] `src/tools/save-summary.ts`：MCP `cc_memory_save_summary`
+- [ ] `scripts/capture-runner.ts`：
+  - [ ] 讀 env（`CLAUDE_SESSION_ID` / `CLAUDE_TRANSCRIPT_PATH` / `CLAUDE_PROJECT_DIR`）
+  - [ ] Feature flag `AUTO_CAPTURE=off` 直接 exit
+  - [ ] SKIP_TOOLS 過濾（從 transcript 抽本輪 tool list，⊆ 清單則 skip）
+  - [ ] 雙節流（min-interval 180s + min-delta-tokens 500）
+  - [ ] Transcript size cap（head 500KB + tail 1MB）
+  - [ ] 算 idempotency_key
+  - [ ] Claude CLI call → parse → embed → MCP save-summary
+  - [ ] 更新 `~/.cc-memory/state/<session_id>.json`（last_summary_at / last_transcript_hash / summarize_count / last_tools / null_session_streak）
+  - [ ] Queue resume + `.dead` 標記（attempts ≥ 5）
+  - [ ] `claude-cli-missing.flag` + `quota-exceeded.flag` 機制
+- [ ] `hooks/stop-capture.sh`（`set +e` 呼叫 runner）
+- [ ] Unit + Integration tests（SKIP_TOOLS / 節流 / upsert / null session / queue resume / flag 機制）
+
+### M2 Gate
+
+- [ ] E2E：模擬 Stop hook 觸發（直接跑 hook wrapper）→ DB 有 row，`writer_host` 正確
+- [ ] 同 session 跑兩輪 Stop（transcript 有新增）→ DB 只有一筆 active、`summarize_count=2`
+- [ ] 本輪只有 `TodoWrite` → 不摘要（SKIP_TOOLS 生效）
+- [ ] 兩輪間隔 < 180s + delta < 500 tokens → 不摘要（節流生效）
+- [ ] 斷 DB 連線跑 capture → `~/.cc-memory/capture-queue/` 有一筆 → 恢復連線重觸 hook → queue 清空、DB 有 row
+- [ ] `CC_MEMORY_AUTO_CAPTURE=off` → runner exit 無寫入
+- [ ] Claude CLI 不存在 integration test 綠（flag 機制）
+
+---
+
+## M3 — Retrieval Integration + 跨專案（~1.5d）
+
+- [ ] `src/services/memories.ts` `searchMemories` 擴展：
+  - [ ] 新增 `project_ids?: string[]` 參數（優先於 `project_id`）
+  - [ ] `project_ids=['*']` → ALL project（需 explicit）
+  - [ ] 跨兩表 query + 加權 rerank（`W_MANUAL=1.0` / `W_PROMOTED=0.85` / `W_AUTO=0.65`）
+  - [ ] 結果每筆標 `project_id`
+- [ ] `src/db/schema.ts`：`search_feedback` 加 `result_source_breakdown jsonb`
+- [ ] `src/services/feedback.ts` `recordSearchQuery` 填 breakdown
+- [ ] env 配置讀取：`CC_MEMORY_WEIGHT_*` / `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH`
+- [ ] Unit + Integration tests（加權 / 跨專案 / feature flag off 退回 Phase A 行為）
+
+### M3 Gate
+
+- [ ] manual 和 auto 同 query cosine 差 ≤ 0.15 時，加權後 manual 排前
+- [ ] `project_ids=['A','B']` 能回跨兩個 project 的結果，每筆 `project_id` 正確
+- [ ] `INCLUDE_AUTO_IN_SEARCH=off` → 只回 `project_memories`（退回 Phase A）
+- [ ] 原 248 tests 不回歸
+
+---
+
+## M4 — SessionStart Re-inject（~1d）
+
+- [ ] `src/tools/recent-summaries.ts`：MCP `cc_memory_recent_summaries(project_id, limit)` read-only
+- [ ] `scripts/reinject-runner.ts`：
+  - [ ] Feature flag `REINJECT=off` exit
+  - [ ] 查近 N 筆 summary（env `REINJECT_SUMMARIES=5`）
+  - [ ] 查近 M 筆 manual / promoted（env `REINJECT_MANUAL=3`）
+  - [ ] 格式化為 Claude Code hook protocol `additionalContext` JSON
+  - [ ] stdout 輸出（失敗 / 空結果 → stdout 空）
+- [ ] `hooks/session-start-reinject.sh`（matcher 對應 `startup|clear|compact`）
+- [ ] 實作前 context7 查 Claude Code 當前 hook protocol 對 `additionalContext` 的要求
+- [ ] Unit + Integration tests
+
+### M4 Gate
+
+- [ ] `/clear` 觸發 → 新 context 含近 N 筆 summary + M 筆 manual（Claude 能 recall 注入內容）
+- [ ] `REINJECT=off` → `/clear` 後 context 不含注入
+- [ ] 空 project → stdout 空、session 正常啟動（不注入 placeholder）
+
+---
+
+## M5 — Benchmark Harness + 觀察期進入（~0.5d dev）
+
+- [ ] `docs/benchmark/fixtures.md`：固定 5 query fixture（含 expected top-3 manual memory id，人工維護）
+- [ ] `scripts/benchmark.ts`：
+  - [ ] 接受 `--fixtures <path>` 載固定 query
+  - [ ] 從 `search_feedback` 近 7 日 query 抽真實 5 query
+  - [ ] 對 CC-memory 與 claude-mem 各跑 top-5
+  - [ ] 輸出 `docs/benchmark-YYYY-MM-DD.md`（含交集、rank、錯抓率 placeholder 留人工填）
+- [ ] 人工標註 template：`docs/benchmark/manual-template.md`
+
+### M5 Gate
+
+- [ ] `npx tsx scripts/benchmark.ts --fixtures docs/benchmark/fixtures.md` 可跑完、輸出 markdown 報告
+- [ ] 進入觀察期（≥ 2 週 + ≥ 30 筆 auto summary）；觀察期結束才評品質閘
+
+---
+
+# 品質閘（Phase C 結束後，決定是否停用 claude-mem）
+
+**不是 M5 Gate，是獨立決策點**。
+
+- [ ] Top-5 交集 ≥ 3 筆（≥ 7/10 組 query 達標）
+- [ ] 人工命中度：CC-memory 平均 first-relevant rank ≤ claude-mem
+- [ ] 錯抓率：最近 50 筆 auto summary 錯抓 < 10%
+
+三項 AND 滿足 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-mem。
+不滿足 → 繼續併用、分析原因、v0.5 調參數再跑。
+
+---
+
 ## 端對端驗收
 
-### Phase A（本期必過）
+### Phase A（已過）✅
 
-- [ ] A 電腦 Claude Code `cc_memory_save` → B 電腦 `cc_memory_list` 能看到，`writer_host` 顯示 A hostname
-- [ ] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
-- [ ] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
-- [ ] B 電腦 clone 到不同 path → 自動解析到相同 `project_id`（靠 repo_name）
-- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids / rank_positions / scores）
-- [ ] `scripts/eval-retrieval.ts` 能產出 markdown 報告（Phase A 指標）
+- [x] A 電腦 Claude Code `cc_memory_save` → B 電腦 `cc_memory_list` 能看到，`writer_host` 顯示 A hostname
+- [x] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
+- [x] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
+- [x] B 電腦 clone 到不同 path → 自動解析到相同 `project_id`（靠 repo_name）
+- [x] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆
+- [x] `scripts/eval-retrieval.ts` 能產出 markdown 報告
 
-### Phase B（後續階段）
+### ~~Phase B（已取消）~~ ❌
 
-- [ ] Telegram `/todos` 能看到 A 剛建的 task
-- [ ] Telegram `/todo X` → A 電腦 `cc_task_list` 能看到，`writer_host` = `telegram-bot`
-- [ ] Bot 設 `CC_MEMORY_WRITER=telegram-bot` → 寫入 row 的 `writer_host` 為 `telegram-bot`
-- [ ] 未設 active project 的 Telegram user 發 `/note` → 收 `SWITCH_REQUIRED` 提示
-- [ ] Telegram 10 秒內撤銷成功、超時 403、重複按 no-op
-- [ ] Phase B 指標（接受率 / Top-1 / 撤銷率）不再是 N/A
+### Phase C（v0.4 本期必過）
+
+**Capture**
+- [ ] A 機器跑一輪對話 → Stop hook → B 機器 `cc_memory_search` 查得到該 session summary，`writer_host`=A
+- [ ] 長 session 跑 N 輪 → 只有一筆 active row，`summarize_count=N`（或更少）
+- [ ] `AUTO_CAPTURE=off` → DB 無新 row
+- [ ] 斷網 capture → queue 有 row → 連網重觸 → queue 清空、DB 有 row
+
+**Re-inject**
+- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 5 筆 summary + 3 筆 manual
+- [ ] `REINJECT=off` → 新 context 不含注入
+
+**Retrieval**
+- [ ] `include_auto=true` / `=false` 結果差異符合加權
+- [ ] 手動 save + auto 抓同主題 → manual 排前
+- [ ] promote 一筆 auto → 該筆排名上升
+- [ ] `project_ids=['CC-memory','AI_Copilot']` 跨專案結果每筆標 `project_id`
+
+**Refine**
+- [ ] 四個 refine MCP tool 各 happy path + audit log 有一筆
+- [ ] CLI `refine list/delete/promote/merge/edit/audit` 都能跑
+
+**Benchmark / 品質閘**
+- [ ] `scripts/benchmark.ts` 跑完 10 組 query → 輸出 `docs/benchmark-YYYY-MM-DD.md`
+- [ ] 觀察期結束、三指標達標 → 產出 `docs/claude-mem-switchoff-decision.md`

@@ -1,13 +1,17 @@
-# CC-memory v0.2 Implementation Plan
+# CC-memory Implementation Plan（v0.3 Phase A 已交付 + v0.4 Phase C 規劃）
 
-> Spec 版本：**1.3** · 範圍：路線 A 最保守自建 · Phase 0+1 已完成
+> **當前狀態**：Phase A ✅（tag `v0.3-phase-a`，248 tests 綠） · Phase B ❌ 取消 · Phase C = v0.4 Stage 1（設計 ready，pending implementation）
 >
-> **Phase 劃分（2026-04-21 修訂）：**
-> - **Phase A — MCP only（本期交付）**：Phase 0 ✅ + Phase 1 ✅ + Phase 2 + Phase 5-A
-> - **Phase B — HTTP + Telegram（後續階段 / 可由其他 agent 承接）**：Phase 3 + Phase 4 + Phase 5-B
+> **Phase 劃分（2026-04-23 更新）：**
+> - **Phase A — MCP only** ✅ 已交付：Phase 0 + Phase 1 + Phase 2 + Phase 5-A
+> - ~~**Phase B — HTTP + Telegram**~~ ❌ 取消（2026-04-23）：Phase 3 / 4 / 5-B 整塊放棄
+> - **Phase C — v0.4 自動採集**（pending）：M1 (schema+refine) + M2 (capture) + M3 (retrieval+cross-project) + M4 (reinject) + M5 (benchmark)
 >
-> Phase A 優先保證：MCP 6 memory tool + 3 task tool 全綠、service layer 抽出、跨電腦 writer_host / repo_name 驗證、被動 retrieval 記錄。Phase B 資料面支援（`idempotency_key`、`bot_user_state` 表）在 Phase A 已就位，屆時不需改 schema。
-> - v1.3.1（2026-04-21）：plan.md 加 `## Dependencies` / `## Environment Variables`（從 Deployment 移出）/ `## Testing Strategy` / `## Risks & Open Questions`；`Phase A Groundwork` 區塊；Phase B 標題標記；`Phase 5` → `Phase 5-A`
+> **完整 Phase C 設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（source of truth）。本 plan 在既有 Phase A / Phase B 骨架上補入 Phase C 章節 + 把 Phase B 相關段標取消。
+>
+> change log：
+> - v1.3.1（2026-04-21）：plan.md 加 `## Dependencies` / `## Environment Variables` / `## Testing Strategy` / `## Risks`；Phase A Groundwork 區塊；Phase 標題
+> - **v0.4（2026-04-23）**：Phase B 整塊標取消；新增 Phase C（自動採集）於各段落；Dependencies 加 `child_process`（Claude CLI subprocess）；Data Model 加 `session_summaries` + `refine_audit_log`
 
 ---
 
@@ -68,15 +72,17 @@ Phase A 雖然不實作 HTTP / bot，但以下 4 項資料面支援在 Phase A �
 
 | 套件 | 用途 | 階段 |
 |---|---|---|
-| `drizzle-orm` / `drizzle-kit` | ORM + migration 唯一真相 | Phase A |
-| `@modelcontextprotocol/sdk` | MCP stdio server | Phase A |
-| `pgvector` (PG extension) | 向量欄位 + HNSW index | Phase A |
-| `@google/genai` | Gemini embedding（既有） | Phase A |
-| `vitest` / `@types/node` | 測試與型別 | Phase A |
-| `hono` / `@hono/node-server` | HTTP REST framework | Phase B |
-| `telegraf` | Telegram bot client | Phase B |
+| `drizzle-orm` / `drizzle-kit` | ORM + migration 唯一真相 | Phase A ✅ |
+| `@modelcontextprotocol/sdk` | MCP stdio server | Phase A ✅ |
+| `pgvector` (PG extension) | 向量欄位 + HNSW index | Phase A ✅ |
+| `@google/genai` | Gemini embedding（既有；v0.4 沿用，只給 embedding） | Phase A ✅ / Phase C |
+| `vitest` / `@types/node` | 測試與型別 | Phase A ✅ |
+| ~~`hono` / `@hono/node-server`~~ | ~~HTTP REST framework~~ | ~~Phase B~~ ❌ 取消 |
+| ~~`telegraf`~~ | ~~Telegram bot client~~ | ~~Phase B~~ ❌ 取消 |
+| `child_process` (node built-in) | Claude CLI subprocess 調用（v0.4 capture-runner） | Phase C |
+| Claude CLI (`claude` binary) | 使用者機器需已登入 Pro/Max subscription | Phase C runtime 相依 |
 
-Phase A 不加 `hono` / `telegraf`。Phase B 開工時一次補。
+Phase A 已完工。Phase C 不加新 npm 套件（只用 node 內建 + 既有 @google/genai）；外部相依僅 Claude CLI binary。
 
 ---
 
@@ -150,7 +156,50 @@ CREATE TABLE bot_user_state (
 ```
 
 **v1.3 關鍵差異**：bot 端**不再**有 `src/bot/state.ts` 直連 DB。所有讀寫經
-`/api/bot/state/:telegram_user_id` HTTP。
+`/api/bot/state/:telegram_user_id` HTTP。（Phase B 取消後此規則無實作對象，保留為歷史。）
+
+### `session_summaries`（v0.4 Phase C 新增）
+
+完整 schema 見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model。要點：
+
+```sql
+CREATE TABLE session_summaries (
+  id uuid PK,
+  project_id text NOT NULL,
+  session_id text,                       -- Stop hook env 取得；null 走獨立 row
+  summary / keywords[] / decisions[] / next_steps[],
+  capture_source text CHECK IN ('auto-stop-hook'),   -- Stage 2 可擴充
+  capture_hook text CHECK IN ('stop'),               -- Stage 2 可擴充
+  summarize_count int DEFAULT 1,         -- upsert 時 ++
+  promoted_to_memory_id uuid,            -- promote 時填（指向 project_memories.id）
+  embedding vector(768),                 -- Gemini text-embedding-004
+  writer_host text NOT NULL,
+  idempotency_key text UNIQUE,
+  status text CHECK IN ('active', 'archived'),
+  metadata jsonb,
+  created_at / updated_at
+);
+-- 核心 upsert 保證：
+CREATE UNIQUE INDEX ss_active_per_session_uniq
+  ON session_summaries (project_id, session_id)
+  WHERE status = 'active' AND session_id IS NOT NULL;
+```
+
+**`project_memories` 補欄**：`ADD COLUMN source_summary_id uuid REFERENCES session_summaries(id);`（promote 時填）
+
+### `refine_audit_log`（v0.4 Phase C 新增）
+
+```sql
+CREATE TABLE refine_audit_log (
+  id uuid PK,
+  operation text NOT NULL,   -- delete/promote/merge/edit
+  actor text NOT NULL,       -- 'mcp' | 'cli' | writer_host
+  target_ids uuid[] NOT NULL,
+  payload jsonb NOT NULL,    -- input + before/after snapshot
+  created_at
+);
+CREATE INDEX ral_created_idx ON refine_audit_log (created_at DESC);
+```
 
 ---
 
@@ -244,24 +293,27 @@ export function resolveWriterHost(): string {
 | `CC_MEMORY_PROJECT_ID` | 明示覆蓋 project_id | 可選 override |
 | `CC_MEMORY_WRITER` | writer_host 來源；預設 `os.hostname()` | 可選 |
 
-### Phase B — HTTP API service
+### ~~Phase B — HTTP API service / Telegram bot service~~ ❌ 取消（env 全不用）
 
-| Env | 用途 |
-|---|---|
-| `BOT_API_TOKEN` | Bot scope token（32+ 字元隨機） |
-| `ADMIN_API_TOKEN` | Admin scope token（32+ 字元隨機） |
-| `PORT` | HTTP listen port（預設 3000） |
+### Phase C — v0.4 自動採集
 
-### Phase B — Telegram bot service
+| Env | 用途 | 預設 |
+|---|---|---|
+| `CC_MEMORY_AUTO_CAPTURE` | 自動採集主開關 | `off`（opt-in） |
+| `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH` | `cc_memory_search` 是否混入 auto summary | `on` |
+| `CC_MEMORY_REINJECT` | SessionStart 是否注入記憶 | `off`（opt-in） |
+| `CC_MEMORY_CLAUDE_MODEL` | Claude CLI 摘要用的 model | `claude-sonnet-4-5` |
+| `CC_MEMORY_SKIP_TOOLS` | SKIP_TOOLS 清單（逗號分隔） | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` |
+| `CC_MEMORY_STOP_MIN_INTERVAL_SEC` | Stop 節流最短間隔（秒） | `180` |
+| `CC_MEMORY_STOP_MIN_DELTA_TOKENS` | Stop 節流最少新增 token | `500` |
+| `CC_MEMORY_REINJECT_SUMMARIES` | reinject 近 N 筆 summary | `5` |
+| `CC_MEMORY_REINJECT_MANUAL` | reinject 近 M 筆 manual / promoted | `3` |
+| `CC_MEMORY_WEIGHT_MANUAL` | manual 加權 | `1.0` |
+| `CC_MEMORY_WEIGHT_PROMOTED` | promoted 加權 | `0.85` |
+| `CC_MEMORY_WEIGHT_AUTO` | auto 加權 | `0.65` |
+| `CC_MEMORY_MAX_NULL_SESSION_STREAK` | session_id 連續取不到上限 | `5` |
 
-| Env | 用途 |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | BotFather token |
-| `TELEGRAM_ALLOWED_USER_IDS` | 白名單，逗號分隔 user id |
-| `API_URL` | 指向 HTTP service（例 `https://cc-memory-api.zeabur.app`） |
-| `API_TOKEN` | 等同 `BOT_API_TOKEN` |
-| `CC_MEMORY_WRITER` | 建議設 `telegram-bot` 方便辨識 |
-| `UNDO_WINDOW_SEC` | Undo 時效（秒），預設 10 |
+**前提**：使用者機器需已登入 Claude CLI（`claude auth login` 或等效）且有 Pro/Max subscription。`GEMINI_API_KEY` 繼續存在給 embedding 用。
 
 ---
 
@@ -353,9 +405,35 @@ export async function getRetrievalStats(sinceDays: number): Promise<RetrievalSta
 - 現有 6 個 memory tool 輸入輸出格式**不動**（向後相容）
 - `src/tools/*.ts` → 保留當薄殼（v0.3 清理）
 
+### Phase C 新增 services（v0.4）
+
+```ts
+// src/services/summaries.ts
+export async function upsertSessionSummary(input: UpsertSummaryInput): Promise<SessionSummary>;
+export async function listRecentSummaries(projectId: string, limit: number): Promise<SessionSummary[]>;
+
+// src/services/refine.ts
+export async function refineDelete(id: string, table: 'session_summaries' | 'project_memories', reason?: string): Promise<void>;
+export async function refinePromote(summaryId: string, overrides?: Partial<MemoryOverrides>): Promise<Memory>;
+export async function refineMerge(sourceIds: string[], targetTable: string, merged: MergedBody): Promise<Memory | SessionSummary>;
+export async function refineEdit(id: string, table: string, patch: EditPatch): Promise<SessionSummary | Memory>;
+
+// src/llm/claude-cli.ts
+export async function summarizeWithClaudeCli(prompt: string, transcript: string, model: string): Promise<SummaryJson>;
+
+// src/llm/gemini-embed.ts（Phase A 已有邏輯，抽模組）
+export async function embed(text: string): Promise<number[]>;
+```
+
+### 既有 `cc_memory_search`（Phase C 擴展）
+
+- 新增 `project_ids?: string[]` 參數（支援 `['*']` 全專案）
+- 新增跨表 query + 加權 rerank（`W_MANUAL=1.0` / `W_PROMOTED=0.85` / `W_AUTO=0.65`，env 可調）
+- `search_feedback` 加 `result_source_breakdown jsonb` 欄位
+
 ---
 
-## HTTP REST API（Phase B）
+## ~~HTTP REST API（Phase B）~~ ❌ 已取消（以下歷史）
 
 ### 技術選型
 
@@ -416,7 +494,7 @@ Framework **Hono**；Auth **雙 token + bot user header**；部署 Zeabur 獨立
 
 ---
 
-## Telegram Bot（Phase B）
+## ~~Telegram Bot（Phase B）~~ ❌ 已取消（以下歷史）
 
 ### Commands
 
@@ -461,7 +539,7 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 
 ---
 
-## Deployment（Phase B）
+## ~~Deployment（Phase B）~~ ❌ 已取消（Phase C 無新服務部署，沿用 Phase A 的 MCP + Zeabur DB；以下歷史）
 
 ### Zeabur 服務拓撲
 
@@ -508,34 +586,63 @@ src/services/
   tasks.ts             # Phase A  含狀態轉移 + optimistic lock + short-id 解析
   projects.ts          # Phase A  5 層優先序解析
   feedback.ts          # Phase A  含 `recordSearchQuery`（MCP search 被動寫 9 欄 row）+ `getRetrievalStats`；`recordFeedback`（驗 array 長度 + rank）延到 Phase 5-B
-  botstate.ts          # Phase B  bot_user_state 唯一通道，僅 HTTP route 使用
+  ~~botstate.ts~~      # Phase B ❌ 取消
 
-src/http/              # Phase B
-  index.ts             # Hono app
-  routes/{memories,tasks,projects,feedback,health,botstate}.ts
-  middleware/{auth,logger,error}.ts
+~~src/http/~~           # Phase B ❌ 取消
+~~src/bot/~~            # Phase B ❌ 取消
 
-src/bot/               # Phase B
-  index.ts             # telegraf entry（tsconfig.bot.json 限制 import）
-  client.ts            # fetch wrapper，帶 X-Telegram-User-Id header
-  handlers/{switch,search,note,todo,todos,projects,start,done,cancel}.ts
-  undo.ts              # idempotency key 管理
+# v0.4 Phase C 新建
+src/services/
+  summaries.ts         # Phase C  upsert session_summary、list recent
+  refine.ts            # Phase C  delete / promote / merge / edit（共用 audit log 寫入）
+src/llm/
+  claude-cli.ts        # Phase C  spawn Claude CLI subprocess + timeout / retry / parse
+  gemini-embed.ts      # Phase C  抽 Phase A 現有 embedding 邏輯成獨立模組（不改介面）
+src/tools/
+  save-summary.ts      # Phase C  MCP cc_memory_save_summary
+  recent-summaries.ts  # Phase C  MCP cc_memory_recent_summaries（reinject 用 read-only）
+  refine-delete.ts     # Phase C
+  refine-promote.ts    # Phase C
+  refine-merge.ts      # Phase C
+  refine-edit.ts       # Phase C
+
+scripts/
+  capture-runner.ts    # Phase C  Stop hook 的主流程：SKIP_TOOLS + 節流 + Claude CLI + embed + upsert + queue resume
+  reinject-runner.ts   # Phase C  SessionStart hook 的注入邏輯
+  refine.ts            # Phase C  CLI 批次 refine（list/delete/promote/merge/edit/audit）
+  benchmark.ts         # Phase C  跑 10 組 query 對比 claude-mem
+
+hooks/
+  stop-capture.sh          # Phase C
+  session-start-reinject.sh # Phase C
+
+sql/migrations/
+  0003_session_summaries_refine_audit.sql   # Phase C  新 2 表 + project_memories.source_summary_id
+
+# runtime state（不入 git）
+~/.cc-memory/
+  state/<session_id>.json    # 各 session 節流狀態
+  capture-queue/              # 失敗待重試
+  benchmark/fixtures/         # 固定 5 query fixture（入 git 放 docs/benchmark/）
 
 src/utils/
   repo-name.ts         # Phase A  git remote 抽 repo name（execFileSync，無 shell）
   writer-host.ts       # Phase A  env 或 os.hostname()
 
 sql/migrations/
-  0002_add_idempotency_and_writer.sql  # Phase A  ALTER project_memories + tasks
+  0002_add_idempotency_and_writer.sql  # Phase A  ✅ 已上線
 
 scripts/
-  eval-retrieval.ts    # Phase A  評估腳本；Phase A 僅跑查詢數 / mode 分佈 / 結果穩定度；Phase B 補 thumbs / selected_rank / 撤銷率
+  eval-retrieval.ts    # Phase A  ✅ 已上線
 
 docs/
-  retrieval-eval.md    # Phase A
-  http-api.md          # Phase B  正式 API 規格
-  telegram-bot.md      # Phase B
-  zeabur-deploy.md     # Phase B
+  retrieval-eval.md    # Phase A  ✅ 已上線
+  ~~http-api.md~~      # Phase B ❌ 取消
+  ~~telegram-bot.md~~  # Phase B ❌ 取消
+  ~~zeabur-deploy.md~~ # Phase B ❌ 取消
+  benchmark/fixtures.md     # Phase C  固定 5 query fixture
+  benchmark-YYYY-MM-DD.md   # Phase C  每次 benchmark 跑分結果（產出物）
+  claude-mem-switchoff-decision.md  # Phase C  品質閘過後的切換決策記錄
 ```
 
 ### 修改
@@ -586,40 +693,78 @@ docs/TODO.md                # v0.2 工作項目
 | **2** | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
 | **5-A** | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
 
-### Phase B — 後續階段（HTTP + Telegram，可由其他 agent 承接）
+### ~~Phase B — 後續階段（HTTP + Telegram）~~ ❌ 已於 2026-04-23 取消
 
-| Phase | 交付 | Gate |
-|---|---|---|
-| **3** | HTTP API（含 `/api/bot/state`）+ X-Telegram-User-Id middleware + 雙 token + Zeabur deploy | curl 全 endpoint 通；bot token 對 admin 收 403；bot scope 無 user header 收 401 |
-| **4** | Telegram bot（走 HTTP only）+ undo + short-id collision | 跨電腦寫讀通；bot CI grep gate 無違規 |
-| **5-B** | `POST /api/feedback` + Telegram inline button 回寫 thumbs / selected_rank + `docs/http-api.md` / `docs/telegram-bot.md` / `docs/zeabur-deploy.md` | 10 秒內撤銷成功；Phase B 指標（接受率 / Top-1 / 撤銷率）可量測 |
+### Phase C — v0.4 自動採集（~7.5 日 dev + 2 週觀察）
 
-**Gate 未過不進下個 phase**。Phase A 所有 Gate 通過後才視 Phase B 需求啟動。
+完整任務清單、Gate 條件、依賴見 `docs/task.md` 和 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Rollout Plan。
+
+| Milestone | 交付 | ~工時 | Gate |
+|---|---|---|---|
+| **M1** | Schema migration（session_summaries + refine_audit_log）+ 4 refine MCP tools + refine CLI 基本操作 | 1d | migration local/Zeabur 都成功；refine 四 tool happy path；原 248 tests 綠 |
+| **M2** | `scripts/capture-runner.ts`（SKIP_TOOLS + 雙節流 + upsert）+ `src/llm/claude-cli.ts` + `src/llm/gemini-embed.ts`（抽模組）+ `hooks/stop-capture.sh` + state/queue 機制 | 2.5d | E2E：Stop → Claude CLI → embed → DB upsert；SKIP_TOOLS 測試；節流測試；斷網 queue resume；`AUTO_CAPTURE=off` 驗無寫入；CLI missing flag 機制 |
+| **M3** | `cc_memory_search` 擴展（跨表 + `project_ids[]` + 加權）+ `search_feedback.result_source_breakdown` | 1.5d | 加權 unit test；跨 project integration 測；`INCLUDE_AUTO=off` 退回 Phase A 行為；原 248 tests 綠 |
+| **M4** | `scripts/reinject-runner.ts` + MCP `cc_memory_recent_summaries` + `hooks/session-start-reinject.sh` + hook protocol 整合 | 1d | `/clear` 能注入；`REINJECT=off` 不注入；空 project 不注入 placeholder |
+| **M5** | `scripts/benchmark.ts` + 固定 5 query fixture + 人工標註 template | 0.5d + 2 週觀察 | benchmark 可跑；進入觀察期（觀察期結束才評品質閘） |
+
+**Gate 未過不進下個 Milestone**。
+
+### 品質閘（claude-mem 切換決策，非 v0.4 Gate）
+
+觀察窗結束後跑：
+- Top-5 交集 ≥ 3（10 組 query，7/10 達標）
+- 人工命中度平均 rank ≤ claude-mem
+- 錯抓率 < 10%
+
+AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-mem。不過 → v0.5 調參數重跑。
 
 ---
 
 ## Risks & Open Questions
 
-### 已知風險
+### Phase A 已知風險（仍有效）
 
 | 風險 | 影響 | 緩解 |
 |---|---|---|
-| `pgvector` HNSW index rebuild 卡住 | Phase 2 migration 可能在大表上長時間 lock | idempotency_key 為 partial unique index（WHERE IS NOT NULL）；現有資料 idempotency_key 全 NULL → rebuild 零代價 |
-| `writer_host` 在容器環境值不穩 | Zeabur container hostname 可能變動 | 明確用 `CC_MEMORY_WRITER` env 覆蓋（API service 設 `cc-memory-api`，bot 設 `telegram-bot`） |
-| idempotency retention 政策未定 | key UNIQUE 永久存留可能與未來 compaction 衝突 | v0.3 再定；MVP 不做 GC |
-| Service layer 抽出破向後相容 | MCP client 若語意漂移會破舊行為 | 既有 6 個 memory tool 輸入輸出格式鎖死；regression 測試覆蓋 |
+| `pgvector` HNSW index rebuild 卡住 | 大表上 long lock | partial unique index（WHERE IS NOT NULL）；現有資料 idempotency_key 全 NULL → rebuild 零代價 |
+| `writer_host` 在容器環境值不穩 | Zeabur container hostname 可能變動 | 明確用 `CC_MEMORY_WRITER` env 覆蓋 |
+| idempotency retention 政策未定 | key UNIQUE 永久存留 | 未來定；MVP 不做 GC |
+| Service layer 抽出破向後相容 | MCP client 語意漂移 | 既有 6 tool I/O 鎖死 + regression |
 
-### Open Questions（待答）
+### Phase C 風險（詳見 design doc §Risks，摘要）
 
-- HTTP rate limit：Phase B 上線時每個 scope 的 RPS 限制值（目前 MVP 單人使用不限）
-- Retrieval eval 觀察期：Phase A 啟用被動記錄後是否 14 天夠看 signal，或延到 28 天
-- `bot_user_state` 生命週期：telegram 使用者停用後該 row 是否歸檔（Phase B 討論）
+| 風險 | 影響 | 緩解 |
+|---|---|---|
+| Stop hook 每輪觸發品質污染 | 每輪摘要 → 重複污染 retrieval | 三層過濾：SKIP_TOOLS + 雙節流 + upsert |
+| Claude Pro/Max subscription 配額爆 | LLM 摘要失敗 | `quota-exceeded.flag` 1hr 冷卻；極端時 `AUTO_CAPTURE=off` |
+| Claude CLI 不存在 / 未認證 | 採集全斷 | `claude-cli-missing.flag` + manual recovery |
+| Session boundary 不穩（Codex） | 同主題分散多筆 | refine merge；Stage 2 自動偵測 |
+| Retrieval UX 碎化（Codex） | top-K 被 auto 佔滿 | 加權偏 manual；`INCLUDE_AUTO=off` 退回 |
+| Precision vs LLM 錯抓 | 幻覺污染 | 抄 claude-mem prompt；refine delete；錯抓率 <10% 品質閘 |
+| `session_id` 取不到 | 寫 null row、無 upsert 保護 | N 次連不到 exit + log |
+| Re-inject 注入干擾 Claude | context 被預期外內容佔用 | 數量可調；`REINJECT=off` |
+
+### Phase C Open Questions（需實作時決定，詳見 design doc §Open Questions）
+
+1. transcript size cap 截尾策略（預設 head 500KB + tail 1MB）
+2. Claude model 選擇（預設 `claude-sonnet-4-5`）
+3. CLI refine `list` 寫 audit log（預設不寫）
+4. 三個 feature flag 預設值（off / on / off）
+5. reinject N=5/M=3 合理性
+6. Stop 節流參數 min-interval=180s / min-tokens=500
+7. SKIP_TOOLS 清單是否擴充
 
 ---
 
 ## 回滾策略
 
-- **Phase 2** schema 變更是 additive ALTER（加 nullable column + partial index），回滾 = 不部署新 service
-- **Service layer**：新舊並存 1 週，MCP 可 feature-flag 切回 `src/tools/*`
-- **HTTP / bot**：獨立 Zeabur service，關閉不影響 Claude Code 本機使用
-- **bot_user_state API 失效**：bot 降級為「必須每次訊息帶 `#project=X`」模式（後續實作，v0.3）
+### Phase A（已完工）
+- Phase 2 schema 變更 additive ALTER，回滾 = 不部署新 service
+- Service layer 新舊並存 1 週，MCP 可 feature-flag 切回 `src/tools/*`
+
+### Phase C 回滾
+- **Schema**：`session_summaries` + `refine_audit_log` + `project_memories.source_summary_id` 皆 additive，回滾 = 不寫入這些表（Phase A 行為完全不受影響）
+- **Feature flag 一鍵全關**：`AUTO_CAPTURE=off` + `REINJECT=off` + `INCLUDE_AUTO_IN_SEARCH=off` → 等於沒裝 v0.4
+- **Hook 失效**：hook wrapper `set +e` 吞掉所有錯，Claude Code 使用者體感無異常
+- **DB 汙染**：最糟情況 auto summary 寫錯一堆 → `scripts/refine.ts delete --where "capture_source='auto-stop-hook'" --dry-run` 批次清掉
+- **取代 claude-mem 決策可逆**：併用期任何時候發現不對，停用 CC-memory 自動採集、繼續用 claude-mem 即可

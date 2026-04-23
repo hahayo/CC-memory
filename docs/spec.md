@@ -1,16 +1,17 @@
-# CC-memory v0.2 Spec
+# CC-memory Spec（v0.3 Phase A 已交付 + v0.4 自動採集規劃）
 
-> Spec 版本：**1.3**（Codex plan review + 跨平台補強）· 範圍：路線 A 最保守自建
+> **當前版本：v0.4 draft**（2026-04-23 升版）· Phase A 已交付（tag `v0.3-phase-a`）；**Phase B 已取消**；新增 **Phase C — v0.4 自動採集（Stage 1）**。
 >
-> v1.3 change log：
-> - P0-1：bot 絕對不直連 DB。`bot_user_state` 改走 HTTP `/api/bot/state/:user_id`
-> - P0-2：`project_memories` 新增 `idempotency_key text UNIQUE`（與 tasks 一致）
-> - P0-3：`BOT_API_TOKEN` 需配合 `X-Telegram-User-Id` header；server 查
->   `bot_user_state` 決定 active project；不信任 client 傳來的 `project`
-> - P1-2：`project_id` 優先序改為 `explicit > env > marker > repo_name > basename`
-> - ➕ 新增 `repo_name` 為 project id 穩定來源（跨電腦同 repo → 同 project）
-> - ➕ 兩張寫入表新增 `writer_host text` 欄位追蹤來源電腦
-> - v1.3.1（2026-04-21）：拆分 Phase A (MCP) / Phase B (HTTP + Telegram)；新增 `## Constraints`；Design Principles 拆 Phase A 必守 / Phase B 開工時適用
+> **完整 Phase C 設計請見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（1056 行、13 User Stories、5 Milestones、7 Risks）。本 spec 保留 Phase A 既有內容、Phase B 標記為取消、新增 Phase C 骨架對照 design doc。
+>
+> change log：
+> - v1.3.1（2026-04-21）：拆分 Phase A (MCP) / Phase B (HTTP + Telegram)；新增 `## Constraints`
+> - **v0.4（2026-04-23）**：Phase B 取消；轉向 claude-mem 風格自動採集；Stage 1 = session_summaries + refine tools；LLM 摘要走 Claude CLI subprocess（subscription）；embedding 沿用 Gemini
+>
+> v1.3 原 change log（存檔）：
+> - P0-1：bot 不直連 DB（走 HTTP）； P0-2：`idempotency_key text UNIQUE`； P0-3：`BOT_API_TOKEN` + `X-Telegram-User-Id` 雙重檢查
+> - P1-2：`project_id` 優先序 `explicit > env > marker > repo_name > basename`
+> - 兩張寫入表加 `writer_host text` 欄位
 
 ---
 
@@ -26,7 +27,7 @@ CC-memory 目前（v0.1）透過 MCP stdio 只對 **Claude Code** 開放。使�
 
 目前架構只能讓 Claude Code 用。缺的是**工具不可知的介面層**與**代辦事項資料模型**。
 
-### 為什麼選路線 A（最保守）
+### 為什麼選路線 A（最保守）— 原 v1.3 決策
 
 Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
@@ -35,6 +36,15 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 3. Telegram「最後活躍專案」會悄悄錯 project，信任一崩整個 bot 死
 
 路線 A 的核心原則：**先證明 retrieval 可信 + 手動寫入夠用，再談自動化**。
+
+### v0.4 方向調整（2026-04-23）
+
+Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策：
+- **Phase B 取消**：HTTP REST API + Telegram bot + thumbs feedback 整塊放棄
+- **轉向自動採集**：走 claude-mem 10.5.2 實戰路線（Stop hook + SessionStart re-inject），與 Phase A 的 manual save 併存
+- **驗證機制調整**：原依賴 Phase B 的 thumbs/selected_rank 迴路 → 改為**品質閘（真實 5 + 固定 5 benchmark query）+ refine tools** 承擔精準度驗證
+- **Phase C = v0.4 Stage 1**：session_summaries 單表 + refine tools（delete/promote/merge/edit）+ Re-inject push 注入
+- 本 spec 的 Phase C 章節是骨架，完整設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`
 
 ### v1.3 修訂重點（詳情見 plan.md）
 
@@ -49,11 +59,21 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
 ---
 
-## Goals（使用者原始 3 個需求）
+## Goals（使用者原始 3 個需求 + v0.4 延伸）
 
+### Phase A / v0.3 已達成
 1. 跨 session / 跨專案 / 跨電腦 — 現有 PG 雲端已達成
-2. **跨工具**：Claude Code + Codex CLI 都能讀寫
-3. **Telegram 介面**：隨時查詢記憶、輸入代辦事項
+2. **跨工具**：Claude Code + Codex CLI 都能讀寫（MCP stdio）
+
+### 原目標 3（Telegram）— **取消**
+3. ~~Telegram 介面：隨時查詢記憶、輸入代辦事項~~ → v0.4 放棄 Phase B
+
+### v0.4 Phase C 新 Goals（詳見 design doc §Goals）
+4. **Stop hook 自動抓摘要**（SKIP_TOOLS 過濾 + 雙節流 + upsert）
+5. **SessionStart re-inject 推送記憶**（啟動 / clear / compact 時主動注入）
+6. **retrieval 跨表跨專案**（`cc_memory_search` 加 manual > promoted > auto 加權 + `project_ids[]`）
+7. **refine 工具一等公民**（delete / promote / merge / edit，MCP + CLI 並行）
+8. **品質閘決定切換 claude-mem**（top-5 交集 + 平均 rank + 錯抓率三項硬指標）
 
 ---
 
@@ -97,7 +117,9 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
 ---
 
-### Phase B — HTTP + Telegram（可延後 / 交給其他 agent）
+### ~~Phase B — HTTP + Telegram~~ ❌ **已於 2026-04-23 取消**
+
+> **取消原因**：使用者決策轉向 claude-mem 風格自動採集（見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Context）。HTTP API + Telegram bot + thumbs feedback 整塊放棄。下方 US-4 ~ US-6 保留為歷史紀錄，**不再驗收**。
 
 > 本期先實作 Phase A 的 MCP 與 service layer 抽出，HTTP API 與 Telegram bot 皆延後到 Phase B。資料面支援（`idempotency_key`、`writer_host`、`bot_user_state`、`search_feedback`）在 Phase A 已準備好，確保之後串接時不需再改 schema 或重跑 migration。
 
@@ -139,18 +161,58 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
 ---
 
+### Phase C — v0.4 自動採集（Stage 1）
+
+> **完整 User Stories（US-1 ~ US-13）見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §User Stories。** 以下列主題對照表。
+
+| US# | 主題 | 對應 design doc §US |
+|---|---|---|
+| US-C1 | Stop hook 自動抓 summary（SKIP_TOOLS + 雙節流 + upsert） | US-1 |
+| US-C2 | SessionStart re-inject 推送記憶（startup/clear/compact） | US-2 |
+| US-C3 | Hook 失敗不阻塞使用者工作流 | US-3 |
+| US-C4 | 手動記的記憶永遠排前面（加權） | US-4 |
+| US-C5 | 單一入口查記憶（manual + auto 融合） | US-5 |
+| US-C6 | 錯抓能立刻 refine delete | US-6 |
+| US-C7 | 有用 auto 能 promote 到 manual | US-7 |
+| US-C8 | 重複多筆能 merge | US-8 |
+| US-C9 | 記憶能 edit 修正 | US-9 |
+| US-C10 | CLI 批次 refine | US-10 |
+| US-C11 | benchmark 決定是否停用 claude-mem | US-11 |
+| US-C12 | 三個 feature flag（auto_capture / include_auto / reinject） | US-12 |
+| US-C13 | 跨專案查詢 `project_ids[]` | US-13 |
+
+**Phase C 技術選型摘要**：
+- **LLM 摘要**：Claude CLI subprocess（`claude -p --model claude-sonnet-4-5 --output-format json`），吃 subscription
+- **Embedding**：Gemini `text-embedding-004`（沿用 Phase A，`vector(768)`）
+- **Hook 事件**：`Stop`（抓）+ `SessionStart(matcher=startup|clear|compact)`（re-inject）
+- **SKIP_TOOLS 預設清單**（抄 claude-mem）：`ListMcpResourcesTool, SlashCommand, Skill, TodoWrite, AskUserQuestion`
+- **Feature flags 預設值**：`AUTO_CAPTURE=off`（opt-in）、`INCLUDE_AUTO_IN_SEARCH=on`、`REINJECT=off`（opt-in）
+
+---
+
 ## Non-goals（Out of Scope，明確不做）
 
-- ❌ Stop hook 自動抽取（Layer 1 atom observations）
-- ❌ `candidate_memories` 表與 `/promote` 流程
+### Phase A / v0.3 原 Non-goals（仍有效）
+
+- ❌ ~~Stop hook 自動抽取~~ → **v0.4 Phase C 已啟動**（session_summaries only，不做 observations 細粒度）
+- ❌ `candidate_memories` 表與 `/promote` 流程 → v0.4 Phase C 用 `session_summaries.promoted_to_memory_id` 實現
 - ❌ provenance / temporal validity 欄位
 - ❌ Layer 3 topic compilation
 - ❌ 多 bot 平台 / 語音 / 圖片 / 檔案
 - ❌ 衝突合併 / conflict resolution
 - ❌ Web UI / 完整 i18n
-- ❌ 任何 LLM 自動抽取 / 摘要 / 結構化
+- ❌ ~~任何 LLM 自動抽取~~ → **v0.4 Phase C 用 Claude CLI 抽**
 - ❌ Sentry / Datadog（log 夠用）
 - ❌ Rate limit 細緻化（MVP 單人使用）
+
+### v0.4 Phase C 新 Non-goals
+
+- ❌ `observations` 細粒度表（Stage 2）
+- ❌ claude-mem 歷史 import（品質閘過後才做）
+- ❌ Batch tag refine 操作
+- ❌ LLM 自動 refine 候選建議
+- ❌ HTTP REST API / Telegram bot / thumbs feedback（**原 Phase B 整塊放棄**）
+- ❌ 調整 / fork claude-mem（原樣併用，品質閘後再決定）
 
 ---
 
@@ -167,21 +229,39 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 | **MCP task tools** | Phase A | `cc_task_create` / `cc_task_list` / `cc_task_update`（optimistic locking） |
 | **Retrieval 評估（被動記錄 + 離線腳本）** | Phase A | MCP `cc_memory_search` 自動寫 `search_feedback`；`scripts/eval-retrieval.ts` 跑報告 |
 | **Codex MCP** | Phase A | 不寫專用整合；使用者 `codex mcp add cc-memory` 即可複用 |
-| **HTTP REST API** | Phase B | Hono + 雙 token + `X-Telegram-User-Id` header；`/api/bot/state` endpoints |
-| **Telegram bot** | Phase B | `telegraf` 獨立進程，**只 call HTTP**，bot_user_state 也走 HTTP |
-| **Feedback 回寫（thumbs / selected）** | Phase B | `POST /api/feedback` + Telegram inline button |
+| ~~**HTTP REST API**~~ | ~~Phase B~~ ❌ | 取消 |
+| ~~**Telegram bot**~~ | ~~Phase B~~ ❌ | 取消 |
+| ~~**Feedback 回寫（thumbs / selected）**~~ | ~~Phase B~~ ❌ | 取消；品質驗證改靠 Phase C 品質閘 + refine delete 頻率 |
+| **`session_summaries` 新表** | Phase C | upsert 同 session（Stop hook），`vector(768)` embedding、`capture_source`/`capture_hook`/`summarize_count` |
+| **`refine_audit_log` 新表** | Phase C | refine 四操作的 audit log，保留 before/after snapshot |
+| **capture-runner + Claude CLI** | Phase C | `scripts/capture-runner.ts` + `src/llm/claude-cli.ts`（subprocess）+ SKIP_TOOLS 過濾 + 雙節流 |
+| **reinject-runner** | Phase C | `scripts/reinject-runner.ts` + `hooks/session-start-reinject.sh` → `additionalContext` hook protocol |
+| **`cc_memory_search` 擴展** | Phase C | 跨表（manual+auto）、跨專案（`project_ids[]`）、加權 rerank（1.0 / 0.85 / 0.65） |
+| **Refine tools** | Phase C | `cc_memory_refine_{delete,promote,merge,edit}` + `scripts/refine.ts` CLI |
+| **Benchmark harness** | Phase C | `scripts/benchmark.ts`：真實 5 + 固定 5 query → 對比 claude-mem |
 
 ---
 
 ## Constraints
 
-- **技術**：必須沿用現有 Drizzle ORM + PostgreSQL (Zeabur)；不得引入新 DB 或 ORM
-- **時間**：Phase A 本期交付；Phase B 無硬排程，可由其他 agent 承接
-- **預算**：單人開發；不接 Sentry / Datadog 等付費可觀測性服務，log 夠用即可
+### Phase A 原 Constraints（v0.4 保留）
+- **技術**：沿用現有 Drizzle ORM + PostgreSQL (Zeabur)；不得引入新 DB 或 ORM
+- **預算**：單人開發；不接 Sentry / Datadog，log 夠用
 - **相容性**：現有 6 個 memory MCP tool 輸入輸出格式不得變更（向後相容）
-- **安全**：SQL 一律 parameterized query（Drizzle ORM 保證）；所有 shell call 用 `execFileSync`；API key 用環境變數
-- **規模**：MVP 單人使用，不做細緻 rate limit；bot 限白名單 telegram_user_id
-- **架構隔離**：bot 進程不得直連 DB，只能透過 HTTP API；service layer 為唯一業務邏輯層
+- **安全**：SQL 一律 parameterized（Drizzle ORM 保證）；shell call 用 `execFileSync`；API key 用環境變數
+- **規模**：MVP 單人使用；不做細緻 rate limit
+- ~~架構隔離 / bot 進程~~ → Phase B 取消後此條失效
+
+### Phase C 新 Constraints（詳見 design doc §Constraints 12 條）
+- **不回歸**：現有 248 tests 全綠，v0.4 不得造成既有測試失敗
+- **Precision-first**：寧漏不要錯抓；Claude CLI 失敗寫 queue 不強寫 DB
+- **LLM 摘要走 Claude CLI subprocess**：不呼叫 Anthropic API、不呼叫 Gemini LLM API
+- **Embedding 獨立走 Gemini**：`text-embedding-004` 只管 embedding，與 LLM 解耦
+- **SKIP_TOOLS 過濾是節流第 0 關**：純工具輪次直接 skip
+- **Stop hook 雙節流**：min-interval 180s AND min-tokens 500 任一不過即跳過
+- **同 session upsert**：一筆 active canonical，後寫覆蓋前寫
+- **三個獨立 feature flag**：`AUTO_CAPTURE` / `INCLUDE_AUTO_IN_SEARCH` / `REINJECT`
+- **Hook 失敗不阻塞 Claude Code**：`set +e` 吞錯誤
 
 ---
 
@@ -197,13 +277,15 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 - **向後相容**：現有 6 個 memory MCP tool 輸入輸出格式不動
 - **Phase A 的 schema / service 設計不得阻斷 Phase B 落地下述 runtime invariant**（idempotency_key UNIQUE、bot_user_state 表、9 欄 search_feedback 皆 Phase A 就位）
 
-### Phase B 開工時適用
+### ~~Phase B 開工時適用~~ ❌ 已取消（原則保留為歷史紀錄）
 
-- **架構路徑定死**：`MCP → service` / `HTTP → service` / **`Telegram bot → HTTP only`**
-- **bot 不得 import `src/services/*` 或 `src/db/*`**：編譯期強制（tsconfig path 隔離）
-- **Server 端不信任 client 傳來的 project 參數**：bot scope 皆由 server 查 `bot_user_state`（runtime invariant，需 HTTP middleware + header + server state，Phase A 無實作對象）
-- **未選 project 一律拒寫**：bot scope 任何 mutating route 若 active project 為 null → 403 `SWITCH_REQUIRED`（runtime invariant，需 HTTP scope 判斷）
-- **Token 分權**：BOT（單用戶 per telegram_user_id）vs ADMIN（跨專案全權）
+### Phase C 必守
+- **抄 claude-mem 不重發明**：prompt (`code.json`)、hook 事件（Stop + SessionStart）、LLM provider（Claude CLI）、SKIP_TOOLS 清單皆抄 claude-mem 10.5.2
+- **兩表並存不合表**：`project_memories`（curated）與 `session_summaries`（auto）分表，retrieval 層統一
+- **同 session upsert**：不保留 session 中間版本，避免污染 top-K
+- **Push + Pull 雙模召回**：Pull = `cc_memory_search`；Push = SessionStart re-inject
+- **Refine 一級動作**：不是事後工具，介面與 save/search 同等
+- **LLM + Human 雙管道**：MCP tool（LLM）+ CLI（human 批次）共用 handler
 
 ---
 
@@ -219,23 +301,20 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 
 Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores），但**無 thumbs / selected_rank**（沒有 bot inline button，MCP client 無互動回饋層）。
 
-### Phase B 指標（需 HTTP / Telegram 才有 signal）
+### ~~Phase B 指標~~ ❌ 取消
 
-| 指標 | 目標 | 來源 |
-|---|---|---|
-| `/search` 整體接受率 | > 70% | `thumbs='up'` / total |
-| 拒絕率 | < 20% | `thumbs='down'` |
-| Top-1 點擊率 | > 50% | `selected_rank=1` |
-| Mode 勝率 | hybrid > keyword 且 hybrid > semantic | breakdown by `mode` |
-| Write 撤銷率 | < 10% | undo count / write count |
-| Bot silent error 率 | < 5% | error log / total messages |
+### Phase C 品質閘（claude-mem 切換 Go/No-Go）
 
-### Go / No-Go（Phase B 全指標達標才啟動路線 B）
+> 完整細節見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Success Criteria。
 
-- ✅ 全達標 → 啟動路線 B（Stop hook 自動抽取）
-- ❌ 接受率 < 70% → 檢視 mode breakdown 決定調哪個
-- ❌ 撤銷率 > 10% → bot UX 改（confirm 強化）
-- 🔁 查詢數 < 3/日 → 延長 2 週
+**觀察窗**：併用 claude-mem 至少 2 週 + 累積 ≥ 30 筆 session_summaries，兩條件都滿足才跑品質閘。
+
+**硬指標（AND 全達才停用 claude-mem）**：
+- **Top-5 交集**：10 組 benchmark query（真實 5 + 固定 5）中，≥ 7 組的 CC-memory top-5 與 claude-mem top-5 交集 ≥ 3 筆
+- **人工命中度**：抽樣 10 組 query，CC-memory 平均首個相關結果 rank ≤ claude-mem 平均 rank
+- **錯抓率**：人工檢視最近 50 筆 `capture_source='auto-stop-hook'` 且 `promoted_to_memory_id IS NULL` 的 auto summary，錯抓比例 < 10%
+
+不過 → 繼續併用、分析原因、v0.5 再嘗試
 
 ---
 
@@ -249,10 +328,38 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 - [ ] B 電腦 clone 到不同路徑 → 自動解析到相同 `project_id`（repo_name 生效）
 - [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids）
 
-### Phase B（後續階段才驗證）
+### ~~Phase B 驗收~~ ❌ 取消（以下歷史紀錄）
 
 - [ ] Telegram `/todos` 能看到 A 剛建的 task
 - [ ] Telegram `/todo X` → A 電腦 `cc_task_list` 能看到
 - [ ] Bot 設 `CC_MEMORY_WRITER=telegram-bot` → 寫入 row 的 `writer_host` 為 `telegram-bot`
 - [ ] 未設 active project 的 Telegram user 發 `/note` → 收 403 + `/switch` 提示
 - [ ] Telegram 10 秒內撤銷成功、超時 403、重複按 no-op
+
+### Phase C（v0.4 本期必過）
+
+> 完整端對端驗收清單見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §端對端驗收。
+
+**Capture**
+- [ ] Stop hook 實測觸發 → Claude CLI subprocess → Gemini embed → DB upsert 端到端通
+- [ ] 同 session 跑兩輪 Stop（transcript 有新增） → DB 只有一筆 active、`summarize_count=2`
+- [ ] SKIP_TOOLS 驗證（上輪只叫 TodoWrite）→ 不觸發摘要
+- [ ] 節流驗證（兩輪間隔 < min-interval 且 delta < min-tokens）→ 不觸發摘要
+- [ ] A 機 session 結束 → B 機 `cc_memory_search` 能查到，`writer_host` = A hostname
+- [ ] `CC_MEMORY_AUTO_CAPTURE=off` 重跑 → DB 無新 row
+
+**Re-inject**
+- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 5 筆 summary + 近 3 筆 manual
+- [ ] `CC_MEMORY_REINJECT=off` 時 `/clear` → context 不含注入
+
+**Retrieval**
+- [ ] `cc_memory_search(include_auto=true)` 跨表結果，manual > promoted > auto 加權排序
+- [ ] `cc_memory_search(project_ids=['CC-memory','AI_Copilot'])` 能跨兩 project 查，每筆標 `project_id`
+
+**Refine**
+- [ ] `cc_memory_refine_{delete,promote,merge,edit}` 四個 MCP tool happy path 綠
+- [ ] `scripts/refine.ts` CLI list/delete/promote/merge/edit/audit 都能跑
+
+**Benchmark / 品質閘**
+- [ ] `scripts/benchmark.ts` 跑完 10 組 query → 產出 `docs/benchmark-YYYY-MM-DD.md`
+- [ ] 觀察期結束、三項硬指標全達 → 產出 `docs/claude-mem-switchoff-decision.md`
