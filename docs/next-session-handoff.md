@@ -1,119 +1,118 @@
-# 下 session 接手清單（v0.3 Phase A 後 → 自動採集 feature 規劃）
+# 下 session 接手清單（v0.4 Phase C 規劃完成 → pending implementation）
 
-> 本 session（2026-04-22）在長 ctx 下結束。下 session 從乾淨狀態接手。
+> 本 session（2026-04-23）完成 v0.4 設計 + 三檔同步。下 session（可能換電腦）從乾淨狀態接手 Phase C 實作。
 
 ## 當前狀態快照
 
-### Phase A 完工 ✅
-- `main` = `origin/main`（clean）
-- Tag `v0.3-phase-a` 已推到 GitHub（commit `a7b15dd` → tag sha `c84b1add`）
-- 248 / 248 tests 綠
-- Codex review loop round 24 收斂
+### ✅ 已完成（本 session 2026-04-23）
 
-### Zeabur production DB 已部署 ✅
-- Project ID: `69e85cb74b844a578d958dcd`（名為 `CC-memory`）
-- Service: `postgresql`（template `773OAW` = PostgreSQL with pgvector 0.8.2）
-- DATABASE_URL 已存 `~/.claude.json`（user scope MCP config），含密碼
-- Schema 已 push（drizzle-kit），4 tables + 5 CHECK + partial unique index 全到位
-- 端對端驗收 4/4 綠（含 Gemini embedding E2E，top-1 semantic 命中）
+1. **v0.4 brainstorm 三輪收斂**（superpowers:brainstorming）：
+   - Q1：Phase B 取消 → 採 option (a)
+   - Q2：升 v0.4 新 spec → 採 option (c)
+   - Q3：Stage 1 only（session_summaries + refine tools）+ Future Roadmap non-binding → 採 option (a)
+   - Q4：品質閘切換 claude-mem（Top-5 交集 / 人工命中度 / 錯抓率 <10%）+ 真實 5 + 固定 5 benchmark
+   - Q5：refine = MCP + CLI 兩者；delete + promote + merge + edit 全做；capture_source 欄位
 
-### MCP + Skills 已裝 ✅
-- `claude mcp list` 能看到 `cc-memory: ✓ Connected`（user scope）
-- `GEMINI_API_KEY` 已註冊進 MCP env（semantic/hybrid search 真的可用）
-- `~/.claude/skills/` 下有 `save-memory.md` + `load-memory.md`
+2. **design doc 寫完 + 三輪修正**（1056 行）：
+   - v1：初稿（SessionEnd + PreCompact + Gemini LLM）
+   - v2：使用者質疑 → 改 Stop + SessionStart(compact) re-inject（抄 claude-mem）
+   - v3：使用者質疑 Gemini 必要性 → 改 Claude CLI subprocess（subscription 免費）+ SKIP_TOOLS；Gemini 只留 embedding
+   - 路徑：`docs/superpowers/specs/2026-04-22-auto-capture-design.md`
+   - commit `13b9da3`
 
-### 全域規則已更新 ✅
-- `~/.claude/CLAUDE.md` 第 3 行 + `~/.claude/rules/git-workflow.md` 第 3 條
-- 新規則：**git/gh cli 優先，`mcp__github__*` 當 fallback**（原因：`push_files` 無法推 commit 歷史 / tag）
+3. **三檔同步到 v0.4**（commit `30eadc7`）：
+   - `docs/spec.md`：Phase B ❌、新增 Phase C US 對照、Goals 擴 8 條、Constraints 分段
+   - `docs/plan.md`：Data Model 加 2 新表、Service Layer 加 Phase C 模組、Env Vars 13 個 Phase C 變數、Rollout M1-M5 表
+   - `docs/task.md`：Phase B ❌、新增 Phase C M1-M5 任務清單 + Gate、端對端驗收 Phase C 區塊
 
-## 下 session 該做什麼：自動採集 feature 規劃
+## 下 session 該做什麼：啟動 writing-plans skill 進 implementation
 
-### 使用者需求（對齊過）
+### 正確順序（照 brainstorming skill 的 checklist）
 
-使用者想做 **claude-mem 風格的自動採集**（Stop hook → Gemini extract → 寫 DB），兩條 hard constraint：
-1. 主動採集（`/save-memory`）**權重 > 自動採集**
-2. 要能整理 DB 狀況（刪 / merge / promote auto → manual）
+1. **讀 design doc + 三檔現況**（5-10 分鐘）：
+   - `docs/superpowers/specs/2026-04-22-auto-capture-design.md`（source of truth）
+   - `docs/spec.md` / `docs/plan.md` / `docs/task.md`（Phase 骨架）
+   - `docs/next-session-handoff.md`（本檔）
 
-前提：如果效果好，會停用 claude-mem。**一開始併用**。
+2. **啟動 `superpowers:writing-plans` skill**（brainstorm 的 terminal state）：
+   - 輸入 source：design doc + task.md 的 M1-M5
+   - 產出：implementation plan（細分到可執行 step，每步有 test / verification）
+   - 放在：`docs/superpowers/plans/2026-04-XX-v04-phase-c-implementation.md`（skill 預設）
 
-### 現有 spec 關係
+3. **從 M1 開工**（schema + refine tools）：
+   - 讀 `~/.claude/rules/sdd-workflow.md` §「每個 Phase 執行紀律」
+   - 順序：brainstorm 開工對齊 → context7 查 Drizzle + pgvector 語法 → TDD red-green → simplify → code review → M1 Gate 驗收
 
-`docs/spec.md` line 235 寫了「路線 B（Stop hook 自動抽取）」—— 但它排在 Phase B（HTTP + Telegram + feedback 回寫）**之後**：
+### 不要做的事
 
-> Phase B 全指標達標才啟動路線 B
+- ❌ **不要重跑 brainstorm** — 五題已收斂、三輪設計已經 user approved
+- ❌ **不要改 design doc 的核心決策**（Phase C = Stage 1 / LLM=Claude CLI / Embedding=Gemini / 三個 feature flag 預設值），只能改實作細節
+- ❌ **不要回頭碰 Phase B**（HTTP / Telegram 已正式取消）
 
-**使用者想跳過 Phase B 直接做自動採集**，這偏離原 spec Phase 順序。
+## Phase C 五題決策對照（換電腦需要快速上手）
 
-### SDD 流程（**下 session 第一件事**）
+| 決策 | 結論 | 來源 |
+|---|---|---|
+| Phase B vs Phase C 順序 | Phase B 取消，轉向自動採集 | Q1=a |
+| 版號 | 升 v0.4 新 spec | Q2=c |
+| Scope | Stage 1 only（session_summaries + refine）+ non-binding roadmap | Q3=a |
+| claude-mem 切換條件 | 品質閘（三指標 AND）+ 真實 5 + 固定 5 benchmark | Q4=c + iii |
+| Refine 工具 | MCP + CLI 兩者，delete/promote/merge/edit 全做，加 capture_source | Q5-A=c / Q5-B=全 / Q5-C=a |
+| Hook 事件選擇 | Stop（抓）+ SessionStart(compact)（re-inject） | 照 claude-mem |
+| LLM 摘要 provider | Claude CLI subprocess（吃 subscription） | 使用者直覺對，v3 修正 |
+| Embedding provider | Gemini `text-embedding-004` 沿用 | 沒得選（Claude 無 embedding API） |
+| SKIP_TOOLS 清單 | 抄 claude-mem：ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion | Q-y=照抄 |
+| Feature flag 預設 | AUTO_CAPTURE=off / INCLUDE_AUTO=on / REINJECT=off（opt-in 派） | 待 user 明示決定 |
 
-**不要直接開工寫 code**。照 `~/.claude/rules/sdd-workflow.md` 的順序：
+## 6 個 Open Questions（design doc §Open Questions）
 
-1. **`/brainstorm`**（superpowers:brainstorming）對齊這 3 個未解問題：
-   - 自動採集 vs Phase B 的順序（Phase B 延後 / 放棄 / 並行？）
-   - 新 Phase 名稱（v0.3 Phase C 還是 v0.4 新 spec？）
-   - Scope 邊界：只 Stop hook，還是完整複刻 claude-mem（observations + session_summaries + retrieval tools）？
+這些實作時才需要決定，spec 都有預設值，不阻擋 M1 開工：
 
-2. **改 spec.md**（方案 A：改現有而非新開，理由：路線 B 本來就在原 spec scope，只是排序變）
-   - 依 sdd-workflow.md：Phase 邊界變更必須**同回合同步**更新 spec / plan / task 三檔
-   - 所有帶 "Phase" 字樣的段落都要同步（sdd-workflow.md 有詳細 checklist）
-
-3. **同步 plan.md + task.md**（Phase banner、各 Phase 任務清單、Gate、端對端驗收）
-
-4. **才開工**（per「每個 Phase 執行紀律」：brainstorm → context7 → TDD → simplify → review → Gate）
-
-## 本 session 已做的 Codex 辯論結論（避免下 session 重跑）
-
-跑了 3 輪 Codex debate，**收斂結論**：
-
-### Option F > Option E（之前推的 archive layer 過度設計）
-
-**Option F refined**（Codex round 3 採納）：
-- 照抄 claude-mem schema + 加 CC-memory 特色（writer_host / source / idempotency / cross-machine）
-- 三表並存：`project_memories`（現有，curated）+ `session_summaries`（新，每 session 一筆）+ `observations`（新，細粒度）
-- **不用從零調 Gemini prompt**：claude-mem 的 prompt 定義完整放在 public JSON：
-  - `/home/haha/.claude/plugins/cache/thedotmack/claude-mem/10.5.2/modes/code.json`（6 types / 7 concept tags / system prompt / XML template）
-  - 31 種語言版本（含 `code--zh.json`）
-- **分 stage**：Stage 1（3 天）先 session_summaries only → Stage 2（2 天後加 observations，保守啟動每 session 最多 N 筆 + 只抽 decision/bugfix/feature 3 種 high-value type）→ Stage 3 放寬
-
-**Codex 指出的 3 個落地重點**：
-1. **Precision-first capture**（寧漏抓不要錯抓）
-2. **Import 要 resume 機制**（10,000 筆重 embed 要 1~2 天背景跑，不可中斷還原）
-3. **Dedupe policy**（即使兩表也要：同 session lineage 結果群組、canonical 強制排第一，不靠權重倍率）
-
-**Codex 指出的 2 個結構風險**：
-1. Session boundary 不穩（中斷 / reopen / 主題切換）
-2. Retrieval UX 可能碎掉（結果更多 ≠ 更好）
-
-### 總工時估計
-
-- 完整 Option F（3 表）：~7~8 工作天（因為 prompt 可照抄省 3~5 天）
-- Stage-1 only（2 表）：~3 天
+1. transcript size cap 截尾策略（預設 head 500KB + tail 1MB）
+2. Claude model（預設 `claude-sonnet-4-5`）
+3. CLI refine `list` 是否寫 audit log（預設不寫）
+4. Feature flag 預設值（上表）
+5. reinject N=5/M=3 數量（或 N=3/M=2 更保守）
+6. Stop 節流參數（min-interval=180s / min-tokens=500）
+7. SKIP_TOOLS 擴充策略（env 或 hardcode）
 
 ## 技術 artifacts 盤點
 
 | 東西 | 路徑 / 值 |
 |---|---|
-| claude-mem 完整 prompt spec | `~/.claude/plugins/cache/thedotmack/claude-mem/10.5.2/modes/code.json` |
-| claude-mem SQLite DB | `~/.claude-mem/claude-mem.db`（observations 7,313 / session_summaries 2,673 / sdk_sessions 1,024）|
-| claude-mem chroma vectors | `~/.claude-mem/chroma/`（350MB，不能搬，重新 Gemini embed） |
-| Production DATABASE_URL | `~/.claude.json` → `mcpServers.cc-memory.env.DATABASE_URL`（含密碼，別 commit） |
-| GEMINI_API_KEY | `~/.claude.json` → `mcpServers.cc-memory.env.GEMINI_API_KEY` |
-| 本 session 的 Codex 辯論共識 | 本檔 + git log 可追 |
+| design doc (source of truth) | `docs/superpowers/specs/2026-04-22-auto-capture-design.md`（1056 行）|
+| claude-mem prompt spec（抄的對象） | `~/.claude/plugins/cache/thedotmack/claude-mem/10.5.2/modes/code.json` |
+| claude-mem hook 配置（選 Stop + SessionStart 的依據） | `~/.claude/plugins/cache/thedotmack/claude-mem/10.5.2/hooks/*.json` |
+| claude-mem provider 預設值 | `~/.claude/plugins/cache/thedotmack/claude-mem/10.5.2/scripts/worker-cli.js`（env defaults）+ `~/.claude-mem/settings.json` |
+| claude-mem SQLite（併用期參考）| `~/.claude-mem/claude-mem.db`（observations 7,313 / session_summaries 2,673）|
+| Production DATABASE_URL | `~/.claude.json` → `mcpServers.cc-memory.env.DATABASE_URL`（含密碼）|
+| GEMINI_API_KEY | `~/.claude.json` → 同上（embedding 用）|
+| Phase A tag | `v0.3-phase-a`（commit `a7b15dd`）|
+| v0.4 brainstorm commits | `13b9da3`（design doc）+ `30eadc7`（三檔同步）|
 
-## 下 session 開場建議
+## 跨電腦接手 checklist
+
+換電腦後：
+
+1. `git pull origin main` → 應該看到兩個新 commit（`13b9da3` + `30eadc7`）
+2. 確認 `claude mcp list` 看得到 `cc-memory: ✓ Connected`（user scope，會從 `~/.claude.json` 繼承）
+3. 跑 `npm test` 確認 248 tests 綠（Phase A 基線）
+4. 確認 `claude --help` 能跑（Phase C 核心相依：Claude CLI subprocess）
+5. 讀 design doc 前 200 行（Context / Goals / User Stories）
+6. 啟動 `/superpowers:writing-plans`（當前階段的 brainstorming skill terminal state）
+
+## 本 session 未完成（下 session 接手）
+
+- [ ] 啟動 `superpowers:writing-plans` skill 產 Phase C implementation plan
+- [ ] M1 開工（schema + refine tools MVP，~1d）
+- [ ] M2~M5 依 `docs/task.md` 順序執行
+- [ ] 觀察期（2 週 + 30 筆 auto summary）
+- [ ] 品質閘驗收 → claude-mem 切換決策
+
+## 開場建議（下 session 第一句 prompt）
 
 ```
-讀 docs/next-session-handoff.md 了解狀態，然後跑 /brainstorm 對齊
-自動採集 feature 的 scope（Phase 順序、邊界、要不要完整複刻 claude-mem）。
-brainstorm 完才改 spec.md + 同步 plan.md + task.md。
-```
-
-## 這個 handoff 要不要 commit？
-
-**建議 commit**（原因：這是 project 進度的一部分，方便未來 audit / 其他裝置接手）。
-但它不進 `origin/main` 也沒關係（這是工作紀錄不是 production feature）。
-
-使用者決定 commit 的話，建議 commit message：
-```
-docs: v0.3 Phase A 後下 session 接手清單（自動採集 feature 規劃）
+讀 docs/next-session-handoff.md，然後啟動 superpowers:writing-plans
+為 v0.4 Phase C 寫 implementation plan（source: design doc + task.md M1-M5）。
+plan 寫完從 M1 開工（schema + refine tools）。
 ```
