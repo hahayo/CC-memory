@@ -172,10 +172,10 @@ CREATE TABLE session_summaries (
   capture_hook text CHECK IN ('stop'),               -- Stage 2 可擴充
   summarize_count int DEFAULT 1,         -- upsert 時 ++
   promoted_to_memory_id uuid,            -- promote 時填（指向 project_memories.id）
-  embedding vector(768),                 -- Gemini text-embedding-004
+  embedding vector(1536),                -- Gemini gemini-embedding-001（沿用 Phase A，frozen 2026-04-23）
   writer_host text NOT NULL,
   idempotency_key text UNIQUE,
-  status text CHECK IN ('active', 'archived'),
+  status text CHECK IN ('active', 'archived'),   -- 僅兩態（frozen 2026-04-23；merge 走 archive + metadata.merged_into，不用 'merged'）
   metadata jsonb,
   created_at / updated_at
 );
@@ -186,6 +186,11 @@ CREATE UNIQUE INDEX ss_active_per_session_uniq
 ```
 
 **`project_memories` 補欄**：`ADD COLUMN source_summary_id uuid REFERENCES session_summaries(id);`（promote 時填）
+
+**雙向 FK 一致性規則（frozen 2026-04-23）**：
+- `session_summaries.promoted_to_memory_id → project_memories.id`（nullable，promote 時填）
+- `project_memories.source_summary_id → session_summaries.id`（nullable，promote 時填）
+- **雙向皆無 `ON DELETE CASCADE`**：refine delete 單邊時，service layer 負責手動 nullify 對側欄位（避免 cascade 連帶誤刪、保留可追溯性）
 
 ### `refine_audit_log`（v0.4 Phase C 新增）
 
@@ -303,11 +308,11 @@ export function resolveWriterHost(): string {
 | `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH` | `cc_memory_search` 是否混入 auto summary | `on` |
 | `CC_MEMORY_REINJECT` | SessionStart 是否注入記憶 | `off`（opt-in） |
 | `CC_MEMORY_CLAUDE_MODEL` | Claude CLI 摘要用的 model | `claude-sonnet-4-5` |
-| `CC_MEMORY_SKIP_TOOLS` | SKIP_TOOLS 清單（逗號分隔） | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` |
+| `CC_MEMORY_SKIP_TOOLS` | SKIP_TOOLS 清單（逗號分隔）；**整個覆蓋預設，非 union**（frozen 2026-04-23） | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` |
 | `CC_MEMORY_STOP_MIN_INTERVAL_SEC` | Stop 節流最短間隔（秒） | `180` |
 | `CC_MEMORY_STOP_MIN_DELTA_TOKENS` | Stop 節流最少新增 token | `500` |
-| `CC_MEMORY_REINJECT_SUMMARIES` | reinject 近 N 筆 summary | `5` |
-| `CC_MEMORY_REINJECT_MANUAL` | reinject 近 M 筆 manual / promoted | `3` |
+| `CC_MEMORY_REINJECT_SUMMARIES` | reinject 近 N 筆 summary | `3`（frozen 2026-04-23；比 design doc 原 5 保守） |
+| `CC_MEMORY_REINJECT_MANUAL` | reinject 近 M 筆 manual / promoted | `2`（frozen 2026-04-23；比 design doc 原 3 保守） |
 | `CC_MEMORY_WEIGHT_MANUAL` | manual 加權 | `1.0` |
 | `CC_MEMORY_WEIGHT_PROMOTED` | promoted 加權 | `0.85` |
 | `CC_MEMORY_WEIGHT_AUTO` | auto 加權 | `0.65` |
@@ -617,7 +622,8 @@ hooks/
   session-start-reinject.sh # Phase C
 
 sql/migrations/
-  0003_session_summaries_refine_audit.sql   # Phase C  新 2 表 + project_memories.source_summary_id
+  0006_session_summaries_refine_audit.sql        # Phase C M1  新 2 表 + project_memories.source_summary_id
+  0007_search_feedback_source_breakdown.sql      # Phase C M3  search_feedback.result_source_breakdown jsonb
 
 # runtime state（不入 git）
 ~/.cc-memory/
@@ -748,7 +754,7 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 | 風險 | 影響 | 緩解 |
 |---|---|---|
 | Stop hook 每輪觸發品質污染 | 每輪摘要 → 重複污染 retrieval | 三層過濾：SKIP_TOOLS + 雙節流 + upsert |
-| Claude Pro/Max subscription 配額爆 | LLM 摘要失敗 | `quota-exceeded.flag` 1hr 冷卻；極端時 `AUTO_CAPTURE=off` |
+| Claude Pro/Max subscription 配額爆 | LLM 摘要失敗 | `quota-exceeded.flag` 1hr 冷卻；極端時 `CC_MEMORY_AUTO_CAPTURE=off` |
 | Claude CLI 不存在 / 未認證 | 採集全斷 | `claude-cli-missing.flag` + manual recovery |
 | Session boundary 不穩（Codex） | 同主題分散多筆 | refine merge；Stage 2 自動偵測 |
 | Retrieval UX 碎化（Codex） | top-K 被 auto 佔滿 | 加權偏 manual；`CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=off` 退回 |
@@ -756,15 +762,23 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 | `session_id` 取不到 | 寫 null row、無 upsert 保護 | N 次連不到 exit + log |
 | Re-inject 注入干擾 Claude | context 被預期外內容佔用 | 數量可調；`CC_MEMORY_REINJECT=off` |
 
-### Phase C Open Questions（需實作時決定，詳見 design doc §Open Questions）
+### Phase C Open Questions
 
-1. transcript size cap 截尾策略（預設 head 500KB + tail 1MB）
-2. Claude model 選擇（預設 `claude-sonnet-4-5`）
-3. CLI refine `list` 寫 audit log（預設不寫）
-4. 三個 feature flag 預設值（off / on / off）
-5. reinject N=5/M=3 合理性
-6. Stop 節流參數 min-interval=180s / min-tokens=500
-7. SKIP_TOOLS 清單是否擴充
+以下 **7 項已於 2026-04-23 凍結**（值見上方 §Environment Variables / §Data Model，及 `docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md` §Frozen Decisions）：
+
+- ~~transcript size cap~~ → frozen：head 500KB + tail 1MB + middle `[truncated]` 標註
+- ~~Claude model 選擇~~ → frozen：預設 `claude-sonnet-4-5`
+- ~~三個 feature flag 預設值~~ → frozen：`CC_MEMORY_AUTO_CAPTURE=off` / `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=on` / `CC_MEMORY_REINJECT=off`
+- ~~reinject N/M~~ → frozen：`N=3` / `M=2`（比 design doc 原 5/3 保守）
+- ~~Stop 節流預設值~~ → frozen：min-interval=180s AND min-tokens=500
+- ~~SKIP_TOOLS 覆蓋策略~~ → frozen：env 整個覆蓋預設清單，非 union
+- ~~embedding 維度~~ → frozen：`vector(1536)` 沿用 Phase A `gemini-embedding-001`
+
+**仍待實作時決定（真正的 Open）**：
+
+1. CLI refine `list` 是否寫 audit log（設計傾向不寫，read-only 無 audit noise；實作時確認）
+2. `~/.cc-memory/state/<session_id>.json` 的清理策略（session 對應 row 被 refine delete 後 state 是否同步清）
+3. benchmark `scripts/benchmark.ts` 如何讀取 claude-mem SQLite 做 top-5 對比（better-sqlite3 + cosine sim；細節留 M5 實作）
 
 ---
 

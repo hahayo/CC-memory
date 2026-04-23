@@ -285,10 +285,12 @@
 
 ## M1 — Schema + Refine Tools MVP（~1d）
 
-- [ ] `src/db/schema.ts`：新增 `sessionSummaries` 表（`vector(768)` embedding + partial unique index `(project_id, session_id) WHERE status='active' AND session_id IS NOT NULL`）
+- [ ] `src/db/schema.ts`：新增 `sessionSummaries` 表（`vector(1536)` embedding，沿用 `EMBEDDING_DIMENSIONS` 常數 + partial unique index `(project_id, session_id) WHERE status='active' AND session_id IS NOT NULL`）
 - [ ] `src/db/schema.ts`：新增 `refineAuditLog` 表
-- [ ] `src/db/schema.ts`：`projectMemories` 加 `source_summary_id uuid` REFERENCES
-- [ ] `drizzle-kit generate --name=session_summaries_refine_audit` → `sql/migrations/0003_*.sql`
+- [ ] `src/db/schema.ts`：`projectMemories` 加 `source_summary_id uuid` REFERENCES `session_summaries(id)`（nullable、**無 ON DELETE CASCADE**；frozen 2026-04-23）
+- [ ] 核對 `session_summaries.status` CHECK 僅 `'active' | 'archived'`（無 `merged`；merge 走 archive + `metadata.merged_into`；frozen 2026-04-23）
+- [ ] 核對 `sessionSummaries.promoted_to_memory_id` 為 nullable uuid（無 CASCADE；refine delete 手動 nullify 對側）
+- [ ] `drizzle-kit generate --name=session_summaries_refine_audit` → `sql/migrations/0006_*.sql`（現最新是 0005，下一編號是 0006；frozen 2026-04-23）
 - [ ] 套用 local + Zeabur PG
 - [ ] `src/services/refine.ts`：delete / promote / merge / edit 四操作 + audit log 寫入
 - [ ] `src/tools/refine-{delete,promote,merge,edit}.ts`：MCP tool 註冊
@@ -314,7 +316,7 @@
 - [ ] `scripts/capture-runner.ts`：
   - [ ] 讀 env（`CLAUDE_SESSION_ID` / `CLAUDE_TRANSCRIPT_PATH` / `CLAUDE_PROJECT_DIR`）
   - [ ] Feature flag `CC_MEMORY_AUTO_CAPTURE=off` 直接 exit
-  - [ ] SKIP_TOOLS 過濾（從 transcript 抽本輪 tool list，⊆ 清單則 skip）
+  - [ ] SKIP_TOOLS 過濾（從 transcript 抽本輪 tool list，⊆ 清單則 skip；env `CC_MEMORY_SKIP_TOOLS` 整個覆蓋預設清單，非 union；frozen 2026-04-23）
   - [ ] 雙節流（min-interval 180s + min-delta-tokens 500）
   - [ ] Transcript size cap（head 500KB + tail 1MB）
   - [ ] 算 idempotency_key
@@ -345,6 +347,7 @@
   - [ ] 跨兩表 query + 加權 rerank（`W_MANUAL=1.0` / `W_PROMOTED=0.85` / `W_AUTO=0.65`）
   - [ ] 結果每筆標 `project_id`
 - [ ] `src/db/schema.ts`：`search_feedback` 加 `result_source_breakdown jsonb`
+- [ ] `drizzle-kit generate --name=search_feedback_source_breakdown` → `sql/migrations/0007_*.sql`（frozen 2026-04-23）
 - [ ] `src/services/feedback.ts` `recordSearchQuery` 填 breakdown
 - [ ] env 配置讀取：`CC_MEMORY_WEIGHT_*` / `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH`
 - [ ] Unit + Integration tests（加權 / 跨專案 / feature flag off 退回 Phase A 行為）
@@ -363,8 +366,8 @@
 - [ ] `src/tools/recent-summaries.ts`：MCP `cc_memory_recent_summaries(project_id, limit)` read-only
 - [ ] `scripts/reinject-runner.ts`：
   - [ ] Feature flag `CC_MEMORY_REINJECT=off` exit
-  - [ ] 查近 N 筆 summary（env `CC_MEMORY_REINJECT_SUMMARIES=5`）
-  - [ ] 查近 M 筆 manual / promoted（env `CC_MEMORY_REINJECT_MANUAL=3`）
+  - [ ] 查近 N 筆 summary（env `CC_MEMORY_REINJECT_SUMMARIES`，預設 `3`；frozen 2026-04-23）
+  - [ ] 查近 M 筆 manual / promoted（env `CC_MEMORY_REINJECT_MANUAL`，預設 `2`；frozen 2026-04-23）
   - [ ] 格式化為 Claude Code hook protocol `additionalContext` JSON
   - [ ] stdout 輸出（失敗 / 空結果 → stdout 空）
 - [ ] `hooks/session-start-reinject.sh`（matcher 對應 `startup|clear|compact`）
@@ -373,7 +376,7 @@
 
 ### M4 Gate
 
-- [ ] `/clear` 觸發 → 新 context 含近 N 筆 summary + M 筆 manual（Claude 能 recall 注入內容）
+- [ ] `/clear` 觸發 → 新 context 含近 3 筆 summary + 2 筆 manual（Claude 能 recall 注入內容）
 - [ ] `CC_MEMORY_REINJECT=off` → `/clear` 後 context 不含注入
 - [ ] 空 project → stdout 空、session 正常啟動（不注入 placeholder）
 
@@ -431,7 +434,7 @@
 - [ ] 斷網 capture → queue 有 row → 連網重觸 → queue 清空、DB 有 row
 
 **Re-inject**
-- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 5 筆 summary + 3 筆 manual
+- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 3 筆 summary + 2 筆 manual
 - [ ] `CC_MEMORY_REINJECT=off` → 新 context 不含注入
 
 **Retrieval**
