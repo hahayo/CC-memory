@@ -223,13 +223,13 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 |---|---|---|
 | **Day 0 Schema alignment** ✅ | Phase A | 刪 `sql/schema.sql`，Drizzle 當唯一真實來源 |
 | **Schema 擴充 Phase 1** ✅ | Phase A | `tasks`、`search_feedback`、`bot_user_state` 上線 |
-| **Schema 補完 Phase 2** | Phase A | `project_memories` 加 `idempotency_key` + `writer_host`；`tasks` 加 `writer_host` |
-| **Service layer 抽出** | Phase A | `src/services/` 純業務邏輯，MCP 直接使用；HTTP / bot 屆時共用 |
-| **Canonical project id** | Phase A | `explicit > env > marker > repo_name > basename` 統一解析 |
-| **Writer attribution** | Phase A | `writer_host` = env `CC_MEMORY_WRITER` ?? `os.hostname()` |
-| **MCP task tools** | Phase A | `cc_task_create` / `cc_task_list` / `cc_task_update`（optimistic locking） |
-| **Retrieval 評估（被動記錄 + 離線腳本）** | Phase A | MCP `cc_memory_search` 自動寫 `search_feedback`；`scripts/eval-retrieval.ts` 跑報告 |
-| **Codex MCP** | Phase A | 不寫專用整合；使用者 `codex mcp add cc-memory` 即可複用 |
+| **Schema 補完 Phase 2** ✅ | Phase A | `project_memories` 加 `idempotency_key` + `writer_host`；`tasks` 加 `writer_host` |
+| **Service layer 抽出** ✅ | Phase A | `src/services/` 純業務邏輯，MCP 直接使用；HTTP / bot 屆時共用 |
+| **Canonical project id** ✅ | Phase A | `explicit > env > marker > repo_name > basename` 統一解析 |
+| **Writer attribution** ✅ | Phase A | `writer_host` = env `CC_MEMORY_WRITER` ?? `os.hostname()` |
+| **MCP task tools** ✅ | Phase A | `cc_task_create` / `cc_task_list` / `cc_task_update`（optimistic locking） |
+| **Retrieval 評估（被動記錄 + 離線腳本）** ✅ | Phase A | MCP `cc_memory_search` 自動寫 `search_feedback`；`scripts/eval-retrieval.ts` 跑報告 |
+| **Codex MCP** ✅ | Phase A | 不寫專用整合；使用者 `codex mcp add cc-memory` 即可複用 |
 | ~~**HTTP REST API**~~ | ~~Phase B~~ ❌ | 取消 |
 | ~~**Telegram bot**~~ | ~~Phase B~~ ❌ | 取消 |
 | ~~**Feedback 回寫（thumbs / selected）**~~ | ~~Phase B~~ ❌ | 取消；品質驗證改靠 Phase C 品質閘 + refine delete 頻率 |

@@ -764,15 +764,7 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 
 ### Phase C Open Questions
 
-以下 **7 項已於 2026-04-23 凍結**（值見上方 §Environment Variables / §Data Model，及 `docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md` §Frozen Decisions）：
-
-- ~~transcript size cap~~ → frozen：head 500KB + tail 1MB + middle `[truncated]` 標註
-- ~~Claude model 選擇~~ → frozen：預設 `claude-sonnet-4-5`
-- ~~三個 feature flag 預設值~~ → frozen：`CC_MEMORY_AUTO_CAPTURE=off` / `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=on` / `CC_MEMORY_REINJECT=off`
-- ~~reinject N/M~~ → frozen：`N=3` / `M=2`（比 design doc 原 5/3 保守）
-- ~~Stop 節流預設值~~ → frozen：min-interval=180s AND min-tokens=500
-- ~~SKIP_TOOLS 覆蓋策略~~ → frozen：env 整個覆蓋預設清單，非 union
-- ~~embedding 維度~~ → frozen：`vector(1536)` 沿用 Phase A `gemini-embedding-001`
+> 2026-04-23 已凍結的 7 項決策（embedding 維度 / Claude model / transcript cap / reinject N-M / Stop 節流預設 / SKIP_TOOLS 覆蓋語義 / 三個 feature flag 預設值）不再是 open — 值見上方 §Environment Variables / §Data Model，及 `docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md` §Frozen Decisions。
 
 **仍待實作時決定（真正的 Open）**：
 
