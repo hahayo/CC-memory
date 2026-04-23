@@ -17,7 +17,7 @@
 
 # Phase A — 本期交付（MCP only）
 
-## Phase 0 — Schema Alignment ✅（已完成）
+## Phase 0 ✅ — Schema Alignment（已完成）
 
 - [x] 刪除 `sql/schema.sql`（死檔）
 - [x] 新增 `sql/migrations/` 目錄
@@ -26,9 +26,17 @@
 - [x] `scripts/install.sh` 改用 `DATABASE_URL` + `drizzle-kit push`
 - [x] `README.md` + `docs/schema-alignment.md` 明示 Drizzle 為唯一真相
 
+### Phase 0 Gate（已通過）
+
+- [x] `ls sql/migrations/0000_*.sql` 可找到 baseline 檔
+- [x] `grep -q "CREATE EXTENSION.*vector" sql/migrations/0000_*.sql` 成功
+- [x] `drizzle.config.ts` 內的 `out` 指向 `./sql/migrations`
+- [x] `scripts/install.sh` 不再引用已刪除的 `sql/schema.sql`
+- [x] `README.md` 明示「Drizzle schema = 唯一真相」
+
 ---
 
-## Phase 1 — 新增 3 張表 + TDD ✅（已完成）
+## Phase 1 ✅ — 新增 3 張表 + TDD（已完成）
 
 - [x] `src/db/schema.ts` 新增 `tasks` / `search_feedback` / `bot_user_state`
 - [x] `sql/migrations/0001_add_tasks_feedback_bot_state.sql`
@@ -36,95 +44,102 @@
 - [x] `tests/db/v02-tdd.test.ts`（14 tests）
 - [x] 40/40 test 綠
 
+### Phase 1 Gate（已通過）
+
+- [x] `tests/db/v02-tdd.test.ts` 14 tests 綠（紅→綠→refactor 全跑過）
+- [x] `psql $TEST_DATABASE_URL -c "\dt"` 能看到 `project_memories` / `tasks` / `search_feedback` / `bot_user_state` 四表
+- [x] `npm test` 在 Phase 1 結束當下 40/40 全綠（regression + TDD 新測合併）
+- [x] Zeabur PG 套用 0001 migration 成功
+
 ---
 
-## Phase 2 — Schema 補完 + Service Layer（1.5d）
+## Phase 2 ✅ — Schema 補完 + Service Layer（1.5d）
 
 ### 2a Schema 補完（v1.3 新增）
 
-- [ ] `src/db/schema.ts`：`projectMemories` 加 `idempotencyKey text` + `writerHost text`
-- [ ] `src/db/schema.ts`：`tasks` 加 `writerHost text`
-- [ ] `drizzle-kit generate --name=add_idempotency_and_writer` → `sql/migrations/0002_*.sql`
-- [ ] Partial unique index `project_memories_idempotency_idx` WHERE idempotency_key IS NOT NULL
-- [ ] 套用到 test PG + Zeabur PG
-- [ ] TDD：`tests/db/v03-writer-idempotency.test.ts`
-  - [ ] RED：不存在欄位 → insert writer_host 失敗 / idempotency_key 無 unique
-  - [ ] GREEN：schema 上線 → 重複 idempotency_key insert 收 duplicate key error
+- [x] `src/db/schema.ts`：`projectMemories` 加 `idempotencyKey text` + `writerHost text`
+- [x] `src/db/schema.ts`：`tasks` 加 `writerHost text`
+- [x] `drizzle-kit generate --name=add_idempotency_and_writer` → `sql/migrations/0002_*.sql`
+- [x] Partial unique index `project_memories_idempotency_idx` WHERE idempotency_key IS NOT NULL
+- [x] 套用到 test PG + Zeabur PG
+- [x] TDD：`tests/db/v03-writer-idempotency.test.ts`
+  - [x] RED：不存在欄位 → insert writer_host 失敗 / idempotency_key 無 unique
+  - [x] GREEN：schema 上線 → 重複 idempotency_key insert 收 duplicate key error
 
 ### 2b Service layer 抽出
 
 > **TDD 順序**：每個 sub-task 先寫紅測跑失敗 → 實作到綠 → refactor。測試覆蓋 audit 見 2d。
 
-- [ ] `src/utils/repo-name.ts`（`execFileSync` 無 shell；不是 git repo 回 null）
-- [ ] `src/utils/writer-host.ts`（env `CC_MEMORY_WRITER` 或 `os.hostname()`）
-- [ ] `src/services/projects.ts`：`resolveProjectId` 實作 5 層優先序
+- [x] `src/utils/repo-name.ts`（`execFileSync` 無 shell；不是 git repo 回 null）
+- [x] `src/utils/writer-host.ts`（env `CC_MEMORY_WRITER` 或 `os.hostname()`）
+- [x] `src/services/projects.ts`：`resolveProjectId` 實作 5 層優先序
   `explicit > env > marker > repo_name > basename`
-- [ ] `src/services/projects.ts`：`listProjects()` union from memories + tasks
-- [ ] `src/services/projects.ts`：`projectExists(id)`
-- [ ] `src/services/memories.ts`：搬自 `src/tools/*.ts`，保持 input/output 相容
-  - [ ] `saveMemory` 自動填 `writer_host`
-  - [ ] `saveMemory` 支援 optional `idempotency_key`（重複回舊 row id）
-  - [ ] `deleteByIdempotencyKey(key, maxAgeSec)` 靠 unique index 精準找
-- [ ] `src/services/tasks.ts`
-  - [ ] `createTask` 自動填 `writer_host`
-  - [ ] `updateTask(id, patch, { expectedStatus })` optimistic locking
-  - [ ] 狀態轉移 table-driven 驗證（違反 throw `InvalidTransitionError`）
-  - [ ] `resolveTaskByShortId(prefix, projectId)` 0/1/多筆回三態
-- [ ] `src/services/feedback.ts`：`recordSearchQuery`（Phase A MCP search 被動寫 row，9 欄：query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores；無 thumbs / selected_rank）
-- [ ] ~~`recordFeedback`（驗 array 長度 + rank，UPDATE thumbs / selected_rank）~~ → **延後到 Phase 5-B**（需 HTTP + Telegram inline button 回寫才有 signal）
-- [ ] ~~`src/services/botstate.ts`~~ → **延後到 Phase 3**（僅 HTTP bot route 使用，Phase A MCP 用不到）
+- [x] `src/services/projects.ts`：`listProjects()` union from memories + tasks
+- [x] `src/services/projects.ts`：`projectExists(id)`
+- [x] `src/services/memories.ts`：搬自 `src/tools/*.ts`，保持 input/output 相容
+  - [x] `saveMemory` 自動填 `writer_host`
+  - [x] `saveMemory` 支援 optional `idempotency_key`（重複回舊 row id）
+  - [x] `deleteByIdempotencyKey(key, maxAgeSec)` 靠 unique index 精準找
+- [x] `src/services/tasks.ts`
+  - [x] `createTask` 自動填 `writer_host`
+  - [x] `updateTask(id, patch, { expectedStatus })` optimistic locking
+  - [x] 狀態轉移 table-driven 驗證（違反 throw `InvalidTransitionError`）
+  - [x] `resolveTaskByShortId(prefix, projectId)` 0/1/多筆回三態
+- [x] `src/services/feedback.ts`：`recordSearchQuery`（Phase A MCP search 被動寫 row，9 欄：query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores；無 thumbs / selected_rank）
+- [x] ~~`recordFeedback`（驗 array 長度 + rank，UPDATE thumbs / selected_rank）~~ → **延後到 Phase 5-B**（需 HTTP + Telegram inline button 回寫才有 signal）
+- [x] ~~`src/services/botstate.ts`~~ → **延後到 Phase 3**（僅 HTTP bot route 使用，Phase A MCP 用不到）
 
 ### 2c MCP 改 call service
 
 > **TDD 順序**：每個新增 tool 先寫紅測跑失敗 → 實作到綠。既有 6 個 memory tool 走 regression。
 
-- [ ] `src/index.ts` 改 call `services/*`（不再 import `db` client）
-- [ ] 新增 MCP tool：`cc_task_create`
-- [ ] 新增 MCP tool：`cc_task_list`
-- [ ] 新增 MCP tool：`cc_task_update`（要求帶 `expected_status`）
-- [ ] `src/tools/*.ts` 保留當薄殼
-- [ ] 既有 6 個 memory tool 輸入輸出格式不動
+- [x] `src/index.ts` 改 call `services/*`（不再 import `db` client）
+- [x] 新增 MCP tool：`cc_task_create`
+- [x] 新增 MCP tool：`cc_task_list`
+- [x] 新增 MCP tool：`cc_task_update`（要求帶 `expected_status`）
+- [x] `src/tools/*.ts` 保留當薄殼
+- [x] 既有 6 個 memory tool 輸入輸出格式不動
 
 ### 2d 測試 audit（覆蓋率檢查，測試本身於 2b/2c 邊做邊寫）
 
-- [ ] Unit：`services/tasks.ts` 狀態轉移 13 種組合 + optimistic locking
-- [ ] Unit：`services/projects.ts` 5 層優先序 + `listProjects` union
-- [ ] Unit：`utils/repo-name.ts` 各 URL 格式解析 + 非 git 目錄
-- [ ] Unit：`utils/writer-host.ts` env vs hostname
-- [ ] Integration：idempotency_key 重複 insert 行為
-- [ ] Regression：既有 9 個測試檔全綠
+- [x] Unit：`services/tasks.ts` 狀態轉移 13 種組合 + optimistic locking
+- [x] Unit：`services/projects.ts` 5 層優先序 + `listProjects` union
+- [x] Unit：`utils/repo-name.ts` 各 URL 格式解析 + 非 git 目錄
+- [x] Unit：`utils/writer-host.ts` env vs hostname
+- [x] Integration：idempotency_key 重複 insert 行為
+- [x] Regression：既有 9 個測試檔全綠
 
 ### Gate
-- [ ] `npm test` 40+（新增）tests 全綠
-- [ ] MCP 6 memory tool + 3 task tool 從 Claude Code 測全通
-- [ ] DB 可查：`SELECT idempotency_key, writer_host FROM project_memories LIMIT 1`
-- [ ] **DB 層冪等**：raw `INSERT` 兩次同 idempotency_key → 第二次收 unique violation
-- [ ] **Service 層冪等**：`saveMemory` 第二次帶相同 idempotency_key → 不拋錯、回傳既有 row id（不新增 row）
+- [x] `npm test` 40+（新增）tests 全綠
+- [x] MCP 6 memory tool + 3 task tool 從 Claude Code 測全通
+- [x] DB 可查：`SELECT idempotency_key, writer_host FROM project_memories LIMIT 1`
+- [x] **DB 層冪等**：raw `INSERT` 兩次同 idempotency_key → 第二次收 unique violation
+- [x] **Service 層冪等**：`saveMemory` 第二次帶相同 idempotency_key → 不拋錯、回傳既有 row id（不新增 row）
 
 ---
 
-## Phase 5-A — Retrieval Eval（Phase A，0.5d）
+## Phase 5-A ✅ — Retrieval Eval（Phase A，0.5d）
 
 > **TDD 順序**：每個 sub-task 先寫紅測跑失敗 → 實作到綠 → refactor。
 
-- [ ] `src/services/feedback.ts`：`recordSearchQuery(input)` — 每次 MCP search 自動 call，寫入 query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores
-- [ ] `src/index.ts`：`cc_memory_search` handler 呼叫完 search 後 fire-and-forget `recordSearchQuery`
-- [ ] 選用：`ALTER TABLE search_feedback ADD CONSTRAINT search_feedback_arrays_same_length CHECK (...)`
-- [ ] `scripts/eval-retrieval.ts`：14 天 markdown 報告（Phase A 指標：每日查詢數 / mode 分佈 / 結果穩定度）
-  - [ ] 標註 Phase B 才能算的指標（接受率 / Top-1 / 撤銷率）為 "N/A（待 Phase B）"
-- [ ] 文件：`docs/retrieval-eval.md`
-- [ ] Codex MCP 驗證：`codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
+- [x] `src/services/feedback.ts`：`recordSearchQuery(input)` — 每次 MCP search 自動 call，寫入 query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores
+- [x] `src/index.ts`：`cc_memory_search` handler 呼叫完 search 後 fire-and-forget `recordSearchQuery`
+- [x] 選用：`ALTER TABLE search_feedback ADD CONSTRAINT search_feedback_arrays_same_length CHECK (...)`
+- [x] `scripts/eval-retrieval.ts`：14 天 markdown 報告（Phase A 指標：每日查詢數 / mode 分佈 / 結果穩定度）
+  - [x] 標註 Phase B 才能算的指標（接受率 / Top-1 / 撤銷率）為 "N/A（待 Phase B）"
+- [x] 文件：`docs/retrieval-eval.md`
+- [x] Codex MCP 驗證：`codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
 
 ### 5-A 測試 audit
-- [ ] Unit：`services/feedback.ts:recordSearchQuery` 9 欄完整 row 斷言
-- [ ] Integration：MCP `cc_memory_search` 觸發後 `search_feedback` row 存在
-- [ ] Regression：既有 search / save / list 測試全綠
+- [x] Unit：`services/feedback.ts:recordSearchQuery` 9 欄完整 row 斷言
+- [x] Integration：MCP `cc_memory_search` 觸發後 `search_feedback` row 存在
+- [x] Regression：既有 search / save / list 測試全綠
 
 ### Gate
-- [ ] 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到該 row
-- [ ] `scripts/eval-retrieval.ts` 能產出 markdown 報告，含「每日查詢數」「mode 分佈」「結果穩定度」三個區塊
-- [ ] 報告含 Phase A 指標數值，能用於 Go/No-Go 判斷：每日查詢數（目標 > 3）、結果穩定度（目標 > 70%）
-- [ ] Codex MCP：`codex mcp add cc-memory` 後能從 Codex CLI 呼叫 `cc_memory_search`
+- [x] 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到該 row
+- [x] `scripts/eval-retrieval.ts` 能產出 markdown 報告，含「每日查詢數」「mode 分佈」「結果穩定度」三個區塊
+- [x] 報告含 Phase A 指標數值，能用於 Go/No-Go 判斷：每日查詢數（目標 > 3）、結果穩定度（目標 > 70%）
+- [x] Codex MCP：`codex mcp add cc-memory` 後能從 Codex CLI 呼叫 `cc_memory_search`
 
 ---
 
@@ -298,7 +313,7 @@
 - [ ] `src/tools/save-summary.ts`：MCP `cc_memory_save_summary`
 - [ ] `scripts/capture-runner.ts`：
   - [ ] 讀 env（`CLAUDE_SESSION_ID` / `CLAUDE_TRANSCRIPT_PATH` / `CLAUDE_PROJECT_DIR`）
-  - [ ] Feature flag `AUTO_CAPTURE=off` 直接 exit
+  - [ ] Feature flag `CC_MEMORY_AUTO_CAPTURE=off` 直接 exit
   - [ ] SKIP_TOOLS 過濾（從 transcript 抽本輪 tool list，⊆ 清單則 skip）
   - [ ] 雙節流（min-interval 180s + min-delta-tokens 500）
   - [ ] Transcript size cap（head 500KB + tail 1MB）
@@ -338,7 +353,7 @@
 
 - [ ] manual 和 auto 同 query cosine 差 ≤ 0.15 時，加權後 manual 排前
 - [ ] `project_ids=['A','B']` 能回跨兩個 project 的結果，每筆 `project_id` 正確
-- [ ] `INCLUDE_AUTO_IN_SEARCH=off` → 只回 `project_memories`（退回 Phase A）
+- [ ] `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=off` → 只回 `project_memories`（退回 Phase A）
 - [ ] 原 248 tests 不回歸
 
 ---
@@ -347,9 +362,9 @@
 
 - [ ] `src/tools/recent-summaries.ts`：MCP `cc_memory_recent_summaries(project_id, limit)` read-only
 - [ ] `scripts/reinject-runner.ts`：
-  - [ ] Feature flag `REINJECT=off` exit
-  - [ ] 查近 N 筆 summary（env `REINJECT_SUMMARIES=5`）
-  - [ ] 查近 M 筆 manual / promoted（env `REINJECT_MANUAL=3`）
+  - [ ] Feature flag `CC_MEMORY_REINJECT=off` exit
+  - [ ] 查近 N 筆 summary（env `CC_MEMORY_REINJECT_SUMMARIES=5`）
+  - [ ] 查近 M 筆 manual / promoted（env `CC_MEMORY_REINJECT_MANUAL=3`）
   - [ ] 格式化為 Claude Code hook protocol `additionalContext` JSON
   - [ ] stdout 輸出（失敗 / 空結果 → stdout 空）
 - [ ] `hooks/session-start-reinject.sh`（matcher 對應 `startup|clear|compact`）
@@ -359,7 +374,7 @@
 ### M4 Gate
 
 - [ ] `/clear` 觸發 → 新 context 含近 N 筆 summary + M 筆 manual（Claude 能 recall 注入內容）
-- [ ] `REINJECT=off` → `/clear` 後 context 不含注入
+- [ ] `CC_MEMORY_REINJECT=off` → `/clear` 後 context 不含注入
 - [ ] 空 project → stdout 空、session 正常啟動（不注入 placeholder）
 
 ---
@@ -412,12 +427,12 @@
 **Capture**
 - [ ] A 機器跑一輪對話 → Stop hook → B 機器 `cc_memory_search` 查得到該 session summary，`writer_host`=A
 - [ ] 長 session 跑 N 輪 → 只有一筆 active row，`summarize_count=N`（或更少）
-- [ ] `AUTO_CAPTURE=off` → DB 無新 row
+- [ ] `CC_MEMORY_AUTO_CAPTURE=off` → DB 無新 row
 - [ ] 斷網 capture → queue 有 row → 連網重觸 → queue 清空、DB 有 row
 
 **Re-inject**
 - [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 5 筆 summary + 3 筆 manual
-- [ ] `REINJECT=off` → 新 context 不含注入
+- [ ] `CC_MEMORY_REINJECT=off` → 新 context 不含注入
 
 **Retrieval**
 - [ ] `include_auto=true` / `=false` 結果差異符合加權

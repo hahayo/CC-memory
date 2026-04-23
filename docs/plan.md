@@ -648,15 +648,27 @@ docs/
 ### 修改
 
 ```
+# Phase A（已完成）
 src/db/schema.ts            # 加 project_memories.idempotency_key / writer_host、tasks.writer_host
 src/index.ts                # MCP server 加 task tools，call services
 src/utils/project-id.ts     # 原有 getProjectId 遷到 services/projects.ts，加 env + repo_name
 src/tools/*.ts              # 保留當薄殼
-package.json                # 加 hono, @hono/node-server, telegraf; build/start scripts 分 mcp/api/bot
-tsconfig.json               # 新增 tsconfig.{mcp,api,bot}.json，bot 不能 import 核心
-README.md                   # HTTP + bot + Codex MCP 設定章節
-.env.example                # 新增所有 v0.2 env
-docs/TODO.md                # v0.2 工作項目
+
+# ~~Phase B（已取消）~~
+# ~~package.json 加 hono / telegraf、build/start scripts 分 mcp/api/bot~~
+# ~~tsconfig.{mcp,api,bot}.json，bot 不能 import 核心~~
+# ~~README.md HTTP + bot + Codex MCP 設定章節~~
+# ~~.env.example 新增所有 HTTP/bot env~~
+
+# Phase C（v0.4 pending）
+src/db/schema.ts            # 加 session_summaries / refine_audit_log / project_memories.source_summary_id / search_feedback.result_source_breakdown
+src/index.ts                # 註冊 6 個新 MCP tool（save-summary、recent-summaries、refine-{delete,promote,merge,edit}）
+src/services/memories.ts    # searchMemories 擴展跨表+跨專案+加權
+src/services/feedback.ts    # recordSearchQuery 填 result_source_breakdown
+hooks/session-start.json    # 啟用 SessionStart re-inject（matcher=startup|clear|compact）
+package.json                # 加 refine:cli / benchmark:run / build:scripts npm scripts
+README.md                   # v0.4 使用說明（capture/reinject feature flag + refine CLI）
+docs/next-session-handoff.md # 每個 Milestone 結束更新
 ```
 
 ### 刪除
@@ -690,8 +702,8 @@ docs/TODO.md                # v0.2 工作項目
 |---|---|---|
 | **0** ✅ | Schema alignment | 完成 |
 | **1** ✅ | `tasks` / `search_feedback` / `bot_user_state` + TDD | 完成 |
-| **2** | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
-| **5-A** | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
+| **2** ✅ | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
+| **5-A** ✅ | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
 
 ### ~~Phase B — 後續階段（HTTP + Telegram）~~ ❌ 已於 2026-04-23 取消
 
@@ -702,9 +714,9 @@ docs/TODO.md                # v0.2 工作項目
 | Milestone | 交付 | ~工時 | Gate |
 |---|---|---|---|
 | **M1** | Schema migration（session_summaries + refine_audit_log）+ 4 refine MCP tools + refine CLI 基本操作 | 1d | migration local/Zeabur 都成功；refine 四 tool happy path；原 248 tests 綠 |
-| **M2** | `scripts/capture-runner.ts`（SKIP_TOOLS + 雙節流 + upsert）+ `src/llm/claude-cli.ts` + `src/llm/gemini-embed.ts`（抽模組）+ `hooks/stop-capture.sh` + state/queue 機制 | 2.5d | E2E：Stop → Claude CLI → embed → DB upsert；SKIP_TOOLS 測試；節流測試；斷網 queue resume；`AUTO_CAPTURE=off` 驗無寫入；CLI missing flag 機制 |
-| **M3** | `cc_memory_search` 擴展（跨表 + `project_ids[]` + 加權）+ `search_feedback.result_source_breakdown` | 1.5d | 加權 unit test；跨 project integration 測；`INCLUDE_AUTO=off` 退回 Phase A 行為；原 248 tests 綠 |
-| **M4** | `scripts/reinject-runner.ts` + MCP `cc_memory_recent_summaries` + `hooks/session-start-reinject.sh` + hook protocol 整合 | 1d | `/clear` 能注入；`REINJECT=off` 不注入；空 project 不注入 placeholder |
+| **M2** | `scripts/capture-runner.ts`（SKIP_TOOLS + 雙節流 + upsert）+ `src/llm/claude-cli.ts` + `src/llm/gemini-embed.ts`（抽模組）+ `hooks/stop-capture.sh` + state/queue 機制 | 2.5d | E2E：Stop → Claude CLI → embed → DB upsert；SKIP_TOOLS 測試；節流測試；斷網 queue resume；`CC_MEMORY_AUTO_CAPTURE=off` 驗無寫入；CLI missing flag 機制 |
+| **M3** | `cc_memory_search` 擴展（跨表 + `project_ids[]` + 加權）+ `search_feedback.result_source_breakdown` | 1.5d | 加權 unit test；跨 project integration 測；`CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=off` 退回 Phase A 行為；原 248 tests 綠 |
+| **M4** | `scripts/reinject-runner.ts` + MCP `cc_memory_recent_summaries` + `hooks/session-start-reinject.sh` + hook protocol 整合 | 1d | `/clear` 能注入；`CC_MEMORY_REINJECT=off` 不注入；空 project 不注入 placeholder |
 | **M5** | `scripts/benchmark.ts` + 固定 5 query fixture + 人工標註 template | 0.5d + 2 週觀察 | benchmark 可跑；進入觀察期（觀察期結束才評品質閘） |
 
 **Gate 未過不進下個 Milestone**。
@@ -739,10 +751,10 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 | Claude Pro/Max subscription 配額爆 | LLM 摘要失敗 | `quota-exceeded.flag` 1hr 冷卻；極端時 `AUTO_CAPTURE=off` |
 | Claude CLI 不存在 / 未認證 | 採集全斷 | `claude-cli-missing.flag` + manual recovery |
 | Session boundary 不穩（Codex） | 同主題分散多筆 | refine merge；Stage 2 自動偵測 |
-| Retrieval UX 碎化（Codex） | top-K 被 auto 佔滿 | 加權偏 manual；`INCLUDE_AUTO=off` 退回 |
+| Retrieval UX 碎化（Codex） | top-K 被 auto 佔滿 | 加權偏 manual；`CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=off` 退回 |
 | Precision vs LLM 錯抓 | 幻覺污染 | 抄 claude-mem prompt；refine delete；錯抓率 <10% 品質閘 |
 | `session_id` 取不到 | 寫 null row、無 upsert 保護 | N 次連不到 exit + log |
-| Re-inject 注入干擾 Claude | context 被預期外內容佔用 | 數量可調；`REINJECT=off` |
+| Re-inject 注入干擾 Claude | context 被預期外內容佔用 | 數量可調；`CC_MEMORY_REINJECT=off` |
 
 ### Phase C Open Questions（需實作時決定，詳見 design doc §Open Questions）
 
@@ -764,7 +776,7 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 
 ### Phase C 回滾
 - **Schema**：`session_summaries` + `refine_audit_log` + `project_memories.source_summary_id` 皆 additive，回滾 = 不寫入這些表（Phase A 行為完全不受影響）
-- **Feature flag 一鍵全關**：`AUTO_CAPTURE=off` + `REINJECT=off` + `INCLUDE_AUTO_IN_SEARCH=off` → 等於沒裝 v0.4
+- **Feature flag 一鍵全關**：`CC_MEMORY_AUTO_CAPTURE=off` + `CC_MEMORY_REINJECT=off` + `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=off` → 等於沒裝 v0.4
 - **Hook 失效**：hook wrapper `set +e` 吞掉所有錯，Claude Code 使用者體感無異常
 - **DB 汙染**：最糟情況 auto summary 寫錯一堆 → `scripts/refine.ts delete --where "capture_source='auto-stop-hook'" --dry-run` 批次清掉
 - **取代 claude-mem 決策可逆**：併用期任何時候發現不對，停用 CC-memory 自動採集、繼續用 claude-mem 即可

@@ -81,8 +81,9 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 使用者：本專案開發者（單人）。脈絡分兩組介面：
 
-- **Phase A — MCP**（v0.2 本期交付）：終端機（Claude Code / Codex MCP stdio）
-- **Phase B — HTTP REST API + Telegram bot**（後續階段 / 可由其他 agent 承接，本期不綁排程）
+- **Phase A — MCP** ✅（v0.3 已交付）：終端機（Claude Code / Codex MCP stdio）
+- ~~**Phase B — HTTP REST API + Telegram bot**~~ ❌（已於 2026-04-23 取消，見下方 §Phase B 區塊）
+- **Phase C — v0.4 自動採集（Stage 1）**（pending）：Stop hook capture + SessionStart re-inject + refine tools + benchmark
 
 每個 US 皆對應具體驗收條件與 Goal / Design Principle。
 
@@ -186,7 +187,7 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 - **Embedding**：Gemini `text-embedding-004`（沿用 Phase A，`vector(768)`）
 - **Hook 事件**：`Stop`（抓）+ `SessionStart(matcher=startup|clear|compact)`（re-inject）
 - **SKIP_TOOLS 預設清單**（抄 claude-mem）：`ListMcpResourcesTool, SlashCommand, Skill, TodoWrite, AskUserQuestion`
-- **Feature flags 預設值**：`AUTO_CAPTURE=off`（opt-in）、`INCLUDE_AUTO_IN_SEARCH=on`、`REINJECT=off`（opt-in）
+- **Feature flags 預設值**：`CC_MEMORY_AUTO_CAPTURE=off`（opt-in）、`CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=on`、`CC_MEMORY_REINJECT=off`（opt-in）
 
 ---
 
