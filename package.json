@@ -1,6 +1,6 @@
 {
   "name": "cc-memory",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Claude Code 專案記憶同步系統 - 跨設備、按專案隔離的智能記憶管理",
   "main": "build/index.js",
   "types": "build/index.d.ts",

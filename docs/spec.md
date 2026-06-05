@@ -1,5 +1,7 @@
 # CC-memory Spec（v0.3 Phase A 已交付 + v0.4 自動採集規劃）
 
+> **🔀 Track 分流（2026-06-05）**：本檔 v0.4 Phase C auto-capture 為**規劃完成、實作 deferred**（**非進行中**）。目前 in-flight 的是獨立 initiative **personal-hub**（CC-memory 升格跨工具個人記憶+待辦中樞），其 SDD 三件套在 `docs/personal-hub/{spec,plan,task}.md`，Phase 0 安全核心已交付（commit `01dd5e4`）。兩條 track 互不污染：本檔保留 v0.3/v0.4 歷史，個人中樞內容一律在 `docs/personal-hub/`。
+
 > **當前版本：v0.4 draft**（2026-04-23 升版）· Phase A 已交付（tag `v0.3-phase-a`）；**Phase B 已取消**；新增 **Phase C — v0.4 自動採集（Stage 1）**。
 >
 > **完整 Phase C 設計請見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（1056 行、13 User Stories、5 Milestones、7 Risks）。本 spec 保留 Phase A 既有內容、Phase B 標記為取消、新增 Phase C 骨架對照 design doc。
@@ -327,7 +329,7 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 - [ ] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
 - [ ] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
 - [ ] B 電腦 clone 到不同路徑 → 自動解析到相同 `project_id`（repo_name 生效）
-- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids）
+- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids）（`CC_SEARCH_FEEDBACK` 預設 on 時；設 off 則不寫，見 personal-hub Phase 2）
 
 ### ~~Phase B 驗收~~ ❌ 取消（以下歷史紀錄）
 

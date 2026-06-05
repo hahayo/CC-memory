@@ -43,6 +43,13 @@
       "when": 1776824444894,
       "tag": "0005_scope_idempotency_by_active_status",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780643723698,
+      "tag": "0006_add_reminders",
+      "breakpoints": true
     }
   ]
 }

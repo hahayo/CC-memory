@@ -97,6 +97,12 @@ export interface SearchMemoriesInput {
   limit?: number;
   mode?: SearchMode;
   querySurface?: 'telegram' | 'mcp' | 'http';
+  /**
+   * admin/debug escape hatch：true 時全專案搜尋「不」排除保留 namespace（如 __personal__）。
+   * 預設 false → projectId 未指定的全專案搜尋會在 WHERE 排除保留 namespace，
+   * 避免一般 project-mode client 撈到個人資料（隱私邊界方向 2）。MCP handler 不暴露此欄位。
+   */
+  includeReserved?: boolean;
 }
 
 export interface ListMemoriesInput {
@@ -164,6 +170,36 @@ export type ResolveShortIdResult =
   | { kind: 'AMBIGUOUS'; candidates: Task[] };
 
 // ============================================================================
+// Reminder（Personal-Hub Phase 1）
+// ============================================================================
+
+/** getDueReminders 本次成功 claim 的一筆提醒。 */
+export interface DueReminder {
+  task: Task;
+  /** 本次提醒對應的 slot（= COALESCE(snooze_until, remind_at) 投遞當下取值） */
+  slot: Date;
+}
+
+export interface SetReminderInput {
+  remindAt: Date;
+  /** null=一次性；正整數=每 N 天循環 */
+  recurrenceIntervalDays?: number | null;
+}
+
+export interface GetDueRemindersOptions {
+  /** 已套 applyScopePolicy 的 scope；WHERE project_id=$projectId（forced personal instance = __personal__） */
+  projectId: string;
+  /** 測試可注入；預設 new Date()。所有比較與寫入一律用同一個值，不混 SQL now() */
+  now?: Date;
+  /** 寫入 reminder_log.channel */
+  channel: string;
+  /** 預設 resolveWriterHost() */
+  writerHost?: string;
+  /** 單次最多處理筆數，預設 50 */
+  limit?: number;
+}
+
+// ============================================================================
 // MCP handler 回傳錯誤結構（Stage 2 wire-up 用）
 // ============================================================================
 
@@ -175,6 +211,7 @@ export interface McpError {
     | 'NOT_FOUND'
     | 'AMBIGUOUS'
     | 'INVALID_ARGUMENT'
+    | 'FORBIDDEN'
     | 'INTERNAL';
   message: string;
   details?: Record<string, unknown>;

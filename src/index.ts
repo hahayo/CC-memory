@@ -33,9 +33,18 @@ import {
   deleteMemory,
   getProjectStats,
 } from './services/memories.js';
-import { createTask, listTasks, updateTask } from './services/tasks.js';
+import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
+import { setReminder, snoozeReminder } from './services/reminders.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
+import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
+import {
+  loadToolPolicy,
+  isWriteTool,
+  assertWritable,
+  assertAllowed,
+  type ToolPolicy,
+} from './services/tool-policy.js';
 import { BaseServiceError, NotFoundError, InvalidArgumentError } from './services/errors.js';
 import type { McpError, TaskStatus } from './services/types.js';
 
@@ -43,7 +52,14 @@ import type { McpError, TaskStatus } from './services/types.js';
 // 輔助：cwd / projectId 解析（所有 tool 用同一組 dispatch）
 // ---------------------------------------------------------------------------
 
-function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
+// 啟動期載入 scope config（讀 CC_FORCE_PROJECT_ID / config drift 防護）。
+// import 時讀 process.env：跑 server 時反映啟動 env；測試以 handleToolCall 第 4 參數注入。
+const defaultScopeConfig: ScopeConfig = loadScopeConfig();
+
+function resolveCwdAndProjectId(
+  args: Record<string, unknown> | undefined,
+  config: ScopeConfig = defaultScopeConfig
+): {
   cwd: string;
   projectId: string;
 } {
@@ -55,15 +71,13 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   const hasPath = typeof rawPath === 'string' && rawPath.trim().length > 0;
   const hasId = typeof rawId === 'string' && rawId.trim().length > 0;
 
-  // MCP stdio server 的 process.cwd() 是 server 啟動目錄，不是 client 端的專案目錄。
-  // 任一 tool 若 caller 不傳 project_id 也不傳 project_path，fail-fast 不 fallback；
-  // 不然舊 client 會默默寫錯 project（codex review round 3 P1）。
-  // `cc_memory_search` 可以兩者都無（= 跨專案搜尋），所以那個分支在自己的 case 裡處理。
+  // 無 selector：交給 ScopePolicy 決定（single source of truth）。
+  //   - forced-mode（CC_FORCE_PROJECT_ID）→ 強制套用 forcedProjectId，不 fail-fast。
+  //   - project-mode → fail-fast（不 fallback server cwd；訊息含 project_id 或 project_path）。
+  // `cc_memory_search` 走自己的分支（surface='search'），允許 undefined = 全專案。
   if (!hasPath && !hasId) {
-    throw new InvalidArgumentError(
-      '需提供 project_id 或 project_path（MCP server 的 process.cwd() 非 client cwd，無法可靠解析 project）',
-      { hint: 'skills/{save,load}-memory.md 已示範：tool call 時傳 project_path 為當前工作目錄絕對路徑' }
-    );
+    const projectId = applyScopePolicy(undefined, { config, surface: 'scope' }) as string;
+    return { cwd: process.cwd(), projectId };
   }
 
   // project_path 驗證 — 僅在「path 會被用來解析 projectId」時執行
@@ -77,7 +91,10 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   // cwdIsExplicit：caller 送 project_path → 跳過 env layer，讓 path 本身 derive
   // project（codex review round 20 P1：env 是 server 不知道自己在哪的 fallback，
   // 不該覆蓋 caller 明示送進來的 path）
-  const projectId = resolveProjectId({ explicit, cwd, cwdIsExplicit: hasPath });
+  const resolved = resolveProjectId({ explicit, cwd, cwdIsExplicit: hasPath });
+  // ScopePolicy：forced-mode 拒絕跨 project；project-mode deny 保留 namespace
+  // （涵蓋 project_path / marker / git / basename 解析出 __personal__ 的所有入口）。
+  const projectId = applyScopePolicy(resolved, { config, surface: 'scope' }) as string;
   return { cwd, projectId };
 }
 
@@ -101,45 +118,60 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
 const ISO_8601_REGEX =
   /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
 
-function parseDueDate(raw: unknown): Date | null | undefined {
+function parseDueDate(raw: unknown, fieldName = 'due_date'): Date | null | undefined {
   if (raw === null) return null;
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string') {
-    throw new InvalidArgumentError('due_date 必須是 ISO 8601 字串或 null', { due_date: raw });
+    throw new InvalidArgumentError(`${fieldName} 必須是 ISO 8601 字串或 null`, { [fieldName]: raw });
   }
   // 空字串 / whitespace-only → 拒，不靜默 drop（codex review round 13 P2）。
   // 契約：null = 清空；undefined / 省略 = 不動；ISO 字串 = 設值；空字串 = bad input。
   if (raw.trim().length === 0) {
     throw new InvalidArgumentError(
-      'due_date 若提供須為 ISO 8601 字串；若要清空請傳 null',
-      { due_date: raw }
+      `${fieldName} 若提供須為 ISO 8601 字串；若要清空請傳 null`,
+      { [fieldName]: raw }
     );
   }
   if (!ISO_8601_REGEX.test(raw)) {
     throw new InvalidArgumentError(
-      `due_date 不是有效的 ISO 8601 字串: ${raw}`,
-      { due_date: raw, hint: 'YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss[.sss][Z|±HH:MM]' }
+      `${fieldName} 不是有效的 ISO 8601 字串: ${raw}`,
+      { [fieldName]: raw, hint: 'YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss[.sss][Z|±HH:MM]' }
     );
   }
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) {
-    throw new InvalidArgumentError(`due_date 不是有效日期: ${raw}`, { due_date: raw });
+    throw new InvalidArgumentError(`${fieldName} 不是有效日期: ${raw}`, { [fieldName]: raw });
   }
-  // Date-only roundtrip：防 "2026-02-31" 被 Date 靜默 rollover 成 "2026-03-03"
-  // 比較輸入字串的 Y/M/D 與 parsed Date 的 UTC Y/M/D（date-only 輸入 new Date 走 UTC）
-  const dateOnlyMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (dateOnlyMatch) {
-    const [, ys, ms, ds] = dateOnlyMatch;
+  // 日曆日合法性：驗證寫出的 YYYY-MM-DD（不論 date-only 或帶時間/時區）是真實日期。
+  // 防 "2026-02-31" 與 "2026-02-31T10:00:00Z" 被 new Date() 靜默 rollover 成 3/3
+  // （對 reminder 是「響在錯的時點」的真實缺陷）。calendar date 一律是字面前 10 字，
+  // 用 UTC probe 驗其合法性，與時區偏移無關（偏移只影響 instant，不改寫出的日曆日）。
+  const ymd = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (ymd) {
+    const [, ys, ms, ds] = ymd;
     const y = Number(ys);
     const m = Number(ms);
     const dd = Number(ds);
-    if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m || d.getUTCDate() !== dd) {
-      throw new InvalidArgumentError(`due_date 包含無效日期（如 2026-02-31）: ${raw}`, {
-        due_date: raw,
+    const probe = new Date(Date.UTC(y, m - 1, dd));
+    if (probe.getUTCFullYear() !== y || probe.getUTCMonth() + 1 !== m || probe.getUTCDate() !== dd) {
+      throw new InvalidArgumentError(`${fieldName} 包含無效日期（如 2026-02-31）: ${raw}`, {
+        [fieldName]: raw,
       });
     }
   }
   return d;
+}
+
+/**
+ * 解析必填 timestamp（reminder 的 remind_at / snooze_until）：
+ * 沿用 parseDueDate 的 ISO 8601 嚴格驗證；null / undefined / 缺值 → INVALID_ARGUMENT。
+ */
+function parseRequiredTimestamp(raw: unknown, field: string): Date {
+  const parsed = parseDueDate(raw, field);
+  if (parsed === null || parsed === undefined) {
+    throw new InvalidArgumentError(`${field} 為必填 ISO 8601 timestamp`, { [field]: raw });
+  }
+  return parsed;
 }
 
 /**
@@ -251,7 +283,7 @@ const projectPathProp = {
     '客戶端絕對路徑（用於解析 project_id；MCP server 的 process.cwd() 是 server 啟動目錄，非 client cwd）',
 };
 
-const tools: Tool[] = [
+export const BASE_TOOLS: Tool[] = [
   {
     name: 'cc_memory_save',
     description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。project_id 與 project_path 擇一必填。',
@@ -471,7 +503,108 @@ const tools: Tool[] = [
       required: ['id', 'expected_status'],
     },
   },
+  {
+    name: 'cc_task_stats',
+    description:
+      '取得專案任務統計（結構化 JSON，供 /hi 與 cron 用，取代 raw postgres）。日界 Asia/Taipei。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
+      properties: {
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        completed_since_days: {
+          type: 'number',
+          description: 'completed_recently 視窗天數（預設 7）',
+        },
+      },
+    },
+  },
+  // ---------- Reminder tools（Personal-Hub Phase 1） ----------
+  {
+    name: 'cc_task_set_reminder',
+    description:
+      '為任務設定提醒：remind_at 為觸發時點（與 due_date 截止日語意不同）。recurrence_interval_days 省略=一次性、正整數 N=每 N 天循環。重設會清除既有 snooze。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
+      properties: {
+        id: { type: 'string', description: '任務 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        remind_at: {
+          type: 'string',
+          description: '提醒觸發時點 ISO 8601（必填）',
+        },
+        recurrence_interval_days: {
+          type: 'number',
+          description: '循環間隔天數（正整數）；省略=一次性',
+        },
+      },
+      required: ['id', 'remind_at'],
+    },
+  },
+  {
+    name: 'cc_task_snooze',
+    description: '暫緩任務提醒到指定時點（snooze_until）。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
+      properties: {
+        id: { type: 'string', description: '任務 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        snooze_until: {
+          type: 'string',
+          description: '暫緩到此時點 ISO 8601（必填）',
+        },
+      },
+      required: ['id', 'snooze_until'],
+    },
+  },
 ];
+
+// forced-mode（CC_FORCE_PROJECT_ID）：無 selector → 強制 forced project，因此 selector
+// 非必填。移除 top-level anyOf/allOf（selector required 子句）使「廣告的 schema」與
+// runtime 一致——否則嚴格驗證 args 的 MCP client 會在送達 handler 前擋掉 no-selector
+// 呼叫（採納 Codex review P2）。id / type / title / expected_status 等 base `required`
+// 不受影響（仍保留）；property 內層的 anyOf（如 cc_task_list.status）也不受影響。
+function relaxSelectorForForcedMode(toolList: Tool[]): Tool[] {
+  return toolList.map((t) => {
+    const schema = { ...(t.inputSchema as Record<string, unknown>) };
+    delete schema.anyOf;
+    delete schema.allOf;
+    return { ...t, inputSchema: schema as Tool['inputSchema'] };
+  });
+}
+
+// 啟動期載入 tool policy（read-only / allowlist / search telemetry 開關）。
+const defaultToolPolicy: ToolPolicy = loadToolPolicy();
+
+/**
+ * 依 scope mode + tool policy 產生 ListTools schema：
+ *   - project-mode 維持 selector 必填、forced-mode 放寬（scope 層）。
+ *   - read-only：去掉所有寫入類 tool。
+ *   - allowlist：只露集合內 tool（含 read 過濾）。
+ * 這是雙層 enforce 的第一層（ListTools 隱藏）；第二層在 handleToolCall central guard。
+ */
+export function buildToolsForMode(
+  config: ScopeConfig,
+  policy: ToolPolicy = defaultToolPolicy
+): Tool[] {
+  let list = config.forcedProjectId === null ? BASE_TOOLS : relaxSelectorForForcedMode(BASE_TOOLS);
+  if (policy.readOnly) {
+    list = list.filter((t) => !isWriteTool(t.name));
+  }
+  if (policy.allowlist !== null) {
+    const allow = policy.allowlist;
+    list = list.filter((t) => allow.has(t.name));
+  }
+  return list;
+}
+
+// 實際廣告的 tools 反映啟動 mode（defaultScopeConfig / defaultToolPolicy 讀 import 時的 env）。
+export const tools: Tool[] = buildToolsForMode(defaultScopeConfig, defaultToolPolicy);
 
 // ---------------------------------------------------------------------------
 // MCP server
@@ -491,13 +624,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
-  database: typeof db = db
+  database: typeof db = db,
+  config: ScopeConfig = defaultScopeConfig,
+  policy: ToolPolicy = defaultToolPolicy
 ): Promise<CallToolResult> {
   try {
+    // central dispatch 守衛（雙層 enforce 的第二層，所有 tool 進入點統一過）：
+    //   1. assertAllowed：allowlist 集合外（含 read）→ 拒（不靠 ListTools 過濾單獨足夠）。
+    //   2. assertWritable：read-only instance 的寫入 tool → 拒。
+    assertAllowed(name, policy);
+    assertWritable(name, policy);
     switch (name) {
       // ---------------- Memory ----------------
       case 'cc_memory_save': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const result = await saveMemory(database, {
           projectId,
           projectPath: args.project_path as string | undefined,
@@ -567,6 +707,11 @@ export async function handleToolCall(
         } else {
           projectId = undefined;
         }
+        // ScopePolicy（surface='search'）：
+        //   - forced-mode → 強制限定 forcedProjectId（不可全專案，query_project_id 非 null）
+        //   - project-mode → deny 顯式/解析到的保留 namespace；undefined = 全專案
+        //     （service 層另排除保留 namespace，見 searchMemories）
+        projectId = applyScopePolicy(projectId, { config, surface: 'search' });
         const envelope = await searchMemories(database, {
           query: args.query as string,
           projectId,
@@ -578,9 +723,12 @@ export async function handleToolCall(
 
         // Phase 5-A：fire-and-forget 寫 search_feedback。
         // 失敗 console.error，不影響 search 主流程（避免 unhandled promise rejection 打掛 MCP server）。
-        void recordSearchQuery(database, envelope).catch((e) => {
-          console.error('[recordSearchQuery failed]', e);
-        });
+        // Phase 2（Codex #9）：CC_SEARCH_FEEDBACK=off 的潔癖消費端可完全關掉此 telemetry 寫入。
+        if (policy.searchFeedback) {
+          void recordSearchQuery(database, envelope).catch((e) => {
+            console.error('[recordSearchQuery failed]', e);
+          });
+        }
 
         if (envelope.results.length === 0) {
           return { content: [{ type: 'text', text: '沒有找到相關記憶' }] };
@@ -597,7 +745,7 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_list': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const results = await listMemories(database, {
           projectId,
           type: args.type as 'session' | 'decision' | undefined,
@@ -622,7 +770,7 @@ export async function handleToolCall(
 
       case 'cc_memory_get': {
         // 強制 project scope（codex review round 18 P2）：避免跨 project 讀取
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const memory = await getMemory(database, id, projectId);
         if (!memory) {
@@ -632,7 +780,7 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_stats': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const stats = await getProjectStats(database, projectId);
         const firstDate = stats.firstMemory
           ? new Date(stats.firstMemory).toLocaleDateString('zh-TW')
@@ -658,7 +806,7 @@ export async function handleToolCall(
 
       case 'cc_memory_delete': {
         // 強制 project scope（codex review round 18 P1）：避免跨 project 意外刪除
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const deleted = await deleteMemory(database, id, projectId);
         if (!deleted) {
@@ -669,7 +817,7 @@ export async function handleToolCall(
 
       // ---------------- Task ----------------
       case 'cc_task_create': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const parsedDue = parseDueDate(args.due_date);
         const task = await createTask(database, {
           projectId,
@@ -696,7 +844,7 @@ export async function handleToolCall(
       }
 
       case 'cc_task_list': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const rawStatus = args.status;
         let statusFilter: TaskStatus | TaskStatus[] | undefined;
         if (typeof rawStatus === 'string') statusFilter = rawStatus as TaskStatus;
@@ -727,7 +875,7 @@ export async function handleToolCall(
       case 'cc_task_update': {
         // 強制 project scope：cc_task_update 必須傳 project_id 或 project_path，
         // 否則 UUID-only update 可跨 project 亂改（codex round 5 P2）。
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const expected = args.expected_status as TaskStatus;
         const patch: Record<string, unknown> = {};
@@ -750,6 +898,72 @@ export async function handleToolCall(
             {
               type: 'text',
               text: `✓ 任務已更新\n${formatTask(updated)}`,
+            },
+          ],
+        };
+      }
+
+      case 'cc_task_stats': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const stats = await getTaskStats(database, projectId, {
+          completedSinceDays: args.completed_since_days as number | undefined,
+        });
+        // 結構化 JSON（snake_case，供 /hi / cron 直接 parse，不解析文字）
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                project_id: stats.projectId,
+                today: stats.today,
+                overdue: stats.overdue,
+                open: stats.open,
+                in_progress: stats.inProgress,
+                completed_recently: stats.completedRecently,
+              }),
+            },
+          ],
+        };
+      }
+
+      // ---------------- Reminder ----------------
+      case 'cc_task_set_reminder': {
+        // 強制 project scope：mutation 必帶 project_id / project_path（防跨 namespace 用 UUID 改別人的 row）。
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const id = args.id as string;
+        const remindAt = parseRequiredTimestamp(args.remind_at, 'remind_at');
+        const task = await setReminder(database, id, projectId, {
+          remindAt,
+          recurrenceIntervalDays: args.recurrence_interval_days as number | null | undefined,
+        });
+        const recurNote =
+          task.recurrenceIntervalDays !== null
+            ? `（每 ${task.recurrenceIntervalDays} 天循環）`
+            : '（一次性）';
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ 提醒已設定 ${recurNote}\n${formatTask(task)}\nremind_at: ${new Date(
+                task.remindAt as Date
+              ).toISOString()}`,
+            },
+          ],
+        };
+      }
+
+      case 'cc_task_snooze': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const id = args.id as string;
+        const until = parseRequiredTimestamp(args.snooze_until, 'snooze_until');
+        const task = await snoozeReminder(database, id, projectId, until);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ 提醒已暫緩\n${formatTask(task)}\nsnooze_until: ${new Date(
+                task.snoozeUntil as Date
+              ).toISOString()}`,
             },
           ],
         };
