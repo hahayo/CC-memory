@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { tools, buildToolsForMode } from '../src/index.js';
+import { tools, buildToolsForMode, BASE_TOOLS } from '../src/index.js';
 import { loadScopeConfig } from '../src/services/scope-policy.js';
 
 // scope 工具：runtime fail-fast 要求 project selector，schema 也必須宣告
@@ -104,5 +104,57 @@ describe('forced-mode ListTools schema：selector 非必填（採納 Codex P2）
     const projectTools = buildToolsForMode(loadScopeConfig({}));
     const t = projectTools.find((x) => x.name === 'cc_task_create')!;
     expect(requiresProjectSelector(t.inputSchema as SchemaLike)).toBe(true);
+  });
+});
+
+// #6（採納 Codex review）：relaxSelectorForForcedMode 只移除 selector requirement
+//（top-level anyOf / allOf），不得誤刪 base `required`、`properties`、或 property
+// 內層的 anyOf（cc_task_list.status / cc_task_update.due_date）。此 describe 是
+// regression guard——目前無 tool 在 top-level anyOf/allOf 夾帶非-selector 約束，
+// 故現實作安全；測試擋的是未來改動把其他 top-level 約束一起刪掉。
+describe('forced-mode relax：只剝 selector，不誤刪其他 top-level 約束（#6 regression guard）', () => {
+  const forcedTools = buildToolsForMode(loadScopeConfig({ CC_FORCE_PROJECT_ID: '__personal__' }));
+  const baseByName = new Map(BASE_TOOLS.map((t) => [t.name, t]));
+  const forcedByName = new Map(forcedTools.map((t) => [t.name, t]));
+
+  it.each(BASE_TOOLS.map((t) => t.name))('%s：properties 與 base 完全一致（含 property 內層 anyOf）', (name) => {
+    const base = baseByName.get(name)!.inputSchema as Record<string, unknown>;
+    const forced = forcedByName.get(name)!.inputSchema as Record<string, unknown>;
+    // property 集合與內容（含巢狀 anyOf）逐字保留
+    expect(forced.properties).toEqual(base.properties);
+  });
+
+  it.each(BASE_TOOLS.map((t) => t.name))('%s：base required 完全保留（不被 relax 動到）', (name) => {
+    const base = baseByName.get(name)!.inputSchema as { required?: string[] };
+    const forced = forcedByName.get(name)!.inputSchema as { required?: string[] };
+    expect(forced.required).toEqual(base.required);
+  });
+
+  it.each(BASE_TOOLS.map((t) => t.name))('%s：forced-mode 後 top-level anyOf / allOf 已移除', (name) => {
+    const forced = forcedByName.get(name)!.inputSchema as { anyOf?: unknown; allOf?: unknown };
+    expect(forced.anyOf).toBeUndefined();
+    expect(forced.allOf).toBeUndefined();
+  });
+
+  it('property 內層 anyOf 確實存活：cc_task_list.status / cc_task_update.due_date', () => {
+    const list = forcedByName.get('cc_task_list')!.inputSchema as {
+      properties: { status: { anyOf?: unknown[] } };
+    };
+    expect(Array.isArray(list.properties.status.anyOf)).toBe(true);
+    expect(list.properties.status.anyOf!.length).toBe(2);
+
+    const upd = forcedByName.get('cc_task_update')!.inputSchema as {
+      properties: { due_date: { anyOf?: unknown[] } };
+    };
+    expect(Array.isArray(upd.properties.due_date.anyOf)).toBe(true);
+    expect(upd.properties.due_date.anyOf!.length).toBe(2);
+  });
+
+  it('relax 不 mutate BASE_TOOLS（原始 schema 仍保有 top-level selector 約束）', () => {
+    // buildToolsForMode 已跑過；BASE_TOOLS 的 scope 工具仍須保有 selector 約束
+    const baseCreate = baseByName.get('cc_task_create')!.inputSchema as SchemaLike;
+    expect(requiresProjectSelector(baseCreate)).toBe(true);
+    const baseUpdate = baseByName.get('cc_task_update')!.inputSchema as SchemaLike;
+    expect(requiresProjectSelector(baseUpdate)).toBe(true);
   });
 });

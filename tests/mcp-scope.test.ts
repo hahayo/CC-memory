@@ -16,6 +16,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { handleToolCall } from '../src/index.js';
 import { loadScopeConfig } from '../src/services/scope-policy.js';
+import { resolveProjectId } from '../src/services/projects.js';
 import { connectTestDb, type Sql } from './helpers/db.js';
 
 const TEST_DB_URL =
@@ -150,5 +151,31 @@ describe('ScopePolicy MCP integration', () => {
     const text = (res.content[0] as { text: string }).text;
     expect(text).toContain('public');
     expect(text).not.toContain('secret');
+  });
+
+  // ---------------- codex review P2：blank-resolving selector 不得漏排 __personal__ ----------------
+
+  // precondition：證明 project_path:'/' 確實 basename-fallback 解析成 ''（blank）。
+  // 若此前提不成立，下面的 leak regression 測試會變 vacuous（沒走到漏洞路徑）。
+  it('precondition：project_path 解析空字串路徑（/）→ blank projectId（漏洞前提真實可達）', () => {
+    expect(resolveProjectId({ cwd: '/', cwdIsExplicit: true })).toBe('');
+  });
+
+  it('project-mode：cc_memory_search project_path=/（解析成 blank）→ 仍排除 __personal__（codex P2）', async () => {
+    // 修正前：blank id '' 經 applyScopePolicy 回 ''，searchMemories 的
+    // excludeReserved=(''===undefined)=false → 不排除保留 namespace；但 keyword helper
+    // 的 if(projectId) 又跳過 project 過濾 → 變「全專案且含 __personal__」的洩漏。
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES ('__personal__', 'session', ${'secret ' + KW})`;
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${tp}, 'session', ${'public ' + KW})`;
+    const res = await handleToolCall(
+      'cc_memory_search',
+      { query: KW, project_path: '/', mode: 'keyword' },
+      testDb,
+      PROJECT
+    );
+    expect(res.isError).not.toBe(true);
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toContain('public'); // 搜尋確實有跑並回傳非保留 project（非 vacuous）
+    expect(text).not.toContain('secret'); // __personal__ 不得外洩
   });
 });

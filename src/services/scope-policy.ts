@@ -101,19 +101,28 @@ export function applyScopePolicy(
 ): string | undefined {
   const { config, surface } = opts;
 
+  // blank（空字串 / whitespace-only）= 「未解析出有效 project」，正規化成 undefined。
+  // 來源：resolveProjectId 對 project_path:'/' 等做 basename fallback 會回 ''（codex
+  // review P2）。若放行 '' 往下游 search：helpers 用 `if (projectId)` 真值判斷會跳過
+  // project predicate 變全專案搜尋，但 excludeReserved 的 `=== undefined` 判斷又認為
+  // 「有 scope」→ 不排除 __personal__ → project-mode 洩漏個人列。統一在這個 single
+  // source of truth 正規化，讓 forced / scope / search 三分支共用同一套「無 selector」語意。
+  const normalizedId =
+    typeof resolvedId === 'string' && resolvedId.trim().length > 0 ? resolvedId : undefined;
+
   // ---- forced-mode：此 instance 鎖定 forcedProjectId ----
   if (config.forcedProjectId !== null) {
     const forced = config.forcedProjectId;
-    if (resolvedId === undefined) return forced; // 無 selector → 強制套用（含 search，不可全專案）
-    if (resolvedId === forced) return forced; // 顯式傳相同 → 放行
+    if (normalizedId === undefined) return forced; // 無 selector → 強制套用（含 search，不可全專案）
+    if (normalizedId === forced) return forced; // 顯式傳相同 → 放行
     throw new InvalidArgumentError(
-      `forced-mode：此 instance 鎖定 "${forced}"，不允許存取 "${resolvedId}"`,
-      { forcedProjectId: forced, requested: resolvedId }
+      `forced-mode：此 instance 鎖定 "${forced}"，不允許存取 "${normalizedId}"`,
+      { forcedProjectId: forced, requested: normalizedId }
     );
   }
 
   // ---- project-mode：deny 保留 namespace ----
-  if (resolvedId === undefined) {
+  if (normalizedId === undefined) {
     if (surface === 'search') return undefined; // 全專案搜尋（WHERE 排除保留 namespace）
     // scope 工具 fail-fast；訊息與既有契約一致（mcp-handler.test.ts 鎖 /project_id 或 project_path/）
     throw new InvalidArgumentError(
@@ -122,12 +131,12 @@ export function applyScopePolicy(
     );
   }
 
-  if (isReservedProjectId(resolvedId)) {
+  if (isReservedProjectId(normalizedId)) {
     throw new InvalidArgumentError(
-      `不允許存取保留 namespace "${resolvedId}"：個人資料需透過 forced-mode（CC_FORCE_PROJECT_ID）instance 存取`,
-      { reserved: resolvedId }
+      `不允許存取保留 namespace "${normalizedId}"：個人資料需透過 forced-mode（CC_FORCE_PROJECT_ID）instance 存取`,
+      { reserved: normalizedId }
     );
   }
 
-  return resolvedId;
+  return normalizedId;
 }

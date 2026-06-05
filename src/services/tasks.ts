@@ -108,6 +108,17 @@ function validateEnum<T extends string>(
 }
 
 /**
+ * tags 若提供須為 string[]（壞輸入早拋 INVALID_ARGUMENT）。
+ * 修正前：非字串陣列落到 text[] 欄位會在 postgres 噴錯 → INTERNAL（#7）。
+ */
+function validateOptionalTags(value: unknown): void {
+  if (value === undefined || value === null) return;
+  if (!Array.isArray(value) || value.some((x) => typeof x !== 'string')) {
+    throw new InvalidArgumentError('tags 必須為字串陣列', { field: 'tags' });
+  }
+}
+
+/**
  * normalize idempotency_key：空字串 / 只含空白 → undefined（不進冪等流程）。
  * 防止 client 把 '' 當 key 造成首次 create 成功後永久污染 tasks_idempotency_key_unique
  * （codex review round 9 P2）。
@@ -120,6 +131,7 @@ function normalizeIdempotencyKey(raw: unknown): string | undefined {
 
 export async function createTask(db: DbClient, input: CreateTaskInput): Promise<Task> {
   validateTitle(input.title);
+  validateOptionalTags(input.tags);
   // enum 驗證：以明示傳入為準；fallback default 不必驗
   const status = input.status === undefined ? 'open' : validateEnum(input.status, VALID_STATUSES, 'status');
   const priority =
@@ -234,6 +246,12 @@ export async function updateTask(
   patch: UpdateTaskPatch,
   options: UpdateTaskOptions
 ): Promise<Task> {
+  // Step 0：input-shape 預驗證（fail-fast，先於存在性 SELECT）。
+  //   壞 tags 是 client 輸入錯誤，應回 INVALID_ARGUMENT 而非先做 SELECT 變 NOT_FOUND/
+  //   或落到 postgres 變 INTERNAL（#7）。title/status/priority 的 enum 驗證仍在 Step 2.5
+  //   （需先確認 row 存在與 expectedStatus 才有意義）。
+  validateOptionalTags(patch.tags);
+
   // Step 1：SELECT 當前 row
   const currentRows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
   if (currentRows.length === 0) {

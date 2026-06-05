@@ -315,3 +315,85 @@ Stage 3 共 6 rounds（19-24），累積採納 7 findings + 反駁 1 findings（
 4. 成本效益不符：極邊角 case（恰好輸入 `T00:00:00Z` 想要 timed 語意的使用者），不值得加 schema column。
 
 **若 codex 仍堅持**：請說明為何邊角 case 值得 schema 複雜度，或提出不改 schema 的替代方案。
+
+---
+
+# 個人記憶中樞 Phase 0 — Codex review gate（2026-06-05）
+
+> 本段為 plan「Phase 0 Codex review gate → 修正 → roadmap」的可重現 artifact。
+
+## 可重現性 metadata（Codex #4/#5）
+
+| 項目 | 值 |
+|------|-----|
+| base branch | `main` |
+| base SHA | `7b2a16a68cba259a42c47b63c668c27e6ddf5581` |
+| HEAD SHA（branch `feature/personal-hub-phase0`） | `ff9f54f9eac5d85c536b2582e0fc6c56044ef294` |
+| 實際指令 | `codex review --base main`（**不帶 `--model`**，用 `~/.codex/config.toml` 的 gpt-5.5 / medium） |
+| codex-cli version | `0.136.0` |
+| 規則依賴 | `~/.claude/rules/codex-review.md`（外部未版控）sha256 = `28b6ba3d9bdd8de1c5bea478ec1e631ebe7e559fa22faecd8bf7415bcc3d662b` |
+| review 範圍 | 整個 branch diff vs main（涵蓋 `8112233` feat + `ff9f54f` fix 與跨 commit 互動） |
+
+## Codex findings（1 項，全採納）
+
+> Finding 數量以全文 grep 驗證（非僅讀尾段）：`grep -nE "\[P[0-9]\]|Review comment:"`
+> 於 8181 行 output 中只命中同一 P2（codex 印兩次 summary+detail）；另兩處 "round 2 finding"
+> 命中為 source 檔內既有程式碼註解被 diff dump，非新 finding。確認唯一 finding。
+
+### [P2] memories.ts:438 — blank project id 漏排保留 namespace（**採納**，security/data_loss）
+
+**Codex 主張**：`cc_memory_search` 帶 `project_path:'/'`（basename fallback 解析成 `''`）時，
+keyword/semantic helper 用 `if (projectId)` 真值判斷跳過 project predicate（→ 全專案搜尋），
+但 `excludeReserved` 用 `input.projectId === undefined` 判斷（`'' !== undefined` → false）→
+**不排除 `__personal__`** → project-mode 下洩漏個人列。
+
+**評估**：屬實，security finding 不可只用脈絡駁回。經 code trace 確認 predicate 不一致
+（line 297/337 真值 vs line 438 `=== undefined`），且 `project_path:'/'` 解析成 `''` 為真實可達前提。
+
+**修正（defense-in-depth 兩層，皆 RED→GREEN）**：
+1. `applyScopePolicy`（single source of truth）入口正規化 blank（`''`/whitespace）→ `undefined`，
+   讓 forced / scope / search 三分支共用同一「無 selector」語意（scope 工具因此 fail-fast、
+   search 走全專案且排除保留 namespace、forced 套 forced project）。
+2. `searchMemories` 的 `excludeReserved` 改用與 helper 一致的真值判斷（`isScoped`），
+   即使 blank 繞過 policy 直達本層也不漏排。
+
+**RED 證明**：暫時停用兩處修正後跑 `tests/mcp-scope.test.ts -t "project_path=/"`，
+search 回傳 `secret`（`__personal__` 列）→ 確認漏洞真實；復原後 GREEN。
+新增測試：`mcp-scope.test.ts` precondition（`/`→blank）+ leak regression（正反斷言防 vacuous）。
+
+## Gate 內併入工作（plan Step 2，非 review findings）
+
+> Codex review 只看 branch diff，**不會**抓以下三項（docs 未在 diff 內 / 為主動 hardening）。
+
+- **#3 docs contract 同步**：`docs/usage.md` 修正 drift——`project_id`「可選自動偵測」改為
+  fail-fast「project_id / project_path 擇一必填」；補 get/delete scope selector、task tools
+  (`cc_task_create/list/update/stats`)、`__personal__` 保留 namespace 與 forced-mode 約定。
+- **#6 `relaxSelectorForForcedMode` regression guard**：斷言 relax 只剝 top-level
+  `anyOf`/`allOf`，不誤刪 base `required`、`properties`、property 內層 anyOf
+  （`cc_task_list.status` / `cc_task_update.due_date`）。現實作安全，測試擋未來回歸。
+- **#7 MCP args malformed → INVALID_ARGUMENT**：
+  - 真 gap（修正前 INTERNAL/靜默，RED→GREEN）：search `query` 非字串/空白、`mode` 壞值、
+    search+list `type` 壞值、task `tags` 非字串陣列。
+  - lock-in（已驗，測試即綠）：`cc_task_list.status`、`cc_task_stats.completed_since_days`。
+
+## Step 3 重新驗證（formal gate）
+
+| 項目 | 結果 |
+|------|------|
+| `npm run build` | exit 0 |
+| `npm run lint` | exit 0 |
+| `npm run test:ci` | 排除單一 env-artifact 測試後 **exit 0（350 passed / 1 skipped）** |
+| forced-mode transport-level smoke（Codex #8） | ALL PASS（真 stdio：tools/list 移除 selector、no-selector create 落 `__personal__` DB 驗證、互斥 env exit 1） |
+
+### infra-known-failure（不混進 gate pass，Codex #1）
+
+- **測試名**：`tests/services/projects.test.ts > resolveProjectId (5-layer priority) >
+  cwd 不在 git repo 裡 → 祖先的 CLAUDE.md marker 完全不適用`
+- **重現條件**：sandbox `/tmp` 下存在 stray `.git`（`/tmp/.git`、`/tmp/claude-1000/.git`）。
+  測試用 `mkdtempSync(tmpdir()...)` 落在 `/tmp/`，`findRepoRoot` 往上撞到 `/tmp/.git` →
+  誤判 demo 在 repo 內 → 祖先 marker 生效 → 回 `'ancestor-marker'`（預期 `'demo'`）。
+- **非 regression 證據**：`git diff src/services/projects.ts` 為空（解析邏輯未動）；
+  失敗源於環境而非本 gate 改動。本機（無 `/tmp/.git`）會自然通過。
+- **workaround（取真 exit 0）**：`npx vitest run -t '^(?!.*祖先)'` 排除該單一測試 →
+  其餘 350 全綠。
+- **根因清除屬 roadmap**：CI / 乾淨環境無此 artifact；或測試改用無 `.git` 祖先的 tmp root。

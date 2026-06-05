@@ -112,6 +112,15 @@ function normalizeIdempotencyKey(raw: unknown): string | undefined {
 }
 
 const VALID_MEMORY_TYPES: readonly string[] = ['session', 'decision'];
+const VALID_SEARCH_MODES: readonly SearchMode[] = ['keyword', 'semantic', 'hybrid'];
+
+/** search / list 的 type filter 若提供須為 session | decision（壞值原本靜默回空結果，#7）。 */
+function validateOptionalMemoryType(type: unknown): void {
+  if (type === undefined || type === null) return;
+  if (typeof type !== 'string' || !VALID_MEMORY_TYPES.includes(type)) {
+    throw new InvalidArgumentError('memory type filter 必須為 session | decision', { type });
+  }
+}
 
 /** keywords/decisions/nextSteps 若提供須為 string[]（壞輸入早拋 INVALID_ARGUMENT，不落 INTERNAL）。 */
 function validateOptionalStringArray(value: unknown, field: string): void {
@@ -413,6 +422,22 @@ export async function searchMemories(
   db: DbClient,
   input: SearchMemoriesInput
 ): Promise<SearchResultEnvelope> {
+  // query 型別/空白預檢（#7）：非字串會在 keywordSearchRows 的 query.toLowerCase()
+  // 噴 TypeError→INTERNAL；空白 query split 後 keywords=[] 會回「所有 row」（等同無條件
+  // dump，配合 blank scope 更危險）。兩者都拒成 INVALID_ARGUMENT。
+  if (typeof input.query !== 'string' || input.query.trim().length === 0) {
+    throw new InvalidArgumentError('search query 必須為非空字串', {
+      query: typeof input.query,
+    });
+  }
+  // mode enum 預檢（#7）：壞值原本靜默降級（embedding 啟用時甚至落到 hybrid 分支）。
+  if (input.mode !== undefined && !VALID_SEARCH_MODES.includes(input.mode)) {
+    throw new InvalidArgumentError('search mode 必須為 keyword | semantic | hybrid', {
+      mode: input.mode,
+    });
+  }
+  validateOptionalMemoryType(input.type);
+
   const requestedMode: SearchMode = input.mode ?? 'hybrid';
   const limit = input.limit ?? 10;
   const querySurface = input.querySurface ?? 'mcp';
@@ -435,7 +460,11 @@ export async function searchMemories(
     needsEmbedding && queryEmbedding === null ? 'keyword' : requestedMode;
 
   // 全專案搜尋（未指定 projectId）時排除保留 namespace；admin escape hatch = includeReserved。
-  const excludeReserved = input.projectId === undefined && !input.includeReserved;
+  // 與 keyword/semantic helper 的 `if (projectId)` 真值判斷一致：blank（'' / whitespace）
+  // 也視為「無 scope」→ 仍排除保留 namespace（codex review P2 defense-in-depth：即使
+  // blank id 繞過 applyScopePolicy 正規化直接打到本層，也不會漏排 __personal__）。
+  const isScoped = typeof input.projectId === 'string' && input.projectId.trim().length > 0;
+  const excludeReserved = !isScoped && !input.includeReserved;
 
   let results: Memory[];
   let scores: number[] | null;
@@ -519,6 +548,7 @@ export async function listMemories(
   if (!Number.isInteger(offset) || offset < 0) {
     throw new InvalidArgumentError('listMemories: offset 必須為非負整數', { offset });
   }
+  validateOptionalMemoryType(type); // 壞 type filter 早拋 INVALID_ARGUMENT，不靜默回空結果（#7）
 
   const conditions: SQL[] = [
     eq(projectMemories.projectId, projectId),
