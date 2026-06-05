@@ -97,6 +97,12 @@ export interface SearchMemoriesInput {
   limit?: number;
   mode?: SearchMode;
   querySurface?: 'telegram' | 'mcp' | 'http';
+  /**
+   * admin/debug escape hatch：true 時全專案搜尋「不」排除保留 namespace（如 __personal__）。
+   * 預設 false → projectId 未指定的全專案搜尋會在 WHERE 排除保留 namespace，
+   * 避免一般 project-mode client 撈到個人資料（隱私邊界方向 2）。MCP handler 不暴露此欄位。
+   */
+  includeReserved?: boolean;
 }
 
 export interface ListMemoriesInput {

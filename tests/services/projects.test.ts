@@ -298,6 +298,17 @@ describe('listProjects / projectExists (DB integration)', () => {
   afterEach(async () => {
     await sql`DELETE FROM project_memories WHERE project_id LIKE ${testPrefix + '%'}`;
     await sql`DELETE FROM tasks WHERE project_id LIKE ${testPrefix + '%'}`;
+    await sql`DELETE FROM project_memories WHERE project_id = '__personal__'`;
+    await sql`DELETE FROM tasks WHERE project_id = '__personal__'`;
+  });
+
+  it('listProjects 排除保留 namespace（__personal__ 不出現在一般專案清單）', async () => {
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES ('__personal__', 'session', 's')`;
+    await sql`INSERT INTO tasks (project_id, title) VALUES ('__personal__', 't')`;
+    await sql`INSERT INTO project_memories (project_id, type, summary) VALUES (${testPrefix + '-F'}, 'session', 's')`;
+    const projects = await listProjects(db);
+    expect(projects).not.toContain('__personal__');
+    expect(projects).toContain(testPrefix + '-F');
   });
 
   it('listProjects returns union of memories and tasks', async () => {

@@ -18,6 +18,7 @@ import {
   sql,
   cosineDistance,
   isNotNull,
+  notInArray,
   count,
   min,
   max,
@@ -25,6 +26,7 @@ import {
 } from 'drizzle-orm';
 
 import { projectMemories, type Memory, type NewMemory } from '../db/schema.js';
+import { RESERVED_PROJECT_IDS } from './scope-policy.js';
 import type {
   DbClient,
   SaveMemoryInput,
@@ -109,10 +111,31 @@ function normalizeIdempotencyKey(raw: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+const VALID_MEMORY_TYPES: readonly string[] = ['session', 'decision'];
+
+/** keywords/decisions/nextSteps 若提供須為 string[]（壞輸入早拋 INVALID_ARGUMENT，不落 INTERNAL）。 */
+function validateOptionalStringArray(value: unknown, field: string): void {
+  if (value === undefined || value === null) return;
+  if (!Array.isArray(value) || value.some((x) => typeof x !== 'string')) {
+    throw new InvalidArgumentError(`${field} 必須為字串陣列`, { field });
+  }
+}
+
 export async function saveMemory(
   db: DbClient,
   input: SaveMemoryInput
 ): Promise<SaveMemoryResult> {
+  // 輸入驗證（DB 對 type 無 CHECK；handler 直接 cast args.type/summary → service 把關）。
+  if (typeof input.type !== 'string' || !VALID_MEMORY_TYPES.includes(input.type)) {
+    throw new InvalidArgumentError('memory type 必須為 session | decision', { type: input.type });
+  }
+  if (typeof input.summary !== 'string' || input.summary.trim().length === 0) {
+    throw new InvalidArgumentError('memory summary 不可為空字串', {});
+  }
+  validateOptionalStringArray(input.keywords, 'keywords');
+  validateOptionalStringArray(input.decisions, 'decisions');
+  validateOptionalStringArray(input.nextSteps, 'next_steps');
+
   const writerHost = input.writerHost ?? resolveWriterHost();
 
   const normalizedKey = normalizeIdempotencyKey(input.idempotencyKey);
@@ -249,18 +272,32 @@ interface ScoredSearchItem {
   score: number;
 }
 
+// 全專案搜尋（projectId undefined）時排除保留 namespace（隱私邊界方向 2）。
+// 放進 WHERE（非 post-filter）：避免個人資料先進 top-N、擠掉合法結果後才被濾掉
+// （codex 第十三輪）。
+const RESERVED_PROJECT_ID_LIST: string[] = [...RESERVED_PROJECT_IDS];
+
+function reservedExclusionCondition(excludeReserved: boolean): SQL | null {
+  return excludeReserved
+    ? notInArray(projectMemories.projectId, RESERVED_PROJECT_ID_LIST)
+    : null;
+}
+
 async function keywordSearchRows(
   db: DbClient,
   query: string,
   projectId: string | undefined,
   type: string | undefined,
-  limit: number
+  limit: number,
+  excludeReserved: boolean
 ): Promise<Memory[]> {
   const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
 
   const conditions: SQL[] = [eq(projectMemories.status, 'active')];
   if (projectId) conditions.push(eq(projectMemories.projectId, projectId));
   if (type) conditions.push(eq(projectMemories.type, type));
+  const reserved = reservedExclusionCondition(excludeReserved);
+  if (reserved) conditions.push(reserved);
 
   const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
 
@@ -290,7 +327,8 @@ async function semanticSearchScoredWithEmbedding(
   queryEmbedding: number[],
   projectId: string | undefined,
   type: string | undefined,
-  limit: number
+  limit: number,
+  excludeReserved: boolean
 ): Promise<ScoredSearchItem[]> {
   const conditions: SQL[] = [
     eq(projectMemories.status, 'active'),
@@ -298,6 +336,8 @@ async function semanticSearchScoredWithEmbedding(
   ];
   if (projectId) conditions.push(eq(projectMemories.projectId, projectId));
   if (type) conditions.push(eq(projectMemories.type, type));
+  const reserved = reservedExclusionCondition(excludeReserved);
+  if (reserved) conditions.push(reserved);
 
   const similarity = sql<number>`1 - (${cosineDistance(projectMemories.embedding, queryEmbedding)})`;
 
@@ -339,11 +379,12 @@ async function hybridSearchScoredWithEmbedding(
   queryEmbedding: number[],
   projectId: string | undefined,
   type: string | undefined,
-  limit: number
+  limit: number,
+  excludeReserved: boolean
 ): Promise<ScoredSearchItem[]> {
   const [keywordRows, semanticItems] = await Promise.all([
-    keywordSearchRows(db, query, projectId, type, limit),
-    semanticSearchScoredWithEmbedding(db, queryEmbedding, projectId, type, limit),
+    keywordSearchRows(db, query, projectId, type, limit, excludeReserved),
+    semanticSearchScoredWithEmbedding(db, queryEmbedding, projectId, type, limit, excludeReserved),
   ]);
 
   const k = 60;
@@ -376,6 +417,11 @@ export async function searchMemories(
   const limit = input.limit ?? 10;
   const querySurface = input.querySurface ?? 'mcp';
 
+  // limit 非負整數預檢（limit 會用於 limit*2 等運算，負數會產出無效 SQL → INTERNAL）。
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new InvalidArgumentError('searchMemories: limit 必須為非負整數', { limit });
+  }
+
   // 計算 effectiveMode：
   //   - isEmbeddingEnabled() === false → 直接降 keyword（不浪費 API call）
   //   - requestedMode 是 semantic/hybrid 但 generateQueryEmbedding 失敗 → 也降 keyword
@@ -388,11 +434,14 @@ export async function searchMemories(
   const effectiveMode: SearchMode =
     needsEmbedding && queryEmbedding === null ? 'keyword' : requestedMode;
 
+  // 全專案搜尋（未指定 projectId）時排除保留 namespace；admin escape hatch = includeReserved。
+  const excludeReserved = input.projectId === undefined && !input.includeReserved;
+
   let results: Memory[];
   let scores: number[] | null;
 
   if (effectiveMode === 'keyword') {
-    results = await keywordSearchRows(db, input.query, input.projectId, input.type, limit);
+    results = await keywordSearchRows(db, input.query, input.projectId, input.type, limit, excludeReserved);
     scores = null;
   } else if (effectiveMode === 'semantic') {
     const items = await semanticSearchScoredWithEmbedding(
@@ -400,7 +449,8 @@ export async function searchMemories(
       queryEmbedding!,
       input.projectId,
       input.type,
-      limit
+      limit,
+      excludeReserved
     );
     results = items.map((i) => i.row);
     scores = items.map((i) => i.score);
@@ -416,7 +466,8 @@ export async function searchMemories(
       queryEmbedding!,
       input.projectId,
       input.type,
-      limit
+      limit,
+      excludeReserved
     );
     results = items.map((i) => i.row);
     scores = null;
@@ -459,6 +510,15 @@ export async function listMemories(
   input: ListMemoriesInput
 ): Promise<Memory[]> {
   const { projectId, type, limit = 20, offset = 0 } = input;
+
+  // limit/offset 非負整數預檢（對齊 listTasks）：Postgres 拒負數會 bubble 成 INTERNAL，
+  // pre-check 讓自動 caller 收到 INVALID_ARGUMENT。
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new InvalidArgumentError('listMemories: limit 必須為非負整數', { limit });
+  }
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new InvalidArgumentError('listMemories: offset 必須為非負整數', { offset });
+  }
 
   const conditions: SQL[] = [
     eq(projectMemories.projectId, projectId),

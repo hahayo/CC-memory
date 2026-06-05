@@ -33,9 +33,10 @@ import {
   deleteMemory,
   getProjectStats,
 } from './services/memories.js';
-import { createTask, listTasks, updateTask } from './services/tasks.js';
+import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
+import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
 import { BaseServiceError, NotFoundError, InvalidArgumentError } from './services/errors.js';
 import type { McpError, TaskStatus } from './services/types.js';
 
@@ -43,7 +44,14 @@ import type { McpError, TaskStatus } from './services/types.js';
 // 輔助：cwd / projectId 解析（所有 tool 用同一組 dispatch）
 // ---------------------------------------------------------------------------
 
-function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
+// 啟動期載入 scope config（讀 CC_FORCE_PROJECT_ID / config drift 防護）。
+// import 時讀 process.env：跑 server 時反映啟動 env；測試以 handleToolCall 第 4 參數注入。
+const defaultScopeConfig: ScopeConfig = loadScopeConfig();
+
+function resolveCwdAndProjectId(
+  args: Record<string, unknown> | undefined,
+  config: ScopeConfig = defaultScopeConfig
+): {
   cwd: string;
   projectId: string;
 } {
@@ -55,15 +63,13 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   const hasPath = typeof rawPath === 'string' && rawPath.trim().length > 0;
   const hasId = typeof rawId === 'string' && rawId.trim().length > 0;
 
-  // MCP stdio server 的 process.cwd() 是 server 啟動目錄，不是 client 端的專案目錄。
-  // 任一 tool 若 caller 不傳 project_id 也不傳 project_path，fail-fast 不 fallback；
-  // 不然舊 client 會默默寫錯 project（codex review round 3 P1）。
-  // `cc_memory_search` 可以兩者都無（= 跨專案搜尋），所以那個分支在自己的 case 裡處理。
+  // 無 selector：交給 ScopePolicy 決定（single source of truth）。
+  //   - forced-mode（CC_FORCE_PROJECT_ID）→ 強制套用 forcedProjectId，不 fail-fast。
+  //   - project-mode → fail-fast（不 fallback server cwd；訊息含 project_id 或 project_path）。
+  // `cc_memory_search` 走自己的分支（surface='search'），允許 undefined = 全專案。
   if (!hasPath && !hasId) {
-    throw new InvalidArgumentError(
-      '需提供 project_id 或 project_path（MCP server 的 process.cwd() 非 client cwd，無法可靠解析 project）',
-      { hint: 'skills/{save,load}-memory.md 已示範：tool call 時傳 project_path 為當前工作目錄絕對路徑' }
-    );
+    const projectId = applyScopePolicy(undefined, { config, surface: 'scope' }) as string;
+    return { cwd: process.cwd(), projectId };
   }
 
   // project_path 驗證 — 僅在「path 會被用來解析 projectId」時執行
@@ -77,7 +83,10 @@ function resolveCwdAndProjectId(args: Record<string, unknown> | undefined): {
   // cwdIsExplicit：caller 送 project_path → 跳過 env layer，讓 path 本身 derive
   // project（codex review round 20 P1：env 是 server 不知道自己在哪的 fallback，
   // 不該覆蓋 caller 明示送進來的 path）
-  const projectId = resolveProjectId({ explicit, cwd, cwdIsExplicit: hasPath });
+  const resolved = resolveProjectId({ explicit, cwd, cwdIsExplicit: hasPath });
+  // ScopePolicy：forced-mode 拒絕跨 project；project-mode deny 保留 namespace
+  // （涵蓋 project_path / marker / git / basename 解析出 __personal__ 的所有入口）。
+  const projectId = applyScopePolicy(resolved, { config, surface: 'scope' }) as string;
   return { cwd, projectId };
 }
 
@@ -251,7 +260,7 @@ const projectPathProp = {
     '客戶端絕對路徑（用於解析 project_id；MCP server 的 process.cwd() 是 server 啟動目錄，非 client cwd）',
 };
 
-const tools: Tool[] = [
+export const tools: Tool[] = [
   {
     name: 'cc_memory_save',
     description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。project_id 與 project_path 擇一必填。',
@@ -471,6 +480,23 @@ const tools: Tool[] = [
       required: ['id', 'expected_status'],
     },
   },
+  {
+    name: 'cc_task_stats',
+    description:
+      '取得專案任務統計（結構化 JSON，供 /hi 與 cron 用，取代 raw postgres）。日界 Asia/Taipei。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
+      properties: {
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        completed_since_days: {
+          type: 'number',
+          description: 'completed_recently 視窗天數（預設 7）',
+        },
+      },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -491,13 +517,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
-  database: typeof db = db
+  database: typeof db = db,
+  config: ScopeConfig = defaultScopeConfig
 ): Promise<CallToolResult> {
   try {
     switch (name) {
       // ---------------- Memory ----------------
       case 'cc_memory_save': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const result = await saveMemory(database, {
           projectId,
           projectPath: args.project_path as string | undefined,
@@ -567,6 +594,11 @@ export async function handleToolCall(
         } else {
           projectId = undefined;
         }
+        // ScopePolicy（surface='search'）：
+        //   - forced-mode → 強制限定 forcedProjectId（不可全專案，query_project_id 非 null）
+        //   - project-mode → deny 顯式/解析到的保留 namespace；undefined = 全專案
+        //     （service 層另排除保留 namespace，見 searchMemories）
+        projectId = applyScopePolicy(projectId, { config, surface: 'search' });
         const envelope = await searchMemories(database, {
           query: args.query as string,
           projectId,
@@ -597,7 +629,7 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_list': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const results = await listMemories(database, {
           projectId,
           type: args.type as 'session' | 'decision' | undefined,
@@ -622,7 +654,7 @@ export async function handleToolCall(
 
       case 'cc_memory_get': {
         // 強制 project scope（codex review round 18 P2）：避免跨 project 讀取
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const memory = await getMemory(database, id, projectId);
         if (!memory) {
@@ -632,7 +664,7 @@ export async function handleToolCall(
       }
 
       case 'cc_memory_stats': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const stats = await getProjectStats(database, projectId);
         const firstDate = stats.firstMemory
           ? new Date(stats.firstMemory).toLocaleDateString('zh-TW')
@@ -658,7 +690,7 @@ export async function handleToolCall(
 
       case 'cc_memory_delete': {
         // 強制 project scope（codex review round 18 P1）：避免跨 project 意外刪除
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const deleted = await deleteMemory(database, id, projectId);
         if (!deleted) {
@@ -669,7 +701,7 @@ export async function handleToolCall(
 
       // ---------------- Task ----------------
       case 'cc_task_create': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const parsedDue = parseDueDate(args.due_date);
         const task = await createTask(database, {
           projectId,
@@ -696,7 +728,7 @@ export async function handleToolCall(
       }
 
       case 'cc_task_list': {
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const rawStatus = args.status;
         let statusFilter: TaskStatus | TaskStatus[] | undefined;
         if (typeof rawStatus === 'string') statusFilter = rawStatus as TaskStatus;
@@ -727,7 +759,7 @@ export async function handleToolCall(
       case 'cc_task_update': {
         // 強制 project scope：cc_task_update 必須傳 project_id 或 project_path，
         // 否則 UUID-only update 可跨 project 亂改（codex round 5 P2）。
-        const { projectId } = resolveCwdAndProjectId(args);
+        const { projectId } = resolveCwdAndProjectId(args, config);
         const id = args.id as string;
         const expected = args.expected_status as TaskStatus;
         const patch: Record<string, unknown> = {};
@@ -750,6 +782,29 @@ export async function handleToolCall(
             {
               type: 'text',
               text: `✓ 任務已更新\n${formatTask(updated)}`,
+            },
+          ],
+        };
+      }
+
+      case 'cc_task_stats': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const stats = await getTaskStats(database, projectId, {
+          completedSinceDays: args.completed_since_days as number | undefined,
+        });
+        // 結構化 JSON（snake_case，供 /hi / cron 直接 parse，不解析文字）
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                project_id: stats.projectId,
+                today: stats.today,
+                overdue: stats.overdue,
+                open: stats.open,
+                in_progress: stats.inProgress,
+                completed_recently: stats.completedRecently,
+              }),
             },
           ],
         };

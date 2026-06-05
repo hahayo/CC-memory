@@ -377,3 +377,75 @@ export async function resolveTaskByShortId(
     candidates: rows.slice(0, SHORT_ID_AMBIGUOUS_DISPLAY),
   };
 }
+
+// ---------------------------------------------------------------------------
+// getTaskStats — /hi 與 cron 取代 raw postgres 的結構化統計
+// ---------------------------------------------------------------------------
+
+export interface TaskStats {
+  projectId: string;
+  /** actionable（open/in_progress）且台北日期 = 今天 */
+  today: number;
+  /** actionable 且台北日期 < 今天 */
+  overdue: number;
+  open: number;
+  inProgress: number;
+  /** status=done 且 completed_at 落在 completedSinceDays 視窗內 */
+  completedRecently: number;
+}
+
+export interface TaskStatsOptions {
+  /** completedRecently 視窗天數（預設 7） */
+  completedSinceDays?: number;
+}
+
+/** 日界時區固定 Asia/Taipei（不靠 server locale / LLM 自行推；codex #P1-2）。 */
+const STATS_TIMEZONE = 'Asia/Taipei';
+
+/**
+ * 單一 query（COUNT FILTER）算出 today / overdue / open / in_progress / completedRecently。
+ *
+ * 日界：所有 due 比較都 (due_date AT TIME ZONE 'Asia/Taipei')::date vs
+ * (now() AT TIME ZONE 'Asia/Taipei')::date。date-only due_date 存成 UTC 午夜
+ * （= 台北當天 08:00），用日期（非 timestamp）比較 → 當天上午不會被誤判逾期。
+ */
+export async function getTaskStats(
+  db: DbClient,
+  projectId: string,
+  options: TaskStatsOptions = {}
+): Promise<TaskStats> {
+  const completedSinceDays = options.completedSinceDays ?? 7;
+  if (!Number.isInteger(completedSinceDays) || completedSinceDays < 0) {
+    throw new InvalidArgumentError('getTaskStats: completedSinceDays 必須為非負整數', {
+      completedSinceDays,
+    });
+  }
+
+  const tz = STATS_TIMEZONE;
+  const rows = (await db
+    .select({
+      today: sql<number>`COUNT(*) FILTER (WHERE ${tasks.status} IN ('open','in_progress') AND ${tasks.dueDate} IS NOT NULL AND (${tasks.dueDate} AT TIME ZONE ${tz})::date = (now() AT TIME ZONE ${tz})::date)::int`,
+      overdue: sql<number>`COUNT(*) FILTER (WHERE ${tasks.status} IN ('open','in_progress') AND ${tasks.dueDate} IS NOT NULL AND (${tasks.dueDate} AT TIME ZONE ${tz})::date < (now() AT TIME ZONE ${tz})::date)::int`,
+      open: sql<number>`COUNT(*) FILTER (WHERE ${tasks.status} = 'open')::int`,
+      inProgress: sql<number>`COUNT(*) FILTER (WHERE ${tasks.status} = 'in_progress')::int`,
+      completedRecently: sql<number>`COUNT(*) FILTER (WHERE ${tasks.status} = 'done' AND ${tasks.completedAt} IS NOT NULL AND ${tasks.completedAt} >= now() - (${completedSinceDays}::int * interval '1 day'))::int`,
+    })
+    .from(tasks)
+    .where(eq(tasks.projectId, projectId))) as Array<{
+    today: number;
+    overdue: number;
+    open: number;
+    inProgress: number;
+    completedRecently: number;
+  }>;
+
+  const row = rows[0];
+  return {
+    projectId,
+    today: row?.today ?? 0,
+    overdue: row?.overdue ?? 0,
+    open: row?.open ?? 0,
+    inProgress: row?.inProgress ?? 0,
+    completedRecently: row?.completedRecently ?? 0,
+  };
+}

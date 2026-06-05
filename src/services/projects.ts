@@ -17,10 +17,14 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { eq, ne, and, sql } from 'drizzle-orm';
+import { eq, ne, and, notInArray, sql } from 'drizzle-orm';
 import { projectMemories, tasks } from '../db/schema.js';
 import { resolveRepoName } from '../utils/repo-name.js';
+import { RESERVED_PROJECT_IDS } from './scope-policy.js';
 import type { DbClient } from './types.js';
+
+// 保留 namespace（如 __personal__）不出現在一般專案清單（隱私邊界方向 2 防禦縱深）。
+const RESERVED_PROJECT_ID_LIST: string[] = [...RESERVED_PROJECT_IDS];
 
 type ReadFileSyncFn = (path: string) => string;
 type ResolveRepoNameFn = (cwd: string) => string | null;
@@ -155,11 +159,21 @@ export async function listProjects(db: DbClient): Promise<string[]> {
     db
       .selectDistinct({ projectId: projectMemories.projectId })
       .from(projectMemories)
-      .where(eq(projectMemories.status, 'active')),
+      .where(
+        and(
+          eq(projectMemories.status, 'active'),
+          notInArray(projectMemories.projectId, RESERVED_PROJECT_ID_LIST)
+        )
+      ),
     db
       .selectDistinct({ projectId: tasks.projectId })
       .from(tasks)
-      .where(ne(tasks.status, 'cancelled')),
+      .where(
+        and(
+          ne(tasks.status, 'cancelled'),
+          notInArray(tasks.projectId, RESERVED_PROJECT_ID_LIST)
+        )
+      ),
   ]);
 
   const set = new Set<string>();
