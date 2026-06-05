@@ -260,7 +260,7 @@ const projectPathProp = {
     '客戶端絕對路徑（用於解析 project_id；MCP server 的 process.cwd() 是 server 啟動目錄，非 client cwd）',
 };
 
-export const tools: Tool[] = [
+export const BASE_TOOLS: Tool[] = [
   {
     name: 'cc_memory_save',
     description: '儲存專案記憶到資料庫。包含摘要、關鍵字、決策和下一步。project_id 與 project_path 擇一必填。',
@@ -498,6 +498,28 @@ export const tools: Tool[] = [
     },
   },
 ];
+
+// forced-mode（CC_FORCE_PROJECT_ID）：無 selector → 強制 forced project，因此 selector
+// 非必填。移除 top-level anyOf/allOf（selector required 子句）使「廣告的 schema」與
+// runtime 一致——否則嚴格驗證 args 的 MCP client 會在送達 handler 前擋掉 no-selector
+// 呼叫（採納 Codex review P2）。id / type / title / expected_status 等 base `required`
+// 不受影響（仍保留）；property 內層的 anyOf（如 cc_task_list.status）也不受影響。
+function relaxSelectorForForcedMode(toolList: Tool[]): Tool[] {
+  return toolList.map((t) => {
+    const schema = { ...(t.inputSchema as Record<string, unknown>) };
+    delete schema.anyOf;
+    delete schema.allOf;
+    return { ...t, inputSchema: schema as Tool['inputSchema'] };
+  });
+}
+
+/** 依 scope mode 產生 ListTools schema：project-mode 維持 selector 必填、forced-mode 放寬。 */
+export function buildToolsForMode(config: ScopeConfig): Tool[] {
+  return config.forcedProjectId === null ? BASE_TOOLS : relaxSelectorForForcedMode(BASE_TOOLS);
+}
+
+// 實際廣告的 tools 反映啟動 mode（defaultScopeConfig 讀 import 時的 env）。
+export const tools: Tool[] = buildToolsForMode(defaultScopeConfig);
 
 // ---------------------------------------------------------------------------
 // MCP server

@@ -13,7 +13,8 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { tools } from '../src/index.js';
+import { tools, buildToolsForMode } from '../src/index.js';
+import { loadScopeConfig } from '../src/services/scope-policy.js';
 
 // scope 工具：runtime fail-fast 要求 project selector，schema 也必須宣告
 const SCOPE_TOOLS = [
@@ -73,5 +74,35 @@ describe('ListTools inputSchema 契約（schema↔runtime drift guard）', () =>
   it.each(OPTIONAL_SELECTOR_TOOLS)('%s schema 維持 selector optional（全專案搜尋 feature）', (name) => {
     const schema = toolByName(name).inputSchema as SchemaLike;
     expect(requiresProjectSelector(schema)).toBe(false);
+  });
+});
+
+// forced-mode（CC_FORCE_PROJECT_ID）：無 selector→強制 forced project，因此 schema
+// 不應再宣告 selector 必填（否則嚴格 client 會在送達 handler 前擋掉 no-selector 呼叫）。
+// 採納 Codex P2：schema 隨 mode 動態。
+describe('forced-mode ListTools schema：selector 非必填（採納 Codex P2）', () => {
+  const forcedTools = buildToolsForMode(loadScopeConfig({ CC_FORCE_PROJECT_ID: '__personal__' }));
+  const find = (name: string): Tool => {
+    const t = forcedTools.find((x) => x.name === name);
+    if (!t) throw new Error(`tool not found: ${name}`);
+    return t;
+  };
+
+  it.each(SCOPE_TOOLS)('%s 在 forced-mode 不要求 project selector', (name) => {
+    expect(requiresProjectSelector(find(name).inputSchema as SchemaLike)).toBe(false);
+  });
+
+  it('forced-mode 仍保留 id-based base required（get/delete/update）', () => {
+    expect((find('cc_memory_get').inputSchema as { required?: string[] }).required).toContain('id');
+    expect((find('cc_memory_delete').inputSchema as { required?: string[] }).required).toContain('id');
+    const upd = (find('cc_task_update').inputSchema as { required?: string[] }).required ?? [];
+    expect(upd).toContain('id');
+    expect(upd).toContain('expected_status');
+  });
+
+  it('project-mode（預設）仍維持 selector 必填（不回歸）', () => {
+    const projectTools = buildToolsForMode(loadScopeConfig({}));
+    const t = projectTools.find((x) => x.name === 'cc_task_create')!;
+    expect(requiresProjectSelector(t.inputSchema as SchemaLike)).toBe(true);
   });
 });
