@@ -34,6 +34,7 @@ import {
   getProjectStats,
 } from './services/memories.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
+import { setReminder, snoozeReminder } from './services/reminders.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
 import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
@@ -110,45 +111,60 @@ function resolveCwdAndProjectId(
 const ISO_8601_REGEX =
   /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
 
-function parseDueDate(raw: unknown): Date | null | undefined {
+function parseDueDate(raw: unknown, fieldName = 'due_date'): Date | null | undefined {
   if (raw === null) return null;
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string') {
-    throw new InvalidArgumentError('due_date 必須是 ISO 8601 字串或 null', { due_date: raw });
+    throw new InvalidArgumentError(`${fieldName} 必須是 ISO 8601 字串或 null`, { [fieldName]: raw });
   }
   // 空字串 / whitespace-only → 拒，不靜默 drop（codex review round 13 P2）。
   // 契約：null = 清空；undefined / 省略 = 不動；ISO 字串 = 設值；空字串 = bad input。
   if (raw.trim().length === 0) {
     throw new InvalidArgumentError(
-      'due_date 若提供須為 ISO 8601 字串；若要清空請傳 null',
-      { due_date: raw }
+      `${fieldName} 若提供須為 ISO 8601 字串；若要清空請傳 null`,
+      { [fieldName]: raw }
     );
   }
   if (!ISO_8601_REGEX.test(raw)) {
     throw new InvalidArgumentError(
-      `due_date 不是有效的 ISO 8601 字串: ${raw}`,
-      { due_date: raw, hint: 'YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss[.sss][Z|±HH:MM]' }
+      `${fieldName} 不是有效的 ISO 8601 字串: ${raw}`,
+      { [fieldName]: raw, hint: 'YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss[.sss][Z|±HH:MM]' }
     );
   }
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) {
-    throw new InvalidArgumentError(`due_date 不是有效日期: ${raw}`, { due_date: raw });
+    throw new InvalidArgumentError(`${fieldName} 不是有效日期: ${raw}`, { [fieldName]: raw });
   }
-  // Date-only roundtrip：防 "2026-02-31" 被 Date 靜默 rollover 成 "2026-03-03"
-  // 比較輸入字串的 Y/M/D 與 parsed Date 的 UTC Y/M/D（date-only 輸入 new Date 走 UTC）
-  const dateOnlyMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (dateOnlyMatch) {
-    const [, ys, ms, ds] = dateOnlyMatch;
+  // 日曆日合法性：驗證寫出的 YYYY-MM-DD（不論 date-only 或帶時間/時區）是真實日期。
+  // 防 "2026-02-31" 與 "2026-02-31T10:00:00Z" 被 new Date() 靜默 rollover 成 3/3
+  // （對 reminder 是「響在錯的時點」的真實缺陷）。calendar date 一律是字面前 10 字，
+  // 用 UTC probe 驗其合法性，與時區偏移無關（偏移只影響 instant，不改寫出的日曆日）。
+  const ymd = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (ymd) {
+    const [, ys, ms, ds] = ymd;
     const y = Number(ys);
     const m = Number(ms);
     const dd = Number(ds);
-    if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m || d.getUTCDate() !== dd) {
-      throw new InvalidArgumentError(`due_date 包含無效日期（如 2026-02-31）: ${raw}`, {
-        due_date: raw,
+    const probe = new Date(Date.UTC(y, m - 1, dd));
+    if (probe.getUTCFullYear() !== y || probe.getUTCMonth() + 1 !== m || probe.getUTCDate() !== dd) {
+      throw new InvalidArgumentError(`${fieldName} 包含無效日期（如 2026-02-31）: ${raw}`, {
+        [fieldName]: raw,
       });
     }
   }
   return d;
+}
+
+/**
+ * 解析必填 timestamp（reminder 的 remind_at / snooze_until）：
+ * 沿用 parseDueDate 的 ISO 8601 嚴格驗證；null / undefined / 缺值 → INVALID_ARGUMENT。
+ */
+function parseRequiredTimestamp(raw: unknown, field: string): Date {
+  const parsed = parseDueDate(raw, field);
+  if (parsed === null || parsed === undefined) {
+    throw new InvalidArgumentError(`${field} 為必填 ISO 8601 timestamp`, { [field]: raw });
+  }
+  return parsed;
 }
 
 /**
@@ -497,6 +513,48 @@ export const BASE_TOOLS: Tool[] = [
       },
     },
   },
+  // ---------- Reminder tools（Personal-Hub Phase 1） ----------
+  {
+    name: 'cc_task_set_reminder',
+    description:
+      '為任務設定提醒：remind_at 為觸發時點（與 due_date 截止日語意不同）。recurrence_interval_days 省略=一次性、正整數 N=每 N 天循環。重設會清除既有 snooze。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
+      properties: {
+        id: { type: 'string', description: '任務 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        remind_at: {
+          type: 'string',
+          description: '提醒觸發時點 ISO 8601（必填）',
+        },
+        recurrence_interval_days: {
+          type: 'number',
+          description: '循環間隔天數（正整數）；省略=一次性',
+        },
+      },
+      required: ['id', 'remind_at'],
+    },
+  },
+  {
+    name: 'cc_task_snooze',
+    description: '暫緩任務提醒到指定時點（snooze_until）。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
+      properties: {
+        id: { type: 'string', description: '任務 ID' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        snooze_until: {
+          type: 'string',
+          description: '暫緩到此時點 ISO 8601（必填）',
+        },
+      },
+      required: ['id', 'snooze_until'],
+    },
+  },
 ];
 
 // forced-mode（CC_FORCE_PROJECT_ID）：無 selector → 強制 forced project，因此 selector
@@ -827,6 +885,49 @@ export async function handleToolCall(
                 in_progress: stats.inProgress,
                 completed_recently: stats.completedRecently,
               }),
+            },
+          ],
+        };
+      }
+
+      // ---------------- Reminder ----------------
+      case 'cc_task_set_reminder': {
+        // 強制 project scope：mutation 必帶 project_id / project_path（防跨 namespace 用 UUID 改別人的 row）。
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const id = args.id as string;
+        const remindAt = parseRequiredTimestamp(args.remind_at, 'remind_at');
+        const task = await setReminder(database, id, projectId, {
+          remindAt,
+          recurrenceIntervalDays: args.recurrence_interval_days as number | null | undefined,
+        });
+        const recurNote =
+          task.recurrenceIntervalDays !== null
+            ? `（每 ${task.recurrenceIntervalDays} 天循環）`
+            : '（一次性）';
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ 提醒已設定 ${recurNote}\n${formatTask(task)}\nremind_at: ${new Date(
+                task.remindAt as Date
+              ).toISOString()}`,
+            },
+          ],
+        };
+      }
+
+      case 'cc_task_snooze': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const id = args.id as string;
+        const until = parseRequiredTimestamp(args.snooze_until, 'snooze_until');
+        const task = await snoozeReminder(database, id, projectId, until);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ 提醒已暫緩\n${formatTask(task)}\nsnooze_until: ${new Date(
+                task.snoozeUntil as Date
+              ).toISOString()}`,
             },
           ],
         };

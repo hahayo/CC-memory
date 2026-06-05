@@ -1,6 +1,6 @@
 # Personal-Hub Task Breakdown
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）/ Phase 2（read-only）pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
 >
 > **Phase 命名**：本檔的 `Personal-Hub Phase 0/1/2/3` 是 **personal-hub initiative 的 phase**，與既有 `docs/task.md` 的 Phase A/B/C（v0.3/v0.4 memory+auto-capture）是**不同 track**，勿混。
 >
@@ -45,63 +45,64 @@
 
 ---
 
-# Personal-Hub Phase 1 — Reliable Reminders（pending，離線可做）
+# Personal-Hub Phase 1 — Reliable Reminders（✅ 已完成，離線可做）
 
 > 對齊 `src/db/schema.ts` 慣例（partial unique index / `check()` / `withTimezone`）。slot 推導/advance/snooze 語意見 `plan.md` Data Model。**每個 sub-task 先紅後綠（TDD）**。
 
-## 1a — Schema（reminder 欄位 + reminder_log 表）
+## 1a — Schema（reminder 欄位 + reminder_log 表）✅
 
-- [ ] `src/db/schema.ts`：`tasks` 加 `remindAt` / `lastNotifiedAt` / `snoozeUntil` / `recurrenceIntervalDays`（皆 nullable）
-- [ ] `src/db/schema.ts`：`check('tasks_recurrence_interval_check', recurrence IS NULL OR > 0)`
-- [ ] `src/db/schema.ts`：`index('reminders_due_idx')` partial（`COALESCE(snooze_until, remind_at)` WHERE `remind_at IS NOT NULL AND status IN ('open','in_progress')`）
-- [ ] `src/db/schema.ts`：新表 `reminderLog`（`taskId` FK→tasks / `scheduledFor` / `firedAt` / `channel` / `writerHost`）
-- [ ] `uniqueIndex('reminder_log_task_slot_uniq')` on `(task_id, scheduled_for)`（去重硬背線）
-- [ ] `drizzle-kit generate --name=add_reminders` → `sql/migrations/NNNN_*.sql`（編號自動遞增，disk 現有已到 0005）
-- [ ] 套用 local test PG
-- [ ] TDD：`tests/db/reminders-schema.test.ts`
-  - [ ] RED：欄位/表不存在 → insert 失敗
-  - [ ] GREEN：schema 上線 → 同 `(task_id, scheduled_for)` 重複 insert 收 unique violation
-  - [ ] CHECK：`recurrence_interval_days=0` insert 被 CHECK 擋
+- [x] `src/db/schema.ts`：`tasks` 加 `remindAt` / `lastNotifiedAt` / `snoozeUntil` / `recurrenceIntervalDays`（皆 nullable）
+- [x] `src/db/schema.ts`：`check('tasks_recurrence_interval_check', recurrence IS NULL OR > 0)`
+- [x] `src/db/schema.ts`：`index('reminders_due_idx')` partial（`COALESCE(snooze_until, remind_at)` WHERE `remind_at IS NOT NULL AND status IN ('open','in_progress')`）
+- [x] `src/db/schema.ts`：新表 `reminderLog`（`taskId` FK→tasks / `scheduledFor` / `firedAt` / `channel` / `writerHost`）
+- [x] `uniqueIndex('reminder_log_task_slot_uniq')` on `(task_id, scheduled_for)`（去重硬背線）
+- [x] `drizzle-kit generate --name=add_reminders` → `sql/migrations/0006_add_reminders.sql`（COALESCE expression index + CHECK 保真度 eyeball OK）
+- [x] 套用 local test PG（`drizzle-kit push --config drizzle.test.config.ts`）
+- [x] TDD：`tests/db/reminders-schema.test.ts`（14 tests）
+  - [x] RED：欄位/表不存在 → insert 失敗
+  - [x] GREEN：schema 上線 → 同 `(task_id, scheduled_for)` 重複 insert 收 unique violation
+  - [x] CHECK：`recurrence_interval_days=0` / 負數 insert 被 CHECK 擋
+  - [x] index 保真：`pg_indexes.indexdef` 斷言含 COALESCE + partial WHERE（守 generate 退化）
 
-## 1b — Service（getDueReminders + set/snooze/clear）
+## 1b — Service（getDueReminders + set/snooze/clear）✅
 
-- [ ] `src/services/reminders.ts`：`setReminder(taskId, projectId, { remindAt, recurrenceIntervalDays })`（`WHERE id AND project_id`，affected=0 throw；**reschedule 必清 `snooze_until`+`last_notified_at`**，否則殘留舊 snooze 蓋過新 remind_at）
-- [ ] `snoozeReminder(taskId, projectId, until)`（同 scope guard）
-- [ ] `clearReminder(taskId, projectId)`（清 remind_at / snooze_until / recurrence；同 scope guard）
-- [ ] `getDueReminders({ projectId, now?, channel, writerHost?, limit? })`：
-  - [ ] 篩選 SQL：`status IN open/in_progress AND project_id=$projectId AND remind_at NOT NULL AND COALESCE(snooze,remind)<=now AND NOT EXISTS(reminder_log 同 slot)`（**project_id scope + NOT EXISTS 在 LIMIT 前**）
-  - [ ] `FOR UPDATE SKIP LOCKED` claim
-  - [ ] `INSERT reminder_log ... ON CONFLICT (task_id, scheduled_for) DO NOTHING RETURNING id`（**不可 catch unique_violation——會 abort 交易**；RETURNING 空 → 跳過該筆不 advance、不計回傳；race backstop）
-  - [ ] advance：一次性 → 只更新 `last_notified_at`（保留 remind_at/snooze；下輪 NOT EXISTS 排除）；recurrence → 從 `remind_at` 錨點推下一未來 slot、清 snooze、更新 last_notified
-- [ ] TDD：`tests/services/reminders.test.ts`
-  - [ ] 一次性 due → 撈出 + log 一筆；再跑 → 不重複（NOT EXISTS 排除，不進 batch）
-  - [ ] **不 starve**：塞 K（≥limit）筆已投遞一次性 + 1 筆新 due → 新 due 在本批被處理
-  - [ ] **scope 隔離**：別 project 的 due task → 不被撈出；`setReminder` 帶別 project task id → throw（affected=0）
-  - [ ] **setReminder 清 stale snooze**：對一次性已 snooze 過的 task 重設 remind_at → 新提醒在新時點 due（舊 snooze 不蓋過）
-  - [ ] **ON CONFLICT 不 abort 交易**：同交易內模擬 slot 衝突 → 該筆跳過、其餘 row 仍正常處理 + commit（非整批失敗）
-  - [ ] 併發兩 session 同 due → 只一筆 `reminder_log`（SKIP LOCKED + unique）
-  - [ ] recurrence：第 N 次 `scheduled_for = remind_at + (N-1)*interval`（不漂移）
-  - [ ] catch-up：漏發 3 次 → 只一筆 log、`remind_at` clamp 到下一未來 slot
-  - [ ] snooze：投在 `snooze_until`、不重複；**一次性 snooze 投遞後不再響**（不清 snooze 的關鍵測）
-  - [ ] `done`/`cancelled` task → 不被撈出
+- [x] `src/services/reminders.ts`：`setReminder(db, taskId, projectId, { remindAt, recurrenceIntervalDays })`（`WHERE id AND project_id`，affected=0 throw；**reschedule 必清 `snooze_until`+`last_notified_at`**，否則殘留舊 snooze 蓋過新 remind_at）
+- [x] `snoozeReminder(db, taskId, projectId, until)`（同 scope guard）
+- [x] `clearReminder(db, taskId, projectId)`（清 remind_at / snooze_until / recurrence；同 scope guard）
+- [x] `getDueReminders(db, { projectId, now?, channel, writerHost?, limit? })`：
+  - [x] 篩選 SQL：`status IN open/in_progress AND project_id=$projectId AND remind_at NOT NULL AND COALESCE(snooze,remind)<=now AND NOT EXISTS(reminder_log 同 slot)`（**project_id scope + NOT EXISTS 在 LIMIT 前**；now 以 ISO+::timestamptz 傳入）
+  - [x] `FOR UPDATE SKIP LOCKED` claim
+  - [x] `INSERT reminder_log ... ON CONFLICT (task_id, scheduled_for) DO NOTHING RETURNING id`（**不可 catch unique_violation——會 abort 交易**；RETURNING 空 → 跳過該筆不 advance、不計回傳；race backstop）
+  - [x] advance：一次性 → 只更新 `last_notified_at`（保留 remind_at/snooze；下輪 NOT EXISTS 排除）；recurrence → 從 `remind_at` 錨點推下一未來 slot、清 snooze、更新 last_notified
+- [x] TDD：`tests/services/reminders.test.ts`（19 tests）
+  - [x] 一次性 due → 撈出 + log 一筆；再跑 → 不重複（NOT EXISTS 排除，不進 batch）
+  - [x] **不 starve**：塞 K（≥limit）筆已投遞一次性 + 1 筆新 due → 新 due 在本批被處理
+  - [x] **scope 隔離**：別 project 的 due task → 不被撈出；`setReminder` 帶別 project task id → throw（affected=0）
+  - [x] **setReminder 清 stale snooze**：對一次性已 snooze 過的 task 重設 remind_at → 新提醒在新時點 due（舊 snooze 不蓋過）
+  - [x] **ON CONFLICT 不 abort 交易**：同交易內模擬 slot 衝突 → 該筆跳過、其餘 row 仍正常處理 + commit（非整批失敗）
+  - [x] 併發兩 session 同 due → 只一筆 `reminder_log`（SKIP LOCKED + unique）
+  - [x] recurrence：第 N 次 `scheduled_for = remind_at + (N-1)*interval`（不漂移）
+  - [x] catch-up：漏發 3 次 → 只一筆 log、`remind_at` clamp 到下一未來 slot
+  - [x] snooze：投在 `snooze_until`、不重複；**一次性 snooze 投遞後不再響**（不清 snooze 的關鍵測）
+  - [x] `done`/`cancelled` task → 不被撈出
 
-## 1c — MCP tool + 手動驅動 CLI
+## 1c — MCP tool + 手動驅動 CLI ✅
 
-- [ ] `src/tools/set-reminder.ts`：MCP `cc_task_set_reminder`（brainstorm 後若決定併入 `cc_task_update`，改 patch 欄位且不破既有契約）
-- [ ] `src/tools/snooze.ts`：MCP `cc_task_snooze`
-- [ ] `src/index.ts`：註冊新 tool，套 `applyScopePolicy` 取得 scope projectId → 傳給 `setReminder/snooze`（mutation scope guard）
-- [ ] `scripts/run-reminders.ts`：CLI 手動跑 `getDueReminders`，**先 `applyScopePolicy` 解析 scope 再傳 `projectId`**（forced personal instance = `__personal__`）；印出本次投遞清單
-- [ ] 既有 task MCP tool 契約不動（regression）
+- [x] `cc_task_set_reminder` tool def + handler **inline 於 `src/index.ts`**（非 `src/tools/` 殼；理由見 plan.md 偏離說明）
+- [x] `cc_task_snooze` tool def + handler inline 於 `src/index.ts`
+- [x] `src/index.ts`：註冊新 tool，套 `applyScopePolicy` 取得 scope projectId → 傳給 `setReminder/snooze`（mutation scope guard）；ISO timestamp 經 `parseRequiredTimestamp` 驗證
+- [x] `scripts/run-reminders.ts`：CLI 手動跑 `getDueReminders`，**先 `applyScopePolicy` 解析 scope 再傳 `projectId`**（forced personal instance = `__personal__`）；印出本次投遞清單
+- [x] 既有 task MCP tool 契約不動（regression 全套綠）
 
-## Phase 1 Gate
-- [ ] `npm test` 新增 reminder tests 全綠
-- [ ] DB 可查：`SELECT remind_at, recurrence_interval_days FROM tasks LIMIT 1`、`reminder_log` 表存在
-- [ ] 去重：raw 兩次 INSERT 同 `(task_id, scheduled_for)` → 第二次 unique violation
-- [ ] 不 starve：已投遞一次性塞滿 ≥limit → 新 due 仍被處理（NOT EXISTS 在 LIMIT 前生效）
-- [ ] scope：別 project due task 不被個人 instance 撈出；mutation 跨 project 被拒
-- [ ] 併發：兩 poller 跑同一 due → 只一筆 `reminder_log`
-- [ ] recurrence 不漂移 + catch-up 不洪水 + snooze 不重複 三組行為測試綠
-- [ ] 原 306 tests 不回歸
+## Phase 1 Gate ✅
+- [x] `npm test` 新增 reminder tests 全綠（14 schema + 19 service + 8 mcp）
+- [x] DB 可查：`reminder_log` 表存在；tasks 有 remind_at/recurrence_interval_days 欄位
+- [x] 去重：raw 兩次 INSERT 同 `(task_id, scheduled_for)` → 第二次 unique violation
+- [x] 不 starve：已投遞一次性塞滿 ≥limit → 新 due 仍被處理（NOT EXISTS 在 LIMIT 前生效）
+- [x] scope：別 project due task 不被個人 instance 撈出；mutation 跨 project 被拒
+- [x] 併發：兩連線跑同一 due → 只一筆 `reminder_log`
+- [x] recurrence 不漂移 + catch-up 不洪水 + snooze 不重複 三組行為測試綠
+- [x] 原測試不回歸（397 pass，唯一 fail 為既有 sandbox `/tmp/.git` 環境問題，非本次 code bug）
 
 ---
 
@@ -197,17 +198,17 @@
 - [x] forced-mode 無 selector 套用、顯式不同 project 拒、config 衝突 fail
 - [x] `cc_task_stats` 台北日界聚合
 
-### Personal-Hub Phase 1（reminder，本期目標）
+### Personal-Hub Phase 1（reminder，✅ 本期已達成）
 
-- [ ] 設 `remind_at<=now()` open task → `getDueReminders()` 撈出 + `reminder_log` 一筆
-- [ ] 同 slot 再跑 → 不重複（NOT EXISTS 排除）
-- [ ] 已投遞一次性塞滿 batch + 1 新 due → 新 due 仍被處理（不 starve）
-- [ ] 別 project due task → 個人 instance 不撈出；跨 project mutation 被拒
-- [ ] 兩 poller 並發同 due → 只一筆 `reminder_log`
-- [ ] `recurrence=1` 連跑 → 第 N 次 `scheduled_for = remind_at + (N-1)天`
-- [ ] 漏發 3 次 → 補一筆、`remind_at` 跳下一未來 slot
-- [ ] snooze → 在 snooze 時點投一次；一次性 snooze 投後不再響
-- [ ] task 設 `done` → 不再被撈出
+- [x] 設 `remind_at<=now()` open task → `getDueReminders()` 撈出 + `reminder_log` 一筆
+- [x] 同 slot 再跑 → 不重複（NOT EXISTS 排除）
+- [x] 已投遞一次性塞滿 batch + 1 新 due → 新 due 仍被處理（不 starve）
+- [x] 別 project due task → 個人 instance 不撈出；跨 project mutation 被拒
+- [x] 兩 poller 並發同 due → 只一筆 `reminder_log`
+- [x] `recurrence=1` 連跑 → 第 N 次 `scheduled_for = remind_at + (N-1)天`
+- [x] 漏發 3 次 → 補一筆、`remind_at` 跳下一未來 slot
+- [x] snooze → 在 snooze 時點投一次；一次性 snooze 投後不再響
+- [x] task 設 `done` → 不再被撈出
 
 ### Personal-Hub Phase 2（read-only，本期目標）
 

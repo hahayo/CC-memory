@@ -106,6 +106,15 @@ export const tasks = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    // Personal-Hub Phase 1 — reminder 欄位（皆 nullable，additive，不破既有資料）。
+    // remind_at：提醒觸發時點（poller 撈出投遞，與 due_date「到期日」語意切分，勿混用）。
+    // last_notified_at：上次投遞時間（稽核 / 一次性 advance）。
+    // snooze_until：暫緩到此時點；投遞後不自動清除（見 reminders.ts slot 語意）。
+    // recurrence_interval_days：null=一次性；N=每 N 天循環。
+    remindAt: timestamp('remind_at', { withTimezone: true }),
+    lastNotifiedAt: timestamp('last_notified_at', { withTimezone: true }),
+    snoozeUntil: timestamp('snooze_until', { withTimezone: true }),
+    recurrenceIntervalDays: integer('recurrence_interval_days'),
     metadata: jsonb('metadata').notNull().default({}),
   },
   (table) => [
@@ -113,10 +122,21 @@ export const tasks = pgTable(
     check('tasks_status_check', sql`${table.status} IN ('open','in_progress','done','cancelled')`),
     check('tasks_priority_check', sql`${table.priority} IN ('low','normal','high')`),
     check('tasks_source_check', sql`${table.source} IN ('manual','telegram','claude-code','codex','mcp')`),
+    // recurrence 區間：null（一次性）或正整數，0 / 負數 由 CHECK 擋。
+    check(
+      'tasks_recurrence_interval_check',
+      sql`${table.recurrenceIntervalDays} IS NULL OR ${table.recurrenceIntervalDays} > 0`
+    ),
     index('tasks_project_status_created_idx').on(table.projectId, table.status, table.createdAt.desc()),
     index('tasks_due_date_idx')
       .on(table.dueDate)
       .where(sql`${table.dueDate} IS NOT NULL AND ${table.status} <> 'done'`),
+    // due 提醒查詢支援索引：直接對映 getDueReminders 的 WHERE predicate。
+    // partial functional index：只索引「活著且設了提醒」的 row，排序鍵 = 有效觸發時點。
+    // 純效能 index；correctness 靠 reminders.ts 的 NOT EXISTS（見該檔註解）。
+    index('reminders_due_idx')
+      .on(sql`COALESCE(${table.snoozeUntil}, ${table.remindAt})`)
+      .where(sql`${table.remindAt} IS NOT NULL AND ${table.status} IN ('open','in_progress')`),
     // 冪等 partial unique index：scope by (project_id, idempotency_key)
     // 同一客戶端 key 可在不同 project 重用（codex review round 15 P1）。
     uniqueIndex('tasks_idempotency_project_key_idx')
@@ -127,6 +147,39 @@ export const tasks = pgTable(
 
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// reminder_log（Personal-Hub Phase 1）— 去重 + 投遞稽核
+// ---------------------------------------------------------------------------
+//
+// unique(task_id, scheduled_for) 是去重硬背線（對齊 project_memories / tasks 的
+// partial-unique 慣例）。scheduled_for（slot）= 一筆提醒「這一次」對應的時間鍵，
+// 語意見 reminders.ts。getDueReminders 的 NOT EXISTS 做主去重；此 unique 退居
+// 併發 race 的最後背線（ON CONFLICT DO NOTHING）。
+
+export const reminderLog = pgTable(
+  'reminder_log',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    // 本次提醒對應的 slot 值（COALESCE(snooze_until, remind_at) 投遞當下取值）。去重語意鍵。
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }).notNull(),
+    firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
+    // 投遞管道；Phase 1 預設 unknown，跨 repo 階段填實際 channel（telegram / hermes…）。
+    channel: text('channel').notNull().default('unknown'),
+    // 哪個 poller / 機器投的（多機 poller 辨識來源）。
+    writerHost: text('writer_host'),
+  },
+  (table) => [
+    uniqueIndex('reminder_log_task_slot_uniq').on(table.taskId, table.scheduledFor),
+    index('reminder_log_task_idx').on(table.taskId),
+  ]
+);
+
+export type ReminderLog = typeof reminderLog.$inferSelect;
+export type NewReminderLog = typeof reminderLog.$inferInsert;
 
 // ---------------------------------------------------------------------------
 // search_feedback（v0.2 新增）— 由 Phase 1 TDD 加入

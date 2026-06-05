@@ -174,6 +174,27 @@ Claude 會：
 
 回傳欄位：`today` / `overdue` / `open` / `in_progress` / `completed_recently`。
 
+### cc_task_set_reminder
+
+為任務設定提醒（Personal-Hub Phase 1）。`remind_at` 是「提醒觸發時點」，與 `due_date`「到期日」語意不同。重設會清除既有 snooze。
+
+參數：
+- `id` (必填): 任務 ID
+- `project_id` / `project_path`：擇一必填（mutation scope 保護，避免跨 project UUID 改動）。
+- `remind_at` (必填): 提醒觸發時點 ISO 8601。
+- `recurrence_interval_days`: 循環間隔天數（正整數）；省略=一次性。
+
+### cc_task_snooze
+
+暫緩任務提醒到指定時點（Personal-Hub Phase 1）。
+
+參數：
+- `id` (必填): 任務 ID
+- `project_id` / `project_path`：擇一必填（mutation scope 保護）。
+- `snooze_until` (必填): 暫緩到此時點 ISO 8601。
+
+> reminder 的撈取去重投遞由 `getDueReminders()`（service）+ `scripts/run-reminders.ts`（手動驅動 CLI）負責；實際 channel 投遞（Telegram / hermes）屬跨 repo 階段。
+
 ## 保留 namespace 與 forced-mode
 
 `__personal__` 是個人近況 / 決策 / 待辦的**保留 namespace**：

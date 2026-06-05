@@ -1,11 +1,12 @@
 # Personal-Hub Spec（CC-memory 升格跨工具個人記憶+待辦中樞）
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（branch `feature/personal-hub-phase0`，commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）/ Phase 2（read-only mode）規格完整、pending implementation。Phase 3（prod RLS）+ 跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節）。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）✅ 已實作（reminder schema + `reminder_log` + `getDueReminders`/set/snooze/clear service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）。Phase 2（read-only mode）規格完整、pending implementation。Phase 3（prod RLS）+ 跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節）。
 >
 > **與既有 `docs/{spec,plan,task}.md` 的關係**：既有三件套是 CC-memory v0.3/v0.4（memory + auto-capture）的歷史 SSOT，**不被本 initiative 污染**。Personal-Hub 是不同 concern（個人記憶中樞 + 隱私邊界 + 可靠提醒），獨立 track。v0.4 Phase C auto-capture 已在 `docs/spec.md` 頂部標 deferred 並指向本目錄。
 >
 > change log：
 > - v0.1（2026-06-05）：首版。回填 Phase 0 已交付安全核心、寫定 reminder（Phase 1）/ read-only（Phase 2）完整規格、prod + 跨 repo roadmap。
+> - v0.2（2026-06-05）：Phase 1 reminders 實作落地，狀態與端對端驗收 checkbox 同步。
 
 ---
 
@@ -99,7 +100,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 
 ---
 
-### Personal-Hub Phase 1 — Reliable Reminders（規劃中，離線可做）
+### Personal-Hub Phase 1 — Reliable Reminders（✅ 已實作，離線可做）
 
 #### US-P1-1 — 待辦到點會主動提醒，不是等我去查
 
@@ -314,17 +315,17 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 - [x] `CC_FORCE_PROJECT_ID` + `CC_MEMORY_PROJECT_ID` 同設 → 啟動 fail
 - [x] `cc_task_stats` 回 today/overdue/open/in_progress/completed_recently（台北日界）
 
-### Personal-Hub Phase 1（reminder，本期目標）
+### Personal-Hub Phase 1（reminder，✅ 本期已達成）
 
-- [ ] 設 `remind_at <= now()` 的 open task → `getDueReminders()` 撈出且 `reminder_log` 多一筆
-- [ ] 同 task 同 slot 再跑 → 第二次不投遞（`NOT EXISTS` 排除，根本不進 batch）
-- [ ] 塞 K（≥limit）筆已投遞一次性 + 1 筆新 due → 新 due 仍被處理（不被舊的 starve）
-- [ ] 別專案有 due task → 個人 instance `getDueReminders` 不撈出；`setReminder` 帶別專案 task id → 拒絕（affected=0）
-- [ ] 兩個 poller 並發跑同一筆 due → 只有一筆 `reminder_log`（`FOR UPDATE SKIP LOCKED` + unique）
-- [ ] `recurrence_interval_days=1` 連跑數日 → 第 N 次 `scheduled_for = remind_at + (N-1)天`
-- [ ] 人工把時鐘快轉漏發 3 次 → 只補一筆、`remind_at` 跳到下一未來 slot
-- [ ] 設 `snooze_until` → 在 snooze 時點投一次、不重複；一次性任務 snooze 投遞後不再響
-- [ ] 把 task 設 `done` → 不再被撈出
+- [x] 設 `remind_at <= now()` 的 open task → `getDueReminders()` 撈出且 `reminder_log` 多一筆
+- [x] 同 task 同 slot 再跑 → 第二次不投遞（`NOT EXISTS` 排除，根本不進 batch）
+- [x] 塞 K（≥limit）筆已投遞一次性 + 1 筆新 due → 新 due 仍被處理（不被舊的 starve）
+- [x] 別專案有 due task → 個人 instance `getDueReminders` 不撈出；`setReminder` 帶別專案 task id → 拒絕（affected=0）
+- [x] 兩個 poller 並發跑同一筆 due → 只有一筆 `reminder_log`（`FOR UPDATE SKIP LOCKED` + unique）
+- [x] `recurrence_interval_days=1` 連跑數日 → 第 N 次 `scheduled_for = remind_at + (N-1)天`
+- [x] 人工把時鐘快轉漏發 3 次 → 只補一筆、`remind_at` 跳到下一未來 slot
+- [x] 設 `snooze_until` → 在 snooze 時點投一次、不重複；一次性任務 snooze 投遞後不再響
+- [x] 把 task 設 `done` → 不再被撈出
 
 ### Personal-Hub Phase 2（read-only，本期目標）
 

@@ -1,6 +1,6 @@
 # Personal-Hub Implementation Plan
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）/ Phase 2（read-only）設計 ready, pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）設計 ready, pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
 >
 > 本 plan 對應 `spec.md`。Phase 0 回填已實作行為；Phase 1/2 寫到可直接 TDD 的細節；Phase 3 + 跨 repo 停在 roadmap-level（介面草案 / Gate / open questions）。
 >
@@ -354,7 +354,7 @@ append (row, slot) to result
 
 ### MCP 層接點（Phase 1/2）
 
-- Phase 1：新增 MCP tool `cc_task_set_reminder` / `cc_task_snooze`（或併入既有 `cc_task_update` 的 patch 欄位——實作時 brainstorm 決定，傾向新 tool 以保既有 `cc_task_update` 契約不動）。reminder poller 本體（誰呼叫 `getDueReminders`）屬跨 repo 階段的 channel 整合，Phase 1 只交付 service + schema + 可手動驅動的 CLI/腳本。
+- Phase 1（✅ 已實作）：新增 MCP tool `cc_task_set_reminder` / `cc_task_snooze`（**已決採新 tool**，不動既有 `cc_task_update` 契約；理由：`cc_task_update` 強制 `expected_status`，語意不合「設提醒」）。tool def + handler inline 於 `src/index.ts`。reminder poller 本體（誰呼叫 `getDueReminders`）屬跨 repo 階段的 channel 整合，Phase 1 只交付 service + schema + 可手動驅動的 CLI/腳本。
 - Phase 2：MCP server 啟動期讀 `CC_READ_ONLY` / `CC_TOOL_ALLOWLIST`。**兩種獨立限制，各自雙層 enforce**：
   - **read-only**（`CC_READ_ONLY=1`）：限制「寫入類 tool」。ListTools 隱藏寫入 tool + **每個寫入 handler** 入口 `assertWritable()`。
   - **allowlist**（`CC_TOOL_ALLOWLIST`）：限制「集合外的任何 tool（**含 read**）」。ListTools 只露 allowlist 內 tool + **每個 handler**（read+write 皆是）入口 `assertAllowed()`。
@@ -422,17 +422,21 @@ src/services/memories.ts       # ✅ searchMemories WHERE 排除保留 namespace
 CLAUDE.md                      # ✅ 工具清單 + __personal__ namespace 說明 cascade 同步
 ```
 
-### Personal-Hub Phase 1（reminder）
+### Personal-Hub Phase 1（reminder）✅ 已落地
 
 ```
-src/db/schema.ts               # tasks 加 4 欄 + reminder_log 表 + CHECK + reminders_due_idx
-sql/migrations/NNNN_add_reminders.sql   # drizzle-kit generate 產出（編號自動遞增，disk 現有已到 0005）
-src/services/reminders.ts      # getDueReminders / setReminder / snoozeReminder / clearReminder
-src/tools/set-reminder.ts      # MCP cc_task_set_reminder（傾向新 tool，不動既有 cc_task_update）
-src/tools/snooze.ts            # MCP cc_task_snooze（或併入，brainstorm 決定）
-scripts/run-reminders.ts       # 可手動驅動 getDueReminders 的 CLI（Phase 1 驗證用；channel poller 屬跨 repo）
-tests/services/reminders.test.ts  # slot/advance/snooze/併發/去重/recurrence
+src/db/schema.ts               # ✅ tasks 加 4 欄 + reminder_log 表 + CHECK + reminders_due_idx（partial functional index）
+sql/migrations/0006_add_reminders.sql   # ✅ drizzle-kit generate 產出（COALESCE expression index + CHECK 保真度已 eyeball + pg_indexes 斷言守）
+src/services/reminders.ts      # ✅ getDueReminders / setReminder / snoozeReminder / clearReminder（+ updateReminderScoped 共用 guard）
+src/services/types.ts          # ✅ DueReminder / SetReminderInput / GetDueRemindersOptions
+src/index.ts                   # ✅ cc_task_set_reminder / cc_task_snooze tool def + handler（inline；不另建 src/tools/ 殼）
+scripts/run-reminders.ts       # ✅ 手動驅動 getDueReminders 的 CLI（先 applyScopePolicy 解 scope；channel poller 屬跨 repo）
+tests/db/reminders-schema.test.ts   # ✅ schema 反射 + integration（unique/CHECK/index indexdef）
+tests/services/reminders.test.ts    # ✅ slot/advance/snooze/併發/去重/recurrence/scope
+tests/mcp-reminders.test.ts         # ✅ MCP tool happy path + scope guard + forced-mode
 ```
+
+> **實作偏離說明**：plan 原列 `src/tools/set-reminder.ts` / `src/tools/snooze.ts` 薄殼。實際採 inline 於 `src/index.ts`（tool def 進 `BASE_TOOLS`、handler case 直接呼叫 `services/reminders.ts`）——因 `src/tools/` 是 legacy re-export barrel（CLAUDE.md 明示「新 code 應直接 from '../services/'」），新增純 re-export 殼是 dead code。決定遵循現行 codebase 慣例。
 
 ### Personal-Hub Phase 2（read-only）
 
@@ -467,13 +471,13 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 |---|---|---|---|
 | **0** | forced-mode ScopePolicy + project-mode deny + `__personal__` 隔離 + `cc_task_stats` + input hardening | 雙向 deny 三路測試綠；config-drift fail 測試綠；306 tests 綠；Codex review gate 過 | ✅ commit `01dd5e4` |
 
-### Personal-Hub Phase 1 — Reliable Reminders（離線可做）
+### Personal-Hub Phase 1 — Reliable Reminders（✅ 已完成）
 
-| Step | 交付 | Gate |
-|---|---|---|
-| 1a | schema：tasks 4 欄 + `reminder_log` + CHECK + index + reminder migration（編號自動遞增） | migration local PG 成功；欄位/表/index 上線；原 306 tests 綠 |
-| 1b | `src/services/reminders.ts`（getDueReminders/set/snooze/clear）+ TDD | slot 三情況 / advance 不漂移 / catch-up clamp / snooze 不重複 / 併發 claim 去重 全綠 |
-| 1c | MCP tool（set_reminder / snooze）+ `scripts/run-reminders.ts` 手動驅動 | 手動跑 CLI 撈出 due + `reminder_log` 去重；MCP tool happy path 綠 |
+| Step | 交付 | Gate | 狀態 |
+|---|---|---|---|
+| 1a | schema：tasks 4 欄 + `reminder_log` + CHECK + index + migration `0006_add_reminders` | migration test PG 成功；欄位/表/index 上線；無回歸 | ✅ |
+| 1b | `src/services/reminders.ts`（getDueReminders/set/snooze/clear）+ TDD | slot 三情況 / advance 不漂移 / catch-up clamp / snooze 不重複 / 併發 claim 去重 全綠 | ✅ 19 tests |
+| 1c | MCP tool（set_reminder / snooze，inline 於 index.ts）+ `scripts/run-reminders.ts` 手動驅動 | 手動跑 CLI 撈出 due + `reminder_log` 去重；MCP tool happy path + scope guard 綠 | ✅ 8 tests |
 
 > reminder 投遞到實際 channel（Telegram/hermes）不在 Phase 1——Phase 1 交付「撈 + 去重 + advance」的 service 與可手動驅動的 CLI，channel 串接屬跨 repo 階段。
 
@@ -522,7 +526,7 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 
 ### Open Questions
 
-1. reminder MCP 介面：新 tool（`cc_task_set_reminder`）vs 擴 `cc_task_update` patch 欄位 → Phase 1 開工 brainstorm 決（傾向新 tool 保契約）。
+1. ~~reminder MCP 介面：新 tool（`cc_task_set_reminder`）vs 擴 `cc_task_update` patch 欄位~~ → ✅ 已決：採新 tool `cc_task_set_reminder` / `cc_task_snooze`（`cc_task_update` 強制 `expected_status`，語意不合「設提醒」；保既有契約不動）。
 2. reminder poller 跑在哪（cron / hermes 常駐 / `/hi` 觸發）→ 跨 repo 階段決。
 3. reminder channel 選型（Telegram / hermes push / 系統通知）→ 跨 repo 階段決。
 4. Todoist 匯出格式 → **blocking**，需使用者提供樣本。

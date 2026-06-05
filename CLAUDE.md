@@ -22,7 +22,7 @@ npm run clean    # 清除 build/ 目錄
 ## Architecture
 
 ### MCP Server (src/index.ts)
-主要進入點，實作 10 個 MCP 工具：
+主要進入點，實作 12 個 MCP 工具：
 
 Memory（6）：
 - `cc_memory_save` - 儲存記憶（summary, keywords, decisions, nextSteps）
@@ -32,11 +32,13 @@ Memory（6）：
 - `cc_memory_stats` - 取得專案統計
 - `cc_memory_delete` - 刪除記憶（軟刪除）
 
-Task（4）：
+Task（6）：
 - `cc_task_create` - 建立任務
 - `cc_task_list` - 列出任務（status 過濾、分頁）
 - `cc_task_update` - 更新任務（optimistic locking，需 expected_status）
 - `cc_task_stats` - 任務統計 JSON（today/overdue/open/in_progress/completed_recently，日界 Asia/Taipei）
+- `cc_task_set_reminder` - 設定提醒（remind_at 觸發時點 + 可選 recurrence；Personal-Hub Phase 1）
+- `cc_task_snooze` - 暫緩提醒到 snooze_until（Personal-Hub Phase 1）
 
 > 除 `cc_memory_search` 外，所有工具皆 fail-fast：必須帶 `project_id` 或 `project_path`（MCP server 的 cwd 非 client cwd，無法可靠解析）。ScopePolicy（`src/services/scope-policy.ts`）統一決策 forced-mode / project-mode deny。
 
