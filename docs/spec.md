@@ -83,8 +83,9 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 使用者：本專案開發者（單人）。脈絡分兩組介面：
 
-- **Phase A — MCP**（v0.2 本期交付）：終端機（Claude Code / Codex MCP stdio）
-- **Phase B — HTTP REST API + Telegram bot**（後續階段 / 可由其他 agent 承接，本期不綁排程）
+- **Phase A — MCP** ✅（v0.3 已交付）：終端機（Claude Code / Codex MCP stdio）
+- ~~**Phase B — HTTP REST API + Telegram bot**~~ ❌（已於 2026-04-23 取消，見下方 §Phase B 區塊）
+- **Phase C — v0.4 自動採集（Stage 1）**（pending）：Stop hook capture + SessionStart re-inject + refine tools + benchmark
 
 每個 US 皆對應具體驗收條件與 Goal / Design Principle。
 
@@ -185,10 +186,10 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 **Phase C 技術選型摘要**：
 - **LLM 摘要**：Claude CLI subprocess（`claude -p --model claude-sonnet-4-5 --output-format json`），吃 subscription
-- **Embedding**：Gemini `text-embedding-004`（沿用 Phase A，`vector(768)`）
+- **Embedding**：Gemini `gemini-embedding-001`（沿用 Phase A，`vector(1536)`；frozen 2026-04-23，不用 design doc 原寫的 `text-embedding-004`/768，原因：統一維度重用既有 `src/utils/embedding.ts` helper、避免異構兩表需兩個 HNSW index 配不同 distance operator）
 - **Hook 事件**：`Stop`（抓）+ `SessionStart(matcher=startup|clear|compact)`（re-inject）
-- **SKIP_TOOLS 預設清單**（抄 claude-mem）：`ListMcpResourcesTool, SlashCommand, Skill, TodoWrite, AskUserQuestion`
-- **Feature flags 預設值**：`AUTO_CAPTURE=off`（opt-in）、`INCLUDE_AUTO_IN_SEARCH=on`、`REINJECT=off`（opt-in）
+- **SKIP_TOOLS 預設清單**（抄 claude-mem）：`ListMcpResourcesTool, SlashCommand, Skill, TodoWrite, AskUserQuestion`；env `CC_MEMORY_SKIP_TOOLS`（逗號分隔）**整個覆蓋預設清單，非 union**（frozen 2026-04-23，與 claude-mem 語義對齊）
+- **Feature flags 預設值**：`CC_MEMORY_AUTO_CAPTURE=off`（opt-in）、`CC_MEMORY_INCLUDE_AUTO_IN_SEARCH=on`、`CC_MEMORY_REINJECT=off`（opt-in）
 
 ---
 
@@ -197,7 +198,7 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 ### Phase A / v0.3 原 Non-goals（仍有效）
 
 - ❌ ~~Stop hook 自動抽取~~ → **v0.4 Phase C 已啟動**（session_summaries only，不做 observations 細粒度）
-- ❌ `candidate_memories` 表與 `/promote` 流程 → v0.4 Phase C 用 `session_summaries.promoted_to_memory_id` 實現
+- ❌ `candidate_memories` 表與 `/promote` 流程 → v0.4 Phase C 用 `session_summaries.promoted_to_memory_id` 實現（雙向 FK：`session_summaries.promoted_to_memory_id → project_memories.id` + `project_memories.source_summary_id → session_summaries.id`，兩邊都 nullable、**無 ON DELETE CASCADE**，refine delete 時手動 nullify；frozen 2026-04-23）。`session_summaries.status` 僅 `'active' | 'archived'`（不引入 `merged`；合併走 archive + `metadata.merged_into`）
 - ❌ provenance / temporal validity 欄位
 - ❌ Layer 3 topic compilation
 - ❌ 多 bot 平台 / 語音 / 圖片 / 檔案
@@ -224,17 +225,17 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 |---|---|---|
 | **Day 0 Schema alignment** ✅ | Phase A | 刪 `sql/schema.sql`，Drizzle 當唯一真實來源 |
 | **Schema 擴充 Phase 1** ✅ | Phase A | `tasks`、`search_feedback`、`bot_user_state` 上線 |
-| **Schema 補完 Phase 2** | Phase A | `project_memories` 加 `idempotency_key` + `writer_host`；`tasks` 加 `writer_host` |
-| **Service layer 抽出** | Phase A | `src/services/` 純業務邏輯，MCP 直接使用；HTTP / bot 屆時共用 |
-| **Canonical project id** | Phase A | `explicit > env > marker > repo_name > basename` 統一解析 |
-| **Writer attribution** | Phase A | `writer_host` = env `CC_MEMORY_WRITER` ?? `os.hostname()` |
-| **MCP task tools** | Phase A | `cc_task_create` / `cc_task_list` / `cc_task_update`（optimistic locking） |
-| **Retrieval 評估（被動記錄 + 離線腳本）** | Phase A | MCP `cc_memory_search` 自動寫 `search_feedback`；`scripts/eval-retrieval.ts` 跑報告 |
-| **Codex MCP** | Phase A | 不寫專用整合；使用者 `codex mcp add cc-memory` 即可複用 |
+| **Schema 補完 Phase 2** ✅ | Phase A | `project_memories` 加 `idempotency_key` + `writer_host`；`tasks` 加 `writer_host` |
+| **Service layer 抽出** ✅ | Phase A | `src/services/` 純業務邏輯，MCP 直接使用；HTTP / bot 屆時共用 |
+| **Canonical project id** ✅ | Phase A | `explicit > env > marker > repo_name > basename` 統一解析 |
+| **Writer attribution** ✅ | Phase A | `writer_host` = env `CC_MEMORY_WRITER` ?? `os.hostname()` |
+| **MCP task tools** ✅ | Phase A | `cc_task_create` / `cc_task_list` / `cc_task_update`（optimistic locking） |
+| **Retrieval 評估（被動記錄 + 離線腳本）** ✅ | Phase A | MCP `cc_memory_search` 自動寫 `search_feedback`；`scripts/eval-retrieval.ts` 跑報告 |
+| **Codex MCP** ✅ | Phase A | 不寫專用整合；使用者 `codex mcp add cc-memory` 即可複用 |
 | ~~**HTTP REST API**~~ | ~~Phase B~~ ❌ | 取消 |
 | ~~**Telegram bot**~~ | ~~Phase B~~ ❌ | 取消 |
 | ~~**Feedback 回寫（thumbs / selected）**~~ | ~~Phase B~~ ❌ | 取消；品質驗證改靠 Phase C 品質閘 + refine delete 頻率 |
-| **`session_summaries` 新表** | Phase C | upsert 同 session（Stop hook），`vector(768)` embedding、`capture_source`/`capture_hook`/`summarize_count` |
+| **`session_summaries` 新表** | Phase C | upsert 同 session（Stop hook），`vector(1536)` embedding（`gemini-embedding-001` 沿用 Phase A）、`capture_source`/`capture_hook`/`summarize_count` |
 | **`refine_audit_log` 新表** | Phase C | refine 四操作的 audit log，保留 before/after snapshot |
 | **capture-runner + Claude CLI** | Phase C | `scripts/capture-runner.ts` + `src/llm/claude-cli.ts`（subprocess）+ SKIP_TOOLS 過濾 + 雙節流 |
 | **reinject-runner** | Phase C | `scripts/reinject-runner.ts` + `hooks/session-start-reinject.sh` → `additionalContext` hook protocol |
@@ -258,11 +259,11 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 - **不回歸**：現有 248 tests 全綠，v0.4 不得造成既有測試失敗
 - **Precision-first**：寧漏不要錯抓；Claude CLI 失敗寫 queue 不強寫 DB
 - **LLM 摘要走 Claude CLI subprocess**：不呼叫 Anthropic API、不呼叫 Gemini LLM API
-- **Embedding 獨立走 Gemini**：`text-embedding-004` 只管 embedding，與 LLM 解耦
+- **Embedding 獨立走 Gemini**：`gemini-embedding-001`（1536 維）只管 embedding，與 LLM 解耦（frozen 2026-04-23 沿用 Phase A，不用 design doc 原寫的 `text-embedding-004`/768）
 - **SKIP_TOOLS 過濾是節流第 0 關**：純工具輪次直接 skip
 - **Stop hook 雙節流**：min-interval 180s AND min-tokens 500 任一不過即跳過
 - **同 session upsert**：一筆 active canonical，後寫覆蓋前寫
-- **三個獨立 feature flag**：`AUTO_CAPTURE` / `INCLUDE_AUTO_IN_SEARCH` / `REINJECT`
+- **三個獨立 feature flag**：`CC_MEMORY_AUTO_CAPTURE` / `CC_MEMORY_INCLUDE_AUTO_IN_SEARCH` / `CC_MEMORY_REINJECT`
 - **Hook 失敗不阻塞 Claude Code**：`set +e` 吞錯誤
 
 ---
@@ -351,7 +352,7 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 - [ ] `CC_MEMORY_AUTO_CAPTURE=off` 重跑 → DB 無新 row
 
 **Re-inject**
-- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 5 筆 summary + 近 3 筆 manual
+- [ ] `/clear` 或 `/compact` 觸發 → 新 context 含近 3 筆 summary + 近 2 筆 manual（frozen 2026-04-23：`CC_MEMORY_REINJECT_SUMMARIES=3` / `CC_MEMORY_REINJECT_MANUAL=2`，比 design doc 原 5/3 保守）
 - [ ] `CC_MEMORY_REINJECT=off` 時 `/clear` → context 不含注入
 
 **Retrieval**
