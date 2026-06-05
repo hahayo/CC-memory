@@ -8,10 +8,16 @@
 //      與 tasks.ts updateTask Step1.5/Step6 同模式）。
 //   2. getDueReminders 一個交易內：FOR UPDATE SKIP LOCKED 選列（NOT EXISTS 預過濾在 LIMIT 前）
 //      → INSERT reminder_log ON CONFLICT DO NOTHING → 依 slot 三情況 advance。
-//   3. 去重雙機制分工：
-//      - NOT EXISTS（LIMIT 前）：把已投遞 slot 移出候選集，是「不 starve / 正確終止」主機制。
-//      - reminder_log unique(task_id, scheduled_for) + ON CONFLICT DO NOTHING：併發 race 最後背線
-//        （第二個 INSERT RETURNING 空 → 跳過、不丟錯、不 abort 交易）。
+//   3. 去重三機制分工（皆 load-bearing，勿把 ON CONFLICT 當冗餘刪掉）：
+//      - FOR UPDATE SKIP LOCKED：poller-vs-poller 併發 primitive（鎖候選 task 列、別連線略過不等待，
+//        互 race 時根本不把對方當候選 → 走不到 ON CONFLICT 路徑）。
+//      - NOT EXISTS（LIMIT 前）：sequential dedup（前一輪 commit 後本輪看得見 log）兼 anti-starvation
+//        主機制——已投遞 slot 在 LIMIT 前移出候選集，不佔名額、不 starve 後續新 due。
+//      - reminder_log unique(task_id, scheduled_for) + ON CONFLICT DO NOTHING：object-level 最後背線，
+//        擋「不持 task 列鎖」的寫入路徑（test seed / 跨 repo poller 階段他法寫入）；第二個 INSERT
+//        RETURNING 空 → 跳過、不丟錯、不 abort 交易。
+//      註：上述去重推理假設 PostgreSQL 預設 READ COMMITTED isolation（repo 無 override）；
+//      若日後改全域 isolation 需重審本檔併發論證。
 //   4. now 全程用同一個注入值（比較 / firedAt / recurrence advance），不混 SQL now()，
 //      確保 recurrence 不漂移 / catch-up clamp 可決定性測試。
 //   5. slot 精度不變式：remind_at / snooze_until 一律經 JS Date（ms 精度）寫入，
@@ -121,6 +127,24 @@ export async function snoozeReminder(
 ): Promise<Task> {
   assertProjectId(projectId);
   assertValidDate(until, 'until');
+  // snooze = 延後（spec US-P1-2）：先讀現有 remind_at（scope 內），拒絕 snooze_until < remind_at
+  // 的矛盾輸入——否則較早的 snooze slot 投遞後經 COALESCE(snooze_until, remind_at) 永久壓掉較晚的
+  // remind_at，原提醒靜默丟失（codex / workflow review）。remind_at 為 null 時 snooze 自身即觸發
+  // 時點，不設限。scope guard 仍由後續 updateReminderScoped 的 affected=0 → NotFound 兜底。
+  const existing = await db
+    .select({ remindAt: tasks.remindAt })
+    .from(tasks)
+    .where(and(eq(tasks.id, taskId), eq(tasks.projectId, projectId)));
+  if (existing.length === 0) {
+    throw new NotFoundError('Task not found', { id: taskId });
+  }
+  const remindAt = existing[0].remindAt as Date | null;
+  if (remindAt !== null && until.getTime() < remindAt.getTime()) {
+    throw new InvalidArgumentError(
+      'snooze_until 不可早於 remind_at（snooze 是延後；早於原提醒會壓掉它）',
+      { snoozeUntil: until.toISOString(), remindAt: remindAt.toISOString() }
+    );
+  }
   return updateReminderScoped(db, taskId, projectId, { snoozeUntil: until });
 }
 

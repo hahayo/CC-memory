@@ -164,6 +164,19 @@ describe('services/reminders', () => {
       const id = await makeTask({ projectId: other });
       await expect(snoozeReminder(db, id, tp, hours(2))).rejects.toThrow(NotFoundError);
     });
+
+    it('rejects snooze_until earlier than remind_at with InvalidArgumentError', async () => {
+      // snooze = 延後（spec US-P1-2）；snooze_until 早於 remind_at 是矛盾輸入。
+      // 否則較早的 snooze slot 投遞後經 COALESCE 永久壓掉較晚的 remind_at（codex/workflow review）。
+      const id = await makeTask({ remindAt: days(2) });
+      await expect(snoozeReminder(db, id, tp, days(1))).rejects.toThrow(InvalidArgumentError);
+    });
+
+    it('allows snooze when task has no remind_at (snooze sets the trigger)', async () => {
+      const id = await makeTask(); // remind_at = null
+      const task = await snoozeReminder(db, id, tp, hours(2));
+      expect(new Date(task.snoozeUntil as Date).getTime()).toBe(hours(2).getTime());
+    });
   });
 
   describe('clearReminder', () => {
