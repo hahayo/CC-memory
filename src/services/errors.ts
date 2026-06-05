@@ -56,6 +56,13 @@ export class NotFoundError extends BaseServiceError {
 }
 
 /**
+ * tool 在此 instance 被 policy 拒絕（read-only 擋寫入 / allowlist 排除）。對應 403。
+ */
+export class ForbiddenError extends BaseServiceError {
+  readonly code = 'FORBIDDEN';
+}
+
+/**
  * short-id prefix 匹配多筆（需使用者提供更長 prefix 或完整 id）。
  * details.candidates 為前 5 筆（按 updated_at DESC）。
  */

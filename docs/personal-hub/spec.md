@@ -1,12 +1,13 @@
 # Personal-Hub Spec（CC-memory 升格跨工具個人記憶+待辦中樞）
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）✅ 已實作（reminder schema + `reminder_log` + `getDueReminders`/set/snooze/clear service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）。Phase 2（read-only mode）規格完整、pending implementation。Phase 3（prod RLS）+ 跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節）。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）✅ 已實作（reminder schema + `reminder_log` + `getDueReminders`/set/snooze/clear service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）。Phase 2（read-only mode）✅ 已實作（`CC_READ_ONLY` / `CC_TOOL_ALLOWLIST` 經 ListTools + handler central guard 雙層 enforce + `CC_SEARCH_FEEDBACK` telemetry 開關）。Phase 3（prod RLS）+ 跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節）。
 >
 > **與既有 `docs/{spec,plan,task}.md` 的關係**：既有三件套是 CC-memory v0.3/v0.4（memory + auto-capture）的歷史 SSOT，**不被本 initiative 污染**。Personal-Hub 是不同 concern（個人記憶中樞 + 隱私邊界 + 可靠提醒），獨立 track。v0.4 Phase C auto-capture 已在 `docs/spec.md` 頂部標 deferred 並指向本目錄。
 >
 > change log：
 > - v0.1（2026-06-05）：首版。回填 Phase 0 已交付安全核心、寫定 reminder（Phase 1）/ read-only（Phase 2）完整規格、prod + 跨 repo roadmap。
 > - v0.2（2026-06-05）：Phase 1 reminders 實作落地，狀態與端對端驗收 checkbox 同步。
+> - v0.3（2026-06-05）：Phase 2 read-only mode（雙層 enforce + telemetry 開關）實作落地，狀態與驗收同步。
 
 ---
 
@@ -138,7 +139,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 
 ---
 
-### Personal-Hub Phase 2 — Read-only Mode（規劃中，離線可做）
+### Personal-Hub Phase 2 — Read-only Mode（✅ 已實作，離線可做）
 
 #### US-P2-1 — 注入用的 instance 永遠不會誤寫
 
@@ -256,7 +257,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 
 - **雙層 enforce**：ListTools 隱藏 + handler 拒絕，任一層被繞過另一層仍守得住。
 - **allowlist 涵蓋 read tool**：`CC_TOOL_ALLOWLIST` 的第二層守衛（`assertAllowed`）作用在**每個** handler（含 read），不可只掛寫入 handler——否則被排除的 read tool 從 ListTools 消失卻仍可直呼。read-only 的 `assertWritable` 與 allowlist 的 `assertAllowed` 是兩道獨立檢查，皆走 central dispatch。
-- **read-only 副作用誠實**：read-only instance 的 `cc_memory_search` 仍會寫 `search_feedback`（telemetry 副作用，Codex #9）——明示這不違反 read-only 語意（它是 retrieval 評估必要的觀測，非使用者資料寫入），但要在文件講清楚。
+- **read-only 副作用誠實**：read-only instance 的 `cc_memory_search` **預設仍會寫** `search_feedback`（telemetry 副作用，Codex #9）——明示這不違反 read-only 語意（它是 retrieval 評估必要的觀測，非使用者資料寫入）。但提供 `CC_SEARCH_FEEDBACK=off` 讓潔癖消費端完全關閉此寫入（設 off 時不寫）。
 
 ### Personal-Hub Phase 3 必守（prod）
 
@@ -327,12 +328,13 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 - [x] 設 `snooze_until` → 在 snooze 時點投一次、不重複；一次性任務 snooze 投遞後不再響
 - [x] 把 task 設 `done` → 不再被撈出
 
-### Personal-Hub Phase 2（read-only，本期目標）
+### Personal-Hub Phase 2（read-only，✅ 本期已達成）
 
-- [ ] `CC_READ_ONLY=1` instance ListTools → 無 save/delete/task_create/task_update/refine
-- [ ] 對該 instance 直接呼叫 `cc_memory_save` → handler 拒絕
-- [ ] `CC_TOOL_ALLOWLIST=cc_memory_search,cc_task_list` → 只這兩個可用，其餘兩層皆拒
-- [ ] allowlist 排除某 **read** tool（如 `cc_memory_get`）→ ListTools 不露 + 直呼經 `assertAllowed` 被拒（驗證 allowlist 不只擋寫入）
+- [x] `CC_READ_ONLY=1` instance ListTools → 無 save/delete/task_create/task_update/set_reminder/snooze
+- [x] 對該 instance 直接呼叫 `cc_memory_save` → handler 拒絕（FORBIDDEN）
+- [x] `CC_TOOL_ALLOWLIST=cc_memory_search,cc_task_list` → 只這兩個可用，其餘兩層皆拒
+- [x] allowlist 排除某 **read** tool（如 `cc_memory_get`）→ ListTools 不露 + 直呼經 `assertAllowed` 被拒（驗證 allowlist 不只擋寫入）
+- [x] `CC_SEARCH_FEEDBACK=off` → search 不寫 `search_feedback` telemetry
 
 ### Personal-Hub Phase 3（prod，roadmap）
 

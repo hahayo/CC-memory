@@ -691,7 +691,7 @@ docs/TODO.md                # v0.2 工作項目
 | **0** ✅ | Schema alignment | 完成 |
 | **1** ✅ | `tasks` / `search_feedback` / `bot_user_state` + TDD | 完成 |
 | **2** | Schema 補完（idempotency_key、writer_host）+ service layer 抽出 + MCP 改 call service + 3 task MCP tool + regression green | `npm test` 全綠；MCP 全通；writer_host / idempotency_key 欄位 DB 上線 |
-| **5-A** | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
+| **5-A** | MCP `cc_memory_search` 被動寫 `search_feedback`（query / query_surface='mcp' / query_project_id / mode / limit / result_ids / result_project_ids / rank_positions / scores）+ `scripts/eval-retrieval.ts` Phase A 指標（查詢數 / mode 分佈 / 結果穩定度）+ `docs/retrieval-eval.md` | ① 跑一次 `cc_memory_search` 後 `SELECT * FROM search_feedback ORDER BY created_at DESC LIMIT 1` 能看到 9 欄完整 row（`CC_SEARCH_FEEDBACK` 預設 on / 未關閉時；設 off 則不寫，見 personal-hub Phase 2）；② eval 腳本產出 markdown 報告含「每日查詢數 / mode 分佈 / 結果穩定度」三區塊；③ Codex MCP (`codex mcp add cc-memory`) 能呼叫 `cc_memory_search` |
 
 ### ~~Phase B — 後續階段（HTTP + Telegram）~~ ❌ 已於 2026-04-23 取消
 

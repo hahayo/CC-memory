@@ -1,6 +1,6 @@
 # Personal-Hub Implementation Plan
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）設計 ready, pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）✅ 已實作（`tool-policy.ts` + ListTools/handler 雙層 enforce + `CC_SEARCH_FEEDBACK` 開關，測試綠）· Phase 3（prod RLS）+ 跨 repo = roadmap。
 >
 > 本 plan 對應 `spec.md`。Phase 0 回填已實作行為；Phase 1/2 寫到可直接 TDD 的細節；Phase 3 + 跨 repo 停在 roadmap-level（介面草案 / Gate / open questions）。
 >
@@ -438,13 +438,15 @@ tests/mcp-reminders.test.ts         # ✅ MCP tool happy path + scope guard + fo
 
 > **實作偏離說明**：plan 原列 `src/tools/set-reminder.ts` / `src/tools/snooze.ts` 薄殼。實際採 inline 於 `src/index.ts`（tool def 進 `BASE_TOOLS`、handler case 直接呼叫 `services/reminders.ts`）——因 `src/tools/` 是 legacy re-export barrel（CLAUDE.md 明示「新 code 應直接 from '../services/'」），新增純 re-export 殼是 dead code。決定遵循現行 codebase 慣例。
 
-### Personal-Hub Phase 2（read-only）
+### Personal-Hub Phase 2（read-only）✅ 已落地
 
 ```
-src/services/tool-policy.ts    # isWriteTool() + assertWritable()（read-only）+ assertAllowed()（allowlist，含 read）
-src/index.ts                   # ListTools 過濾 + central dispatch 守衛：每 call 跑 assertAllowed，寫入再加 assertWritable（雙層）
-tests/services/tool-policy.test.ts
-tests/mcp/read-only.test.ts    # ListTools 不含寫入 tool + 直呼被拒
+src/services/tool-policy.ts    # ✅ isWriteTool() + assertWritable()（read-only）+ assertAllowed()（allowlist，含 read）+ loadToolPolicy()
+src/services/errors.ts         # ✅ ForbiddenError（code FORBIDDEN）
+src/services/types.ts          # ✅ McpError union 加 FORBIDDEN
+src/index.ts                   # ✅ buildToolsForMode 加 policy 過濾 + handleToolCall central guard（assertAllowed → assertWritable）+ search telemetry 受 CC_SEARCH_FEEDBACK 控制
+tests/services/tool-policy.test.ts   # ✅ 24 tests
+tests/mcp-read-only.test.ts          # ✅ 8 tests（ListTools 過濾 + 直呼雙層被拒 + telemetry 開關）
 ```
 
 ### Personal-Hub Phase 3（prod，roadmap）
@@ -481,12 +483,12 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 
 > reminder 投遞到實際 channel（Telegram/hermes）不在 Phase 1——Phase 1 交付「撈 + 去重 + advance」的 service 與可手動驅動的 CLI，channel 串接屬跨 repo 階段。
 
-### Personal-Hub Phase 2 — Read-only Mode（離線可做）
+### Personal-Hub Phase 2 — Read-only Mode（✅ 已完成）
 
-| Step | 交付 | Gate |
-|---|---|---|
-| 2a | `tool-policy.ts`（isWriteTool / assertWritable / allowlist） + TDD | 寫入 tool 判定單測綠 |
-| 2b | `src/index.ts` ListTools 過濾 + handler 雙層 enforce | `CC_READ_ONLY=1` ListTools 無寫入 tool；直呼被拒；`CC_TOOL_ALLOWLIST` 子集兩層生效；原 tests 綠 |
+| Step | 交付 | Gate | 狀態 |
+|---|---|---|---|
+| 2a | `tool-policy.ts`（isWriteTool / assertWritable / assertAllowed / loadToolPolicy） + TDD | 寫入 tool 判定 + read-only/allowlist 單測綠 | ✅ 24 tests |
+| 2b | `src/index.ts` ListTools 過濾 + handler 雙層 enforce | `CC_READ_ONLY=1` ListTools 無寫入 tool；直呼被拒；`CC_TOOL_ALLOWLIST` 子集兩層生效（含 read）；telemetry 開關；原 tests 不回歸 | ✅ 8 tests |
 
 ### Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur prod URL）
 

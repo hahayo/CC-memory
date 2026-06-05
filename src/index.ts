@@ -38,6 +38,13 @@ import { setReminder, snoozeReminder } from './services/reminders.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
 import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
+import {
+  loadToolPolicy,
+  isWriteTool,
+  assertWritable,
+  assertAllowed,
+  type ToolPolicy,
+} from './services/tool-policy.js';
 import { BaseServiceError, NotFoundError, InvalidArgumentError } from './services/errors.js';
 import type { McpError, TaskStatus } from './services/types.js';
 
@@ -571,13 +578,33 @@ function relaxSelectorForForcedMode(toolList: Tool[]): Tool[] {
   });
 }
 
-/** 依 scope mode 產生 ListTools schema：project-mode 維持 selector 必填、forced-mode 放寬。 */
-export function buildToolsForMode(config: ScopeConfig): Tool[] {
-  return config.forcedProjectId === null ? BASE_TOOLS : relaxSelectorForForcedMode(BASE_TOOLS);
+// 啟動期載入 tool policy（read-only / allowlist / search telemetry 開關）。
+const defaultToolPolicy: ToolPolicy = loadToolPolicy();
+
+/**
+ * 依 scope mode + tool policy 產生 ListTools schema：
+ *   - project-mode 維持 selector 必填、forced-mode 放寬（scope 層）。
+ *   - read-only：去掉所有寫入類 tool。
+ *   - allowlist：只露集合內 tool（含 read 過濾）。
+ * 這是雙層 enforce 的第一層（ListTools 隱藏）；第二層在 handleToolCall central guard。
+ */
+export function buildToolsForMode(
+  config: ScopeConfig,
+  policy: ToolPolicy = defaultToolPolicy
+): Tool[] {
+  let list = config.forcedProjectId === null ? BASE_TOOLS : relaxSelectorForForcedMode(BASE_TOOLS);
+  if (policy.readOnly) {
+    list = list.filter((t) => !isWriteTool(t.name));
+  }
+  if (policy.allowlist !== null) {
+    const allow = policy.allowlist;
+    list = list.filter((t) => allow.has(t.name));
+  }
+  return list;
 }
 
-// 實際廣告的 tools 反映啟動 mode（defaultScopeConfig 讀 import 時的 env）。
-export const tools: Tool[] = buildToolsForMode(defaultScopeConfig);
+// 實際廣告的 tools 反映啟動 mode（defaultScopeConfig / defaultToolPolicy 讀 import 時的 env）。
+export const tools: Tool[] = buildToolsForMode(defaultScopeConfig, defaultToolPolicy);
 
 // ---------------------------------------------------------------------------
 // MCP server
@@ -598,9 +625,15 @@ export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
   database: typeof db = db,
-  config: ScopeConfig = defaultScopeConfig
+  config: ScopeConfig = defaultScopeConfig,
+  policy: ToolPolicy = defaultToolPolicy
 ): Promise<CallToolResult> {
   try {
+    // central dispatch 守衛（雙層 enforce 的第二層，所有 tool 進入點統一過）：
+    //   1. assertAllowed：allowlist 集合外（含 read）→ 拒（不靠 ListTools 過濾單獨足夠）。
+    //   2. assertWritable：read-only instance 的寫入 tool → 拒。
+    assertAllowed(name, policy);
+    assertWritable(name, policy);
     switch (name) {
       // ---------------- Memory ----------------
       case 'cc_memory_save': {
@@ -690,9 +723,12 @@ export async function handleToolCall(
 
         // Phase 5-A：fire-and-forget 寫 search_feedback。
         // 失敗 console.error，不影響 search 主流程（避免 unhandled promise rejection 打掛 MCP server）。
-        void recordSearchQuery(database, envelope).catch((e) => {
-          console.error('[recordSearchQuery failed]', e);
-        });
+        // Phase 2（Codex #9）：CC_SEARCH_FEEDBACK=off 的潔癖消費端可完全關掉此 telemetry 寫入。
+        if (policy.searchFeedback) {
+          void recordSearchQuery(database, envelope).catch((e) => {
+            console.error('[recordSearchQuery failed]', e);
+          });
+        }
 
         if (envelope.results.length === 0) {
           return { content: [{ type: 'text', text: '沒有找到相關記憶' }] };

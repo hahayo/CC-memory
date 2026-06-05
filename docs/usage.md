@@ -203,6 +203,14 @@ Claude 會：
 - **forced-mode instance**（啟動時設 `CC_FORCE_PROJECT_ID`，例如 `__personal__`）：此 instance 鎖定該單一 namespace，所有工具強制 scope、selector 變為可選（無 selector 即套用 forced project），並拒絕跨 project 存取。
 - `CC_FORCE_PROJECT_ID` 與 `CC_MEMORY_PROJECT_ID` **互斥**（同時設定會啟動失敗）。
 
+## Read-only / allowlist mode（Personal-Hub Phase 2）
+
+給只讀消費端（如 `/hi` 注入）一個不會誤寫的 instance。兩種獨立限制，皆**雙層 enforce**（ListTools 隱藏 + handler 拒絕）：
+
+- `CC_READ_ONLY=1`：寫入類 tool（`cc_memory_save` / `cc_memory_delete` / `cc_task_create` / `cc_task_update` / `cc_task_set_reminder` / `cc_task_snooze`）從 ListTools 消失，且直接呼叫也回 `FORBIDDEN`。讀取類 tool 不受影響。
+- `CC_TOOL_ALLOWLIST=cc_memory_search,cc_task_list`（逗號分隔）：只允許集合內 tool（**含 read**）；集合外的 tool 兩層皆拒。未設 = 不額外限制。
+- `CC_SEARCH_FEEDBACK`：預設 on；設 `off` / `0` / `false` 可關閉 `cc_memory_search` 的 `search_feedback` telemetry 寫入（給潔癖的只讀消費端完全關掉任何寫）。
+
 ## 記憶類型
 
 ### Session 記憶

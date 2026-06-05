@@ -328,7 +328,7 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 - [ ] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
 - [ ] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
 - [ ] B 電腦 clone 到不同路徑 → 自動解析到相同 `project_id`（repo_name 生效）
-- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids）
+- [ ] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（含 query / mode / result_ids）（`CC_SEARCH_FEEDBACK` 預設 on 時；設 off 則不寫，見 personal-hub Phase 2）
 
 ### ~~Phase B 驗收~~ ❌ 取消（以下歷史紀錄）
 

@@ -75,6 +75,9 @@ Task（6）：
 - `GEMINI_API_KEY` - 啟用語義搜尋 embedding（未設則自動降級 keyword-only）
 - `CC_MEMORY_PROJECT_ID` - resolveProjectId 的 fallback layer（server 不知道自己在哪時用）
 - `CC_FORCE_PROJECT_ID` - forced-mode：此 instance 鎖定單一 namespace（如 `__personal__`），所有工具強制 scope、拒絕跨 project；與 `CC_MEMORY_PROJECT_ID` 互斥（同設啟動 fail）
+- `CC_READ_ONLY` - read-only mode（Phase 2）：寫入類 tool 在 ListTools 隱藏 + handler 拒絕（雙層 enforce）。給 `/hi` 注入等只讀消費端
+- `CC_TOOL_ALLOWLIST` - 逗號分隔 tool 白名單（Phase 2）：只露/允許集合內 tool（含 read）；集合外兩層皆拒
+- `CC_SEARCH_FEEDBACK` - search telemetry 開關（Phase 2，預設 on）：`off`/`0`/`false` 關閉 `cc_memory_search` 的 `search_feedback` 寫入
 
 ## Key Design Patterns
 

@@ -211,6 +211,7 @@ export interface McpError {
     | 'NOT_FOUND'
     | 'AMBIGUOUS'
     | 'INVALID_ARGUMENT'
+    | 'FORBIDDEN'
     | 'INTERNAL';
   message: string;
   details?: Record<string, unknown>;

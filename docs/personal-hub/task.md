@@ -1,6 +1,6 @@
 # Personal-Hub Task Breakdown
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）pending implementation · Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）✅ 全 Gate 綠（tool-policy 雙層 enforce + telemetry 開關；24 unit + 8 mcp tests）· Phase 3（prod RLS）+ 跨 repo = roadmap。
 >
 > **Phase 命名**：本檔的 `Personal-Hub Phase 0/1/2/3` 是 **personal-hub initiative 的 phase**，與既有 `docs/task.md` 的 Phase A/B/C（v0.3/v0.4 memory+auto-capture）是**不同 track**，勿混。
 >
@@ -106,35 +106,36 @@
 
 ---
 
-# Personal-Hub Phase 2 — Read-only Mode（pending，離線可做）
+# Personal-Hub Phase 2 — Read-only Mode（✅ 已完成，離線可做）
 
 > read-only 必須**雙層** enforce（ListTools 過濾 + handler 拒絕）。telemetry 副作用（`search_feedback`）由 `CC_SEARCH_FEEDBACK` 控制。
 
-## 2a — Tool policy 核心
+## 2a — Tool policy 核心 ✅
 
-- [ ] `src/services/tool-policy.ts`：`isWriteTool(name)`（save/delete/task_create/task_update/set_reminder/snooze/refine… 列為寫入）
-- [ ] `loadToolPolicy(env)`：讀 `CC_READ_ONLY` / `CC_TOOL_ALLOWLIST` / `CC_SEARCH_FEEDBACK`
-- [ ] `assertWritable(toolName, policy)`：read-only 且為寫入 tool → throw（只管寫入）
-- [ ] `assertAllowed(toolName, policy)`：allowlist 非空且 tool 不在集合 → throw（**含 read tool**，與 write/read 無關）
-- [ ] TDD：`tests/services/tool-policy.test.ts`（write tool 判定 / read-only 旗標 / allowlist 子集含 read tool 被擋）
+- [x] `src/services/tool-policy.ts`：`isWriteTool(name)`（save/delete/task_create/task_update/set_reminder/snooze 列為寫入）
+- [x] `loadToolPolicy(env)`：讀 `CC_READ_ONLY` / `CC_TOOL_ALLOWLIST` / `CC_SEARCH_FEEDBACK`
+- [x] `assertWritable(toolName, policy)`：read-only 且為寫入 tool → throw ForbiddenError（只管寫入）
+- [x] `assertAllowed(toolName, policy)`：allowlist 非空且 tool 不在集合 → throw（**含 read tool**，與 write/read 無關）
+- [x] `ForbiddenError`（code `FORBIDDEN`）+ McpError union 同步
+- [x] TDD：`tests/services/tool-policy.test.ts`（24 tests：write tool 判定 / env 解析 / read-only 旗標 / allowlist 子集含 read tool 被擋）
 
-## 2b — MCP 雙層 enforce（central dispatch）
+## 2b — MCP 雙層 enforce（central dispatch）✅
 
-- [ ] `src/index.ts` ListTools：依 policy 過濾——read-only 去寫入 tool、allowlist 只露集合內 tool（含 read 過濾）
-- [ ] `src/index.ts` **central dispatch 守衛**（每個 tool call 進入點，不只寫入 handler）：先 `assertAllowed`，寫入再 `assertWritable`
-- [ ] `cc_memory_search` 的 `recordSearchQuery` 副作用受 `CC_SEARCH_FEEDBACK` 控制（off → 不寫 telemetry）
-- [ ] TDD：`tests/mcp/read-only.test.ts`
-  - [ ] `CC_READ_ONLY=1` → ListTools 無任何寫入 tool
-  - [ ] 直接呼叫被隱藏的 `cc_memory_save` → handler 拒絕
-  - [ ] `CC_TOOL_ALLOWLIST=cc_memory_search,cc_task_list` → 集合外兩層皆拒
-  - [ ] **allowlist 排除 read tool**（如 `cc_memory_get`）→ ListTools 不露 + 直呼經 `assertAllowed` 被拒
-  - [ ] `CC_SEARCH_FEEDBACK=off` → search 不寫 `search_feedback`
+- [x] `src/index.ts` `buildToolsForMode` 依 policy 過濾——read-only 去寫入 tool、allowlist 只露集合內 tool（含 read 過濾）
+- [x] `src/index.ts` **central dispatch 守衛**（handleToolCall try 開頭，switch 前所有 tool 都過）：先 `assertAllowed`，再 `assertWritable`
+- [x] `cc_memory_search` 的 `recordSearchQuery` 副作用受 `CC_SEARCH_FEEDBACK` 控制（off → 不寫 telemetry）
+- [x] TDD：`tests/mcp-read-only.test.ts`（8 tests）
+  - [x] `CC_READ_ONLY=1` → ListTools 無任何寫入 tool
+  - [x] 直接呼叫被隱藏的 `cc_memory_save` → handler 拒絕（FORBIDDEN）
+  - [x] `CC_TOOL_ALLOWLIST=cc_memory_search,cc_task_list` → 集合外兩層皆拒
+  - [x] **allowlist 排除 read tool**（如 `cc_memory_get`）→ ListTools 不露 + 直呼經 `assertAllowed` 被拒
+  - [x] `CC_SEARCH_FEEDBACK=off` → search 不寫 `search_feedback`
 
-## Phase 2 Gate
-- [ ] ListTools 過濾 + handler 拒絕雙層測試綠
-- [ ] allowlist 子集生效，且**排除的 read tool 直呼也被拒**（assertAllowed 涵蓋 read）
-- [ ] read-only telemetry 開關生效
-- [ ] 原 tests 不回歸
+## Phase 2 Gate ✅
+- [x] ListTools 過濾 + handler 拒絕雙層測試綠
+- [x] allowlist 子集生效，且**排除的 read tool 直呼也被拒**（assertAllowed 涵蓋 read）
+- [x] read-only telemetry 開關生效
+- [x] 原 tests 不回歸（430 pass，唯一 fail 為既有 sandbox 環境問題）
 
 ---
 
@@ -210,12 +211,12 @@
 - [x] snooze → 在 snooze 時點投一次；一次性 snooze 投後不再響
 - [x] task 設 `done` → 不再被撈出
 
-### Personal-Hub Phase 2（read-only，本期目標）
+### Personal-Hub Phase 2（read-only，✅ 本期已達成）
 
-- [ ] `CC_READ_ONLY=1` ListTools 無寫入 tool
-- [ ] 直呼 `cc_memory_save` → handler 拒
-- [ ] `CC_TOOL_ALLOWLIST` 子集兩層生效；排除的 read tool 直呼也被拒
-- [ ] `CC_SEARCH_FEEDBACK=off` → 不寫 telemetry
+- [x] `CC_READ_ONLY=1` ListTools 無寫入 tool
+- [x] 直呼 `cc_memory_save` → handler 拒（FORBIDDEN）
+- [x] `CC_TOOL_ALLOWLIST` 子集兩層生效；排除的 read tool 直呼也被拒
+- [x] `CC_SEARCH_FEEDBACK=off` → 不寫 telemetry
 
 ### Personal-Hub Phase 3（prod，roadmap）
 
