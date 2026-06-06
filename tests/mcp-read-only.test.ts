@@ -27,6 +27,7 @@ const WRITE_TOOLS = [
   'cc_task_update',
   'cc_task_set_reminder',
   'cc_task_snooze',
+  'cc_reminders_due',
 ];
 
 function names(tools: { name: string }[]): string[] {

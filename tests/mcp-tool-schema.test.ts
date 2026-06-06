@@ -27,6 +27,7 @@ const SCOPE_TOOLS = [
   'cc_task_list',
   'cc_task_update',
   'cc_task_stats',
+  'cc_reminders_due',
 ] as const;
 
 // 刻意 optional selector（全專案搜尋 feature）
