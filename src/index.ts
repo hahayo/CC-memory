@@ -34,7 +34,7 @@ import {
   getProjectStats,
 } from './services/memories.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
-import { setReminder, snoozeReminder } from './services/reminders.js';
+import { setReminder, snoozeReminder, getDueReminders } from './services/reminders.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
 import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
@@ -562,6 +562,24 @@ export const BASE_TOOLS: Tool[] = [
       required: ['id', 'snooze_until'],
     },
   },
+  {
+    name: 'cc_reminders_due',
+    description:
+      '撈出本 scope 到期的提醒並「認領」（寫 reminder_log 去重 + 依 slot 推進 recurrence / 一次性）。供 poller（如 hermes）定期呼叫後自行投遞；回傳結構化 JSON。認領在投遞前發生（at-most-once：撈到後即標記已投，poller 推送失敗不會重發）。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
+      properties: {
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+        channel: {
+          type: 'string',
+          description: '投遞管道名，寫入 reminder_log.channel（如 hermes / telegram；省略=unknown）',
+        },
+        limit: { type: 'number', description: '單次最多處理筆數（預設 50）' },
+      },
+    },
+  },
 ];
 
 // forced-mode（CC_FORCE_PROJECT_ID）：無 selector → 強制 forced project，因此 selector
@@ -964,6 +982,41 @@ export async function handleToolCall(
               text: `✓ 提醒已暫緩\n${formatTask(task)}\nsnooze_until: ${new Date(
                 task.snoozeUntil as Date
               ).toISOString()}`,
+            },
+          ],
+        };
+      }
+
+      case 'cc_reminders_due': {
+        // poller 入口（hermes）：撈+認領到期提醒。寫入類（見 WRITE_TOOLS）。
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const channel =
+          typeof args.channel === 'string' && args.channel.trim().length > 0
+            ? args.channel.trim()
+            : 'unknown';
+        const due = await getDueReminders(database, {
+          projectId,
+          channel,
+          limit: args.limit as number | undefined,
+        });
+        // 結構化 JSON（供 poller parse，不解析文字；對齊 cc_task_stats 設計）
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                project_id: projectId,
+                count: due.length,
+                reminders: due.map(({ task, slot }) => ({
+                  id: task.id,
+                  title: task.title,
+                  slot: slot.toISOString(),
+                  remind_at: task.remindAt ? new Date(task.remindAt).toISOString() : null,
+                  recurrence_interval_days: task.recurrenceIntervalDays,
+                  priority: task.priority,
+                  status: task.status,
+                })),
+              }),
             },
           ],
         };

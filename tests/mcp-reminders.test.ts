@@ -167,4 +167,37 @@ describe('MCP reminder tools (Phase 1c)', () => {
     );
     expect(errCode(res)).toBe('NOT_FOUND');
   });
+
+  // ---------- cc_reminders_due（poller 入口，供 hermes 撈+認領）----------
+
+  it('cc_reminders_due returns due reminders as structured JSON + claims (logs with channel)', async () => {
+    const id = await makeTask();
+    // 過去的 remind_at → 到期
+    await handleToolCall(
+      'cc_task_set_reminder',
+      { project_id: tp, id, remind_at: '2026-06-01T00:00:00Z' },
+      testDb
+    );
+    const res = await handleToolCall('cc_reminders_due', { project_id: tp, channel: 'hermes' }, testDb);
+    expect(res.isError).not.toBe(true);
+    const payload = JSON.parse((res.content[0] as { text: string }).text);
+    expect(payload.reminders.map((r: { id: string }) => r.id)).toContain(id);
+    // 認領副作用：reminder_log 寫一筆，channel = 傳入值
+    const log = await sql<{ channel: string }[]>`SELECT channel FROM reminder_log WHERE task_id = ${id}`;
+    expect(log.length).toBe(1);
+    expect(log[0].channel).toBe('hermes');
+  });
+
+  it('cc_reminders_due respects scope (other-project due task not returned)', async () => {
+    const idOther = await makeTask(other);
+    await handleToolCall(
+      'cc_task_set_reminder',
+      { project_id: other, id: idOther, remind_at: '2026-06-01T00:00:00Z' },
+      testDb
+    );
+    const res = await handleToolCall('cc_reminders_due', { project_id: tp }, testDb);
+    expect(res.isError).not.toBe(true);
+    const payload = JSON.parse((res.content[0] as { text: string }).text);
+    expect(payload.reminders.map((r: { id: string }) => r.id)).not.toContain(idOther);
+  });
 });

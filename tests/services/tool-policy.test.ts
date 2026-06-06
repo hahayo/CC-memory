@@ -26,6 +26,7 @@ describe('tool-policy: isWriteTool', () => {
     'cc_task_update',
     'cc_task_set_reminder',
     'cc_task_snooze',
+    'cc_reminders_due',
   ];
   const readTools = [
     'cc_memory_search',
