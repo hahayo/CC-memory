@@ -212,7 +212,57 @@ export interface McpError {
     | 'AMBIGUOUS'
     | 'INVALID_ARGUMENT'
     | 'FORBIDDEN'
+    | 'RATE_LIMIT'
     | 'INTERNAL';
   message: string;
   details?: Record<string, unknown>;
+}
+
+// ============================================================================
+// Todoist（個人 Todoist 帳號層級；不碰 cc-memory DB）
+// ============================================================================
+
+/** 工具層語意 priority（避免裸 number 的歧義，service 內映射成 API 整數）。 */
+export type TodoistPriority = 'p1' | 'p2' | 'p3' | 'p4';
+
+/** 正規化後的 Todoist task（從 snake_case raw 取常用欄位，回傳結構化 JSON 用）。 */
+export interface TodoistTask {
+  id: string;
+  content: string;
+  projectId: string | null;
+  /** API 原始整數 priority（1-4；4=urgent）。null = 未提供。 */
+  priority: number | null;
+  /** 正規化 due 字串（due.datetime ?? due.date ?? due.string），無則 null。 */
+  due: string | null;
+  /** completed endpoint 才有；判定「完成」以此為準（非單看 checked）。 */
+  completedAt: string | null;
+  url: string | null;
+}
+
+export interface TodoistProject {
+  id: string;
+  name: string;
+}
+
+export interface AddTodoistTaskInput {
+  content: string;
+  /** 優先用 project_id；省略 → Inbox（API 預設） */
+  projectId?: string | null;
+  /** 自然語言或日期字串，送 due_string 讓 Todoist 解析 */
+  due?: string | null;
+  priority?: TodoistPriority;
+}
+
+export interface ListTodoistTasksOptions {
+  projectId?: string;
+}
+
+export interface ListCompletedTasksOptions {
+  /** 預設 now-7d */
+  since?: Date;
+  /** 預設 now */
+  until?: Date;
+  projectId?: string;
+  /** 測試注入；預設 new Date()。用於決定預設 since/until 視窗 */
+  now?: Date;
 }

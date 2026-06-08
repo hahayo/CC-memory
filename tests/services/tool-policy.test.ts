@@ -27,6 +27,8 @@ describe('tool-policy: isWriteTool', () => {
     'cc_task_set_reminder',
     'cc_task_snooze',
     'cc_reminders_due',
+    'cc_todoist_add',
+    'cc_todoist_complete',
   ];
   const readTools = [
     'cc_memory_search',
@@ -35,6 +37,9 @@ describe('tool-policy: isWriteTool', () => {
     'cc_memory_stats',
     'cc_task_list',
     'cc_task_stats',
+    'cc_todoist_projects',
+    'cc_todoist_list',
+    'cc_todoist_completed',
   ];
 
   for (const t of writeTools) {

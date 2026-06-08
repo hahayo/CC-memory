@@ -114,7 +114,13 @@ describe('forced-mode ListTools schema：selector 非必填（採納 Codex P2）
 // regression guard——目前無 tool 在 top-level anyOf/allOf 夾帶非-selector 約束，
 // 故現實作安全；測試擋的是未來改動把其他 top-level 約束一起刪掉。
 describe('forced-mode relax：只剝 selector，不誤刪其他 top-level 約束（#6 regression guard）', () => {
-  const forcedTools = buildToolsForMode(loadScopeConfig({ CC_FORCE_PROJECT_ID: '__personal__' }));
+  // 啟用 todoist 讓 forced build 涵蓋全部 BASE_TOOLS（含 cc_todoist_*），與下方
+  // it.each(BASE_TOOLS) 迭代一致；否則 todoist 工具被 gating 濾掉、forcedByName.get 取不到。
+  const forcedTools = buildToolsForMode(
+    loadScopeConfig({ CC_FORCE_PROJECT_ID: '__personal__' }),
+    undefined,
+    { todoistEnabled: true }
+  );
   const baseByName = new Map(BASE_TOOLS.map((t) => [t.name, t]));
   const forcedByName = new Map(forcedTools.map((t) => [t.name, t]));
 
