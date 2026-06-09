@@ -186,8 +186,8 @@
 
 ## Todoist 整合（live REST 工具，Option E）
 - [x] cc-memory 內建薄 Todoist API v1 client（`src/services/todoist.ts`）+ 5 個 `cc_todoist_*` 工具（add/projects/list/complete/completed）
-- [x] gating：token∧forced-mode 雙條件曝光 + 雙層 enforce；write 分類（add/complete）；無 project selector
-- Gate（單元）：`npm test` 全綠（todoist client + mcp gating/handler）；無 token/非 forced=13 工具、token∧forced=18
+- [x] gating：token∧forced-personal（__personal__）雙條件曝光 + 雙層 enforce；write 分類（add/complete）；無 project selector
+- Gate（單元）：`npm test` 全綠（todoist client + mcp gating/handler）；無 token/非 forced=13 工具、token∧forced-personal=18
 - Gate（e2e）：真帳號一輪 `projects→add→list→complete→completed`（`RUN_TODOIST_E2E=1`）；priority p1↔API 整數比對
 - 註：雙系統並存、**無自動 sync**（追蹤完成 on-demand）；自動鏡像（webhook）為後續 phase
 

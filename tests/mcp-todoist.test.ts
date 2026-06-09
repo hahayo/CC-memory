@@ -16,6 +16,8 @@ import type { ToolPolicy } from '../src/services/tool-policy.js';
 const OPEN: ToolPolicy = { readOnly: false, allowlist: null, searchFeedback: true };
 const PROJECT_MODE: ScopeConfig = { forcedProjectId: null };
 const FORCED: ScopeConfig = { forcedProjectId: '__personal__' };
+// forced-mode 但鎖非個人 project（CC_FORCE_PROJECT_ID 可為任意 id）→ 不可曝露個人 Todoist。
+const FORCED_NON_PERSONAL: ScopeConfig = { forcedProjectId: 'some-project' };
 
 const TODOIST_NAMES = [
   'cc_todoist_add',
@@ -49,11 +51,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('resolveTodoistEnabled (real derivation — 雙條件)', () => {
-  it('token + forced → true', () => expect(resolveTodoistEnabled(FORCED, 'tok')).toBe(true));
+describe('resolveTodoistEnabled (real derivation — 雙條件：token ∧ forced-personal)', () => {
+  it('token + forced-personal → true', () => expect(resolveTodoistEnabled(FORCED, 'tok')).toBe(true));
   it('token + project-mode → false', () => expect(resolveTodoistEnabled(PROJECT_MODE, 'tok')).toBe(false));
-  it('no token + forced → false', () => expect(resolveTodoistEnabled(FORCED, undefined)).toBe(false));
-  it('blank token + forced → false', () => expect(resolveTodoistEnabled(FORCED, '   ')).toBe(false));
+  it('token + forced NON-personal → false（個人 Todoist 不漏進專案 forced 部署，Codex round-3 P2）', () =>
+    expect(resolveTodoistEnabled(FORCED_NON_PERSONAL, 'tok')).toBe(false));
+  it('no token + forced-personal → false', () => expect(resolveTodoistEnabled(FORCED, undefined)).toBe(false));
+  it('blank token + forced-personal → false', () => expect(resolveTodoistEnabled(FORCED, '   ')).toBe(false));
   it('no token + project-mode → false', () =>
     expect(resolveTodoistEnabled(PROJECT_MODE, undefined)).toBe(false));
 });
@@ -93,6 +97,13 @@ describe('handler gating（第二層 enforce）', () => {
   it('todoist 未啟用 → cc_todoist_projects 直呼 FORBIDDEN', async () => {
     const res = await handleToolCall('cc_todoist_projects', {}, NO_DB, FORCED, OPEN, {
       todoistEnabled: false,
+    });
+    expect(errCode(res)).toBe('FORBIDDEN');
+  });
+
+  it('forced NON-personal + token → cc_todoist_projects 直呼 FORBIDDEN（namespace 邊界）', async () => {
+    const res = await handleToolCall('cc_todoist_projects', {}, NO_DB, FORCED_NON_PERSONAL, OPEN, {
+      todoistToken: 'tok',
     });
     expect(errCode(res)).toBe('FORBIDDEN');
   });

@@ -41,7 +41,12 @@ import { setReminder, snoozeReminder, getDueReminders } from './services/reminde
 import * as todoist from './services/todoist.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
-import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
+import {
+  loadScopeConfig,
+  applyScopePolicy,
+  PERSONAL_PROJECT_ID,
+  type ScopeConfig,
+} from './services/scope-policy.js';
 import {
   loadToolPolicy,
   isWriteTool,
@@ -714,15 +719,22 @@ const defaultToolPolicy: ToolPolicy = loadToolPolicy();
 /**
  * Todoist 工具曝光/允許的雙條件（比單看 token 嚴）：
  *   1. todoistApiToken 已設（非空）
- *   2. forced-mode（forcedProjectId !== null，即個人 hub instance）
- * 避免一般 project instance 意外繼承 TODOIST_API_TOKEN 就讓個人 Todoist 漏進專案 context
- * （與 __personal__ reserved namespace 同精神）。token 可注入以利測試。
+ *   2. forced-mode **且鎖定個人 namespace**（forcedProjectId === __personal__）
+ * 注意：CC_FORCE_PROJECT_ID 可鎖任意 project id，不必然是 __personal__。若只看
+ * `forcedProjectId !== null`，一個鎖非個人 project 的 forced 部署只要繼承了
+ * TODOIST_API_TOKEN，就會曝露 + 可寫個人 Todoist 帳號 → 破個人邊界（採納 Codex
+ * round-3 P2）。故嚴格綁 PERSONAL_PROJECT_ID（與 __personal__ reserved namespace 同精神）。
+ * token 可注入以利測試。
  */
 export function resolveTodoistEnabled(
   config: ScopeConfig,
   token: string | undefined = appConfig.todoistApiToken
 ): boolean {
-  return config.forcedProjectId !== null && typeof token === 'string' && token.trim().length > 0;
+  return (
+    config.forcedProjectId === PERSONAL_PROJECT_ID &&
+    typeof token === 'string' &&
+    token.trim().length > 0
+  );
 }
 
 /**

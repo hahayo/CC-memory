@@ -505,7 +505,7 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 | **hermes 整合** | hermes 用 personal forced-mode client | hermes 起 cc-memory MCP（`CC_FORCE_PROJECT_ID=__personal__`） | hermes 能讀寫 `__personal__`、讀不到專案 | hermes 的 MCP client 接法 |
 | **/hi 整合** | `/hi` 注入個人近況/待辦 | read-only instance（Phase 2）+ `cc_task_stats` | `/hi` 能注入但絕不誤寫 | 注入格式/篇幅 |
 | **reminder channel** | due 提醒推實際 channel | poller 呼 `getDueReminders({channel})` → 推送 | 端到端：設提醒 → 到點收到 | 用哪個 channel（Telegram/hermes push）；poller 跑在哪 |
-| **Todoist 整合（live REST，Option E）** | agent 群新增 Todoist 待辦 + 追蹤完成 | cc-memory 內建薄 client → `cc_todoist_*`（add/projects/list/complete/completed），token∧forced gated、無 project selector | 真帳號一輪 `projects→add→list→complete→completed`；priority p1↔API 整數比對（`RUN_TODOIST_E2E=1`） | 自動鏡像（Option C webhook reconciliation）留待後續 sync phase；本階段**無自動 sync** |
+| **Todoist 整合（live REST，Option E）** | agent 群新增 Todoist 待辦 + 追蹤完成 | cc-memory 內建薄 client → `cc_todoist_*`（add/projects/list/complete/completed），token∧forced-personal（__personal__）gated、無 project selector | 真帳號一輪 `projects→add→list→complete→completed`；priority p1↔API 整數比對（`RUN_TODOIST_E2E=1`） | 自動鏡像（Option C webhook reconciliation）留待後續 sync phase；本階段**無自動 sync** |
 
 ---
 
