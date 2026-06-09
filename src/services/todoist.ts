@@ -22,6 +22,7 @@ import {
 import type {
   AddTodoistTaskInput,
   ListCompletedTasksOptions,
+  ListCursorOptions,
   ListTodoistTasksOptions,
   TodoistPriority,
   TodoistProject,
@@ -160,10 +161,13 @@ async function throwForStatus(res: Response): Promise<never> {
 async function fetchAllPages(
   token: string,
   path: string,
-  query: Record<string, string | undefined>
+  query: Record<string, string | undefined>,
+  initialCursor?: string
 ): Promise<{ items: unknown[]; nextCursor: string | null }> {
   const all: unknown[] = [];
-  let cursor: string | undefined;
+  // caller 傳 cursor → 從該頁續抓（resume 被 FETCH_ALL_CAP 截斷的部分）；省略=從頭。
+  let cursor: string | undefined =
+    typeof initialCursor === 'string' && initialCursor.trim().length > 0 ? initialCursor : undefined;
   let nextCursor: string | null = null;
 
   while (all.length < FETCH_ALL_CAP) {
@@ -237,9 +241,10 @@ export async function addTask(token: string, input: AddTodoistTaskInput): Promis
 }
 
 export async function listProjects(
-  token: string
+  token: string,
+  opts: ListCursorOptions = {}
 ): Promise<{ projects: TodoistProject[]; nextCursor: string | null }> {
-  const { items, nextCursor } = await fetchAllPages(token, '/projects', {});
+  const { items, nextCursor } = await fetchAllPages(token, '/projects', {}, opts.cursor);
   return { projects: items.map(normalizeProject), nextCursor };
 }
 
@@ -249,7 +254,7 @@ export async function listTasks(
 ): Promise<{ tasks: TodoistTask[]; nextCursor: string | null }> {
   const query: Record<string, string | undefined> = {};
   if (opts.projectId) query.project_id = opts.projectId;
-  const { items, nextCursor } = await fetchAllPages(token, '/tasks', query);
+  const { items, nextCursor } = await fetchAllPages(token, '/tasks', query, opts.cursor);
   return { tasks: items.map(normalizeTask), nextCursor };
 }
 
@@ -295,7 +300,8 @@ export async function listCompletedTasks(
   const { items, nextCursor } = await fetchAllPages(
     token,
     '/tasks/completed/by_completion_date',
-    query
+    query,
+    opts.cursor
   );
   return { tasks: items.map(normalizeTask), nextCursor };
 }

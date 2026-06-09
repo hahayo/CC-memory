@@ -253,11 +253,17 @@ export interface AddTodoistTaskInput {
   priority?: TodoistPriority;
 }
 
-export interface ListTodoistTasksOptions {
+/** 唯讀清單工具共用：resume cursor（超過 FETCH_ALL_CAP 時用回傳的 next_cursor 續抓）。 */
+export interface ListCursorOptions {
+  /** 起始 cursor；省略=從頭。用於 caller 用上一輪的 next_cursor 續抓被 cap 截斷的部分。 */
+  cursor?: string;
+}
+
+export interface ListTodoistTasksOptions extends ListCursorOptions {
   projectId?: string;
 }
 
-export interface ListCompletedTasksOptions {
+export interface ListCompletedTasksOptions extends ListCursorOptions {
   /** 預設 now-7d */
   since?: Date;
   /** 預設 now */

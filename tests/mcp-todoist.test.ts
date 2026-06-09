@@ -208,6 +208,32 @@ describe('handler success paths（mock fetch）', () => {
     expect((out.tasks as { completed_at: string }[])[0].completed_at).toBe('2026-06-07T10:00:00Z');
   });
 
+  it('cc_todoist_list 把 cursor 參數穿到 Todoist 請求（resume 大結果集）', async () => {
+    const fn = vi.fn(async () => jsonResponse({ results: [], next_cursor: null }));
+    vi.stubGlobal('fetch', fn);
+    const res = await handleToolCall('cc_todoist_list', { cursor: 'page2' }, NO_DB, FORCED, OPEN, {
+      todoistEnabled: true,
+      todoistToken: 'tok',
+    });
+    expect(res.isError).not.toBe(true);
+    expect(String(fn.mock.calls[0][0])).toContain('cursor=page2');
+  });
+
+  it('cc_todoist_completed 把 cursor 參數穿到 Todoist 請求', async () => {
+    const fn = vi.fn(async () => jsonResponse({ results: [], next_cursor: null }));
+    vi.stubGlobal('fetch', fn);
+    const res = await handleToolCall(
+      'cc_todoist_completed',
+      { cursor: 'cpage2' },
+      NO_DB,
+      FORCED,
+      OPEN,
+      { todoistEnabled: true, todoistToken: 'tok' }
+    );
+    expect(res.isError).not.toBe(true);
+    expect(String(fn.mock.calls[0][0])).toContain('cursor=cpage2');
+  });
+
   it('429 rate limit 經 handler → RATE_LIMIT 錯誤', async () => {
     vi.stubGlobal(
       'fetch',

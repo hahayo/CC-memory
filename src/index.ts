@@ -638,8 +638,16 @@ export const BASE_TOOLS: Tool[] = [
   {
     name: 'cc_todoist_projects',
     description:
-      'List Todoist 清單（name + id）。供 AI 依內容判斷分類後把 id 傳給 cc_todoist_add 去歧義。回傳結構化 JSON。',
-    inputSchema: { type: 'object', properties: {} },
+      'List Todoist 清單（name + id）。供 AI 依內容判斷分類後把 id 傳給 cc_todoist_add 去歧義。fetch-all 分頁、回 next_cursor。回傳結構化 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
+      },
+    },
   },
   {
     name: 'cc_todoist_list',
@@ -649,6 +657,10 @@ export const BASE_TOOLS: Tool[] = [
       type: 'object',
       properties: {
         project_id: { type: 'string', description: '只列此清單（省略=全部）' },
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
       },
     },
   },
@@ -673,6 +685,10 @@ export const BASE_TOOLS: Tool[] = [
         since: { type: 'string', description: '起（ISO 8601，含）；省略=now-7d' },
         until: { type: 'string', description: '迄（ISO 8601，不含）；省略=now' },
         project_id: { type: 'string', description: '只查此清單' },
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
       },
     },
   },
@@ -1195,7 +1211,11 @@ export async function handleToolCall(
 
       case 'cc_todoist_projects': {
         const token = requireTodoistToken();
-        const { projects, nextCursor } = await todoist.listProjects(token);
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
+        const { projects, nextCursor } = await todoist.listProjects(token, { cursor });
         return jsonResult({
           count: projects.length,
           projects: projects.map((p) => ({ id: p.id, name: p.name })),
@@ -1209,7 +1229,11 @@ export async function handleToolCall(
           typeof args.project_id === 'string' && args.project_id.trim().length > 0
             ? args.project_id.trim()
             : undefined;
-        const { tasks, nextCursor } = await todoist.listTasks(token, { projectId });
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
+        const { tasks, nextCursor } = await todoist.listTasks(token, { projectId, cursor });
         return jsonResult({
           count: tasks.length,
           tasks: tasks.map(todoistTaskJson),
@@ -1232,10 +1256,15 @@ export async function handleToolCall(
           typeof args.project_id === 'string' && args.project_id.trim().length > 0
             ? args.project_id.trim()
             : undefined;
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
         const { tasks, nextCursor } = await todoist.listCompletedTasks(token, {
           since,
           until,
           projectId,
+          cursor,
         });
         return jsonResult({
           count: tasks.length,

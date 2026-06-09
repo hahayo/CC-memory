@@ -181,6 +181,18 @@ describe('todoist client: pagination (fetch-all)', () => {
     const { tasks } = await listTasks(TOKEN, {});
     expect(tasks).toEqual([]);
   });
+
+  it('listTasks resumes from a caller-supplied cursor (first request carries it)', async () => {
+    const fn = queueFetch([json(200, { results: [{ id: 't9', content: 'x' }], next_cursor: null })]);
+    await listTasks(TOKEN, { cursor: 'resume-me' });
+    expect(lastCall(fn).url).toContain('cursor=resume-me');
+  });
+
+  it('listProjects resumes from a caller-supplied cursor', async () => {
+    const fn = queueFetch([json(200, { results: [{ id: 'p1', name: 'W' }], next_cursor: null })]);
+    await listProjects(TOKEN, { cursor: 'pc' });
+    expect(lastCall(fn).url).toContain('cursor=pc');
+  });
 });
 
 describe('todoist client: completed window', () => {
