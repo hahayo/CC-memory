@@ -212,6 +212,18 @@ describe('todoist client: completed window', () => {
     expect(tasks[0]).toMatchObject({ id: 'c1', completedAt: '2026-06-07T10:00:00Z' });
   });
 
+  it('falls back to task_id when completed record lacks id (Codex round-2 P2)', async () => {
+    // 部分 Todoist completed 形狀用 task_id 指回原任務，無 id → 不可回 id:""（否則完成追蹤/ e2e 失準）。
+    queueFetch([
+      json(200, {
+        results: [{ task_id: 'orig-7', content: 'done', completed_at: '2026-06-07T10:00:00Z' }],
+        next_cursor: null,
+      }),
+    ]);
+    const { tasks } = await listCompletedTasks(TOKEN, { now: new Date('2026-06-08T00:00:00Z') });
+    expect(tasks[0].id).toBe('orig-7');
+  });
+
   it('rejects a range wider than 3 months', async () => {
     const since = new Date('2026-01-01T00:00:00Z');
     const until = new Date('2026-06-01T00:00:00Z'); // ~5 months

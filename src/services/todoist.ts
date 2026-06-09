@@ -199,7 +199,9 @@ function normalizeTask(raw: unknown): TodoistTask {
     ? (due.datetime ?? due.date ?? due.string ?? null)
     : ((r.due_date as string) ?? null);
   return {
-    id: String(r.id ?? ''),
+    // completed 形狀（by_completion_date）部分用 task_id 指回原任務、無 id → 回退 task_id，
+    // 否則完成追蹤/e2e 依 id 比對會落空（採納 Codex round-2 P2）。用 || 同時擋 absent 與 ""。
+    id: String(r.id || r.task_id || ''),
     content: (r.content as string) ?? '',
     projectId: (r.project_id as string) ?? (r.projectId as string) ?? null,
     priority: typeof r.priority === 'number' ? r.priority : null,
