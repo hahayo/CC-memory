@@ -12,6 +12,9 @@ export const config = {
   geminiApiKey: process.env.GEMINI_API_KEY,
   embeddingModel: process.env.EMBEDDING_MODEL || 'gemini-embedding-001',
   embeddingDimensions: parseInt(process.env.EMBEDDING_DIMENSIONS || '1536', 10),
+
+  // Todoist（optional - 啟用 cc_todoist_* 工具；同 geminiApiKey 模式）
+  todoistApiToken: process.env.TODOIST_API_TOKEN,
 };
 
 // 只在非測試環境下檢查 DATABASE_URL

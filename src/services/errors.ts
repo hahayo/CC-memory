@@ -71,6 +71,27 @@ export class AmbiguousShortIdError extends BaseServiceError {
 }
 
 /**
+ * 外部 API rate limit（Todoist 429）。details.retry_after = 秒數（可能 null）。
+ * 與 INTERNAL 區隔，讓 poller / agent 能識別「稍後重試」而非真錯誤。
+ */
+export class RateLimitError extends BaseServiceError {
+  readonly code = 'RATE_LIMIT';
+}
+
+/**
+ * Todoist API 非 2xx（429 以外）/ 逾時 / 傳輸層錯誤的統一包裝。
+ * code 依 HTTP status 映射到 McpError 既有碼（400→INVALID_ARGUMENT、401/403→FORBIDDEN、
+ * 404→NOT_FOUND、其餘→INTERNAL），details 帶 error_tag / http_code 供除錯。
+ */
+export class TodoistApiError extends BaseServiceError {
+  readonly code: string;
+  constructor(code: string, message: string, details?: Record<string, unknown>) {
+    super(message, details);
+    this.code = code;
+  }
+}
+
+/**
  * postgres-js unique violation 偵測。drizzle-orm 對 postgres-js driver 不包裝錯誤，
  * 原生 PostgresError 有 `.code` (sqlstate) + `.constraint_name`。
  * @param err - 抓到的錯誤

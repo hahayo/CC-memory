@@ -23,6 +23,9 @@ import {
 import { isAbsolute } from 'node:path';
 import { statSync } from 'node:fs';
 import { db } from './db/client.js';
+// alias 避免遮蔽 handleToolCall / buildToolsForMode 的 `config: ScopeConfig` 參數
+// （否則 config.todoistApiToken 取到 ScopeConfig 上不存在的欄位 → Todoist 永遠不啟用）。
+import { config as appConfig } from './config.js';
 import type { Memory, Task } from './db/schema.js';
 
 import {
@@ -35,9 +38,15 @@ import {
 } from './services/memories.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
 import { setReminder, snoozeReminder, getDueReminders } from './services/reminders.js';
+import * as todoist from './services/todoist.js';
 import { recordSearchQuery } from './services/feedback.js';
 import { resolveProjectId } from './services/projects.js';
-import { loadScopeConfig, applyScopePolicy, type ScopeConfig } from './services/scope-policy.js';
+import {
+  loadScopeConfig,
+  applyScopePolicy,
+  PERSONAL_PROJECT_ID,
+  type ScopeConfig,
+} from './services/scope-policy.js';
 import {
   loadToolPolicy,
   isWriteTool,
@@ -45,8 +54,13 @@ import {
   assertAllowed,
   type ToolPolicy,
 } from './services/tool-policy.js';
-import { BaseServiceError, NotFoundError, InvalidArgumentError } from './services/errors.js';
-import type { McpError, TaskStatus } from './services/types.js';
+import {
+  BaseServiceError,
+  NotFoundError,
+  InvalidArgumentError,
+  ForbiddenError,
+} from './services/errors.js';
+import type { McpError, TaskStatus, TodoistPriority, TodoistTask } from './services/types.js';
 
 // ---------------------------------------------------------------------------
 // 輔助：cwd / projectId 解析（所有 tool 用同一組 dispatch）
@@ -217,6 +231,24 @@ function errorResponse(err: unknown): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify({ error: mcpError }) }],
     isError: true,
+  };
+}
+
+/** 結構化 JSON 成功回傳（Todoist 工具用；對齊 cc_task_stats / cc_reminders_due）。 */
+function jsonResult(obj: unknown): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(obj) }] };
+}
+
+/** TodoistTask → wire JSON（snake_case 對外，含 completed_at 供完成追蹤）。 */
+function todoistTaskJson(t: TodoistTask): Record<string, unknown> {
+  return {
+    id: t.id,
+    content: t.content,
+    project_id: t.projectId,
+    priority: t.priority,
+    due: t.due,
+    completed_at: t.completedAt,
+    url: t.url,
   };
 }
 
@@ -580,6 +612,91 @@ export const BASE_TOOLS: Tool[] = [
       },
     },
   },
+  // ---------- Todoist tools（個人 Todoist 帳號層級；無 project selector，刻意） ----------
+  // 曝光條件：todoistApiToken 已設 且 forced-mode（個人 hub instance）。雙層 enforce。
+  {
+    name: 'cc_todoist_add',
+    description:
+      '新增一筆 Todoist 待辦。優先用 project_id 指定清單（先用 cc_todoist_projects 取 id）；project_name 僅 fallback，多重同名不猜會入 Inbox；都沒給/找不到→Inbox（不自動建清單）。priority 用語意值 p1(最緊急)..p4。回傳結構化 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: '待辦內容（必填）' },
+        project_id: { type: 'string', description: 'Todoist 清單 ID（優先，去歧義用）' },
+        project_name: {
+          type: 'string',
+          description: '清單名稱（fallback；多重同名不猜、會入 Inbox）',
+        },
+        due: {
+          type: 'string',
+          description: '到期：自然語言或日期（如 "tomorrow at 12:00"、"2026-06-30"）',
+        },
+        priority: {
+          type: 'string',
+          enum: ['p1', 'p2', 'p3', 'p4'],
+          description: 'p1=最緊急 .. p4=最低（對應 Todoist app 的 P1..P4）',
+        },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'cc_todoist_projects',
+    description:
+      'List Todoist 清單（name + id）。供 AI 依內容判斷分類後把 id 傳給 cc_todoist_add 去歧義。fetch-all 分頁、回 next_cursor。回傳結構化 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
+      },
+    },
+  },
+  {
+    name: 'cc_todoist_list',
+    description:
+      '列出未完成的 Todoist 待辦（可選 project_id 過濾）。fetch-all 分頁、回 next_cursor。回傳結構化 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: '只列此清單（省略=全部）' },
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
+      },
+    },
+  },
+  {
+    name: 'cc_todoist_complete',
+    description: '把指定 Todoist 待辦標記完成（close）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Todoist task ID（必填）' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'cc_todoist_completed',
+    description:
+      '查詢已完成的 Todoist 待辦（以 completed_at 為準）。預設近 7 天、範圍≤3 個月。可選 since/until(ISO 8601)/project_id。回傳結構化 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: { type: 'string', description: '起（ISO 8601，含）；省略=now-7d' },
+        until: { type: 'string', description: '迄（ISO 8601，不含）；省略=now' },
+        project_id: { type: 'string', description: '只查此清單' },
+        cursor: {
+          type: 'string',
+          description: '續抓游標：上一輪回傳的 next_cursor（結果超過上限被截斷時用）',
+        },
+      },
+    },
+  },
 ];
 
 // forced-mode（CC_FORCE_PROJECT_ID）：無 selector → 強制 forced project，因此 selector
@@ -600,17 +717,45 @@ function relaxSelectorForForcedMode(toolList: Tool[]): Tool[] {
 const defaultToolPolicy: ToolPolicy = loadToolPolicy();
 
 /**
+ * Todoist 工具曝光/允許的雙條件（比單看 token 嚴）：
+ *   1. todoistApiToken 已設（非空）
+ *   2. forced-mode **且鎖定個人 namespace**（forcedProjectId === __personal__）
+ * 注意：CC_FORCE_PROJECT_ID 可鎖任意 project id，不必然是 __personal__。若只看
+ * `forcedProjectId !== null`，一個鎖非個人 project 的 forced 部署只要繼承了
+ * TODOIST_API_TOKEN，就會曝露 + 可寫個人 Todoist 帳號 → 破個人邊界（採納 Codex
+ * round-3 P2）。故嚴格綁 PERSONAL_PROJECT_ID（與 __personal__ reserved namespace 同精神）。
+ * token 可注入以利測試。
+ */
+export function resolveTodoistEnabled(
+  config: ScopeConfig,
+  token: string | undefined = appConfig.todoistApiToken
+): boolean {
+  return (
+    config.forcedProjectId === PERSONAL_PROJECT_ID &&
+    typeof token === 'string' &&
+    token.trim().length > 0
+  );
+}
+
+/**
  * 依 scope mode + tool policy 產生 ListTools schema：
  *   - project-mode 維持 selector 必填、forced-mode 放寬（scope 層）。
- *   - read-only：去掉所有寫入類 tool。
+ *   - todoist 未啟用（token ∧ forced 任一不成立）：濾掉所有 cc_todoist_*。
+ *   - read-only：去掉所有寫入類 tool（含 2 個 todoist write）。
  *   - allowlist：只露集合內 tool（含 read 過濾）。
  * 這是雙層 enforce 的第一層（ListTools 隱藏）；第二層在 handleToolCall central guard。
+ * `opts.todoistEnabled` 可注入（預設由 config + token 推導）以利測試「有/無 token」。
  */
 export function buildToolsForMode(
   config: ScopeConfig,
-  policy: ToolPolicy = defaultToolPolicy
+  policy: ToolPolicy = defaultToolPolicy,
+  opts: { todoistEnabled?: boolean } = {}
 ): Tool[] {
+  const todoistEnabled = opts.todoistEnabled ?? resolveTodoistEnabled(config);
   let list = config.forcedProjectId === null ? BASE_TOOLS : relaxSelectorForForcedMode(BASE_TOOLS);
+  if (!todoistEnabled) {
+    list = list.filter((t) => !t.name.startsWith('cc_todoist_'));
+  }
   if (policy.readOnly) {
     list = list.filter((t) => !isWriteTool(t.name));
   }
@@ -644,7 +789,8 @@ export async function handleToolCall(
   args: Record<string, unknown>,
   database: typeof db = db,
   config: ScopeConfig = defaultScopeConfig,
-  policy: ToolPolicy = defaultToolPolicy
+  policy: ToolPolicy = defaultToolPolicy,
+  opts: { todoistEnabled?: boolean; todoistToken?: string } = {}
 ): Promise<CallToolResult> {
   try {
     // central dispatch 守衛（雙層 enforce 的第二層，所有 tool 進入點統一過）：
@@ -652,6 +798,20 @@ export async function handleToolCall(
     //   2. assertWritable：read-only instance 的寫入 tool → 拒。
     assertAllowed(name, policy);
     assertWritable(name, policy);
+
+    // Todoist gate（第二層 enforce；token/config 可注入以利測試）：
+    // 未啟用（token ∧ forced 任一不成立）→ 呼叫 todoist 工具一律 FORBIDDEN。
+    const todoistToken = opts.todoistToken ?? appConfig.todoistApiToken;
+    const todoistEnabled = opts.todoistEnabled ?? resolveTodoistEnabled(config, todoistToken);
+    const requireTodoistToken = (): string => {
+      if (!todoistEnabled || typeof todoistToken !== 'string' || todoistToken.trim().length === 0) {
+        throw new ForbiddenError(
+          'Todoist 工具未啟用（需設 TODOIST_API_TOKEN 且為 forced-mode 個人 hub instance）',
+          { tool: name }
+        );
+      }
+      return todoistToken;
+    };
     switch (name) {
       // ---------------- Memory ----------------
       case 'cc_memory_save': {
@@ -1020,6 +1180,109 @@ export async function handleToolCall(
             },
           ],
         };
+      }
+
+      // ---------------- Todoist（個人帳號層級；無 project selector；token∧forced gated） ----------------
+      case 'cc_todoist_add': {
+        const token = requireTodoistToken();
+        const content = args.content as string;
+        let projectId =
+          typeof args.project_id === 'string' && args.project_id.trim().length > 0
+            ? args.project_id.trim()
+            : undefined;
+        // resolution 紀錄解析路徑，回傳給 agent 自我修正（id / name / inbox-*）。
+        let resolution: 'id' | 'name' | 'inbox' | 'inbox-ambiguous' | 'inbox-not-found' = projectId
+          ? 'id'
+          : 'inbox';
+        // project_name 只是 fallback：精確（trim+小寫）比對；單一命中才用，多重/零命中不猜 → Inbox。
+        if (
+          !projectId &&
+          typeof args.project_name === 'string' &&
+          args.project_name.trim().length > 0
+        ) {
+          const wanted = args.project_name.trim().toLowerCase();
+          const { projects } = await todoist.listProjects(token);
+          const matches = projects.filter((p) => p.name.trim().toLowerCase() === wanted);
+          if (matches.length === 1) {
+            projectId = matches[0].id;
+            resolution = 'name';
+          } else if (matches.length > 1) {
+            resolution = 'inbox-ambiguous';
+          } else {
+            resolution = 'inbox-not-found';
+          }
+        }
+        const task = await todoist.addTask(token, {
+          content,
+          projectId,
+          due: typeof args.due === 'string' ? args.due : undefined,
+          priority: args.priority as TodoistPriority | undefined,
+        });
+        return jsonResult({ ...todoistTaskJson(task), project_resolution: resolution });
+      }
+
+      case 'cc_todoist_projects': {
+        const token = requireTodoistToken();
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
+        const { projects, nextCursor } = await todoist.listProjects(token, { cursor });
+        return jsonResult({
+          count: projects.length,
+          projects: projects.map((p) => ({ id: p.id, name: p.name })),
+          next_cursor: nextCursor,
+        });
+      }
+
+      case 'cc_todoist_list': {
+        const token = requireTodoistToken();
+        const projectId =
+          typeof args.project_id === 'string' && args.project_id.trim().length > 0
+            ? args.project_id.trim()
+            : undefined;
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
+        const { tasks, nextCursor } = await todoist.listTasks(token, { projectId, cursor });
+        return jsonResult({
+          count: tasks.length,
+          tasks: tasks.map(todoistTaskJson),
+          next_cursor: nextCursor,
+        });
+      }
+
+      case 'cc_todoist_complete': {
+        const token = requireTodoistToken();
+        const taskId = args.task_id as string;
+        await todoist.completeTask(token, taskId);
+        return jsonResult({ ok: true, task_id: taskId });
+      }
+
+      case 'cc_todoist_completed': {
+        const token = requireTodoistToken();
+        const since = args.since !== undefined ? parseRequiredTimestamp(args.since, 'since') : undefined;
+        const until = args.until !== undefined ? parseRequiredTimestamp(args.until, 'until') : undefined;
+        const projectId =
+          typeof args.project_id === 'string' && args.project_id.trim().length > 0
+            ? args.project_id.trim()
+            : undefined;
+        const cursor =
+          typeof args.cursor === 'string' && args.cursor.trim().length > 0
+            ? args.cursor.trim()
+            : undefined;
+        const { tasks, nextCursor } = await todoist.listCompletedTasks(token, {
+          since,
+          until,
+          projectId,
+          cursor,
+        });
+        return jsonResult({
+          count: tasks.length,
+          tasks: tasks.map(todoistTaskJson),
+          next_cursor: nextCursor,
+        });
       }
 
       default:

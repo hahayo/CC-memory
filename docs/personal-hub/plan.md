@@ -505,7 +505,7 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 | **hermes 整合** | hermes 用 personal forced-mode client | hermes 起 cc-memory MCP（`CC_FORCE_PROJECT_ID=__personal__`） | hermes 能讀寫 `__personal__`、讀不到專案 | hermes 的 MCP client 接法 |
 | **/hi 整合** | `/hi` 注入個人近況/待辦 | read-only instance（Phase 2）+ `cc_task_stats` | `/hi` 能注入但絕不誤寫 | 注入格式/篇幅 |
 | **reminder channel** | due 提醒推實際 channel | poller 呼 `getDueReminders({channel})` → 推送 | 端到端：設提醒 → 到點收到 | 用哪個 channel（Telegram/hermes push）；poller 跑在哪 |
-| **Todoist 匯入** | 既有 Todoist 待辦匯入 `__personal__` | 匯入腳本讀匯出檔 → `createTask` | 匯入後 `cc_task_list` 可見、不重複 | **blocking**：需 Todoist 匯出格式樣本 |
+| **Todoist 整合（live REST，Option E）** | agent 群新增 Todoist 待辦 + 追蹤完成 | cc-memory 內建薄 client → `cc_todoist_*`（add/projects/list/complete/completed），token∧forced-personal（__personal__）gated、無 project selector | 真帳號一輪 `projects→add→list→complete→completed`；priority p1↔API 整數比對（`RUN_TODOIST_E2E=1`） | 自動鏡像（Option C webhook reconciliation）留待後續 sync phase；本階段**無自動 sync** |
 
 ---
 
@@ -531,7 +531,7 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 1. ~~reminder MCP 介面：新 tool（`cc_task_set_reminder`）vs 擴 `cc_task_update` patch 欄位~~ → ✅ 已決：採新 tool `cc_task_set_reminder` / `cc_task_snooze`（`cc_task_update` 強制 `expected_status`，語意不合「設提醒」；保既有契約不動）。
 2. reminder poller 跑在哪（cron / hermes 常駐 / `/hi` 觸發）→ 跨 repo 階段決。
 3. reminder channel 選型（Telegram / hermes push / 系統通知）→ 跨 repo 階段決。
-4. Todoist 匯出格式 → **blocking**，需使用者提供樣本。
+4. ~~Todoist 匯出格式 → **blocking**，需使用者提供樣本~~ → ✅ 已決：改 **Option E**（cc-memory 內建薄 client、`cc_todoist_*` 直打 Todoist API v1），雙系統並存、無自動 sync；不再需要匯出樣本、不再 blocking。
 5. read-only telemetry：`CC_SEARCH_FEEDBACK` 預設 on/off → 暫定 on（評估需要），可調。
 6. Phase 3 RLS 對既有 single-connection 部署的影響 → preflight 驗證。
 

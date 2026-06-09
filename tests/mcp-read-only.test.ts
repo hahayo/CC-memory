@@ -28,6 +28,8 @@ const WRITE_TOOLS = [
   'cc_task_set_reminder',
   'cc_task_snooze',
   'cc_reminders_due',
+  'cc_todoist_add',
+  'cc_todoist_complete',
 ];
 
 function names(tools: { name: string }[]): string[] {

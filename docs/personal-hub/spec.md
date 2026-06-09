@@ -173,7 +173,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 - **hermes 整合**：personal forced-mode MCP client 串接。
 - **ai_copilot `/hi` 整合**：read-only instance 注入個人近況/待辦。
 - **reminder 投遞 channel**：把 `getDueReminders()` 接到實際 channel（Telegram / hermes push）。
-- **Todoist 匯入**：把既有 Todoist 待辦匯入 `__personal__`（**blocking open question**：需使用者提供 Todoist 匯出格式樣本才能定 mapping）。
+- **Todoist 整合（live REST 工具，Option E）**：cc-memory 內建薄 Todoist API v1 client，提供 `cc_todoist_*` 工具（add / projects / list / complete / completed）讓 agent 群（Hermes / Claude Code / Codex / AI_Copilot）新增待辦 + 追蹤完成。**雙系統並存、無自動 sync**（追蹤完成為 on-demand）。token∧forced-personal（__personal__）雙條件 gated、不碰 cc-memory DB。取代舊「一次性匯入」方向 → 不再 blocked on 匯出樣本。自動鏡像（webhook reconciliation）留待後續 sync phase。
 
 ---
 
@@ -206,7 +206,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 | personal Gemini embedding | Personal-Hub Phase 1+ | 完整（決策已拍板） | personal instance 傳 `GEMINI_API_KEY`；embedding 存 `project_memories.embedding`（`__personal__` 列），`search_feedback` 僅 telemetry |
 | read-only mode | Personal-Hub Phase 2 | **完整 SDD** | `CC_READ_ONLY` + `CC_TOOL_ALLOWLIST`，ListTools + handler 雙層 |
 | DB role / RLS + preflight | Personal-Hub Phase 3 | roadmap | 需 Zeabur prod URL；終極硬隔離 |
-| Todoist 匯入 | 跨 repo（離線可規劃） | roadmap | 需 Todoist 匯出格式樣本（blocking OQ） |
+| Todoist 整合（live REST 工具，Option E） | 跨 repo（已實作 client + 5 工具） | additive 工具 | `cc_todoist_*` 直打 Todoist API v1；token∧forced-personal（__personal__）gated；雙系統並存、無自動 sync |
 | hermes / `/hi` 整合、reminder channel | 跨 repo 階段 | roadmap | 介面草案層級，憑證/授權未到位 |
 
 ---
