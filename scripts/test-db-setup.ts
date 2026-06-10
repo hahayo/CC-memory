@@ -141,18 +141,20 @@ async function main() {
     await admin.end({ timeout: 5 });
   }
 
-  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009
+  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009 + 0010
   await applyMigrations(projectUrl, migrationFiles('0007'));
   const personalMigrations = [
     ...migrationFiles('0008'),                          // 0000-0007
     '0009_add_reminder_delivery_queue.sql',             // personal-only
+    '0010_add_todoist_sync.sql',                        // 兩側都套（見 migration 檔頭：shared schema 欄位）
   ];
   await applyMigrations(personalUrl, personalMigrations);
   // 0009 也套 project test DB：service tests 用 project DB 跑，需要 reminder_delivery_queue table
-  await applyMigrations(projectUrl, ['0009_add_reminder_delivery_queue.sql']);
+  // 0010 也套 project test DB：todoist_id 在共用 tasks schema，Drizzle select 展開全欄位
+  await applyMigrations(projectUrl, ['0009_add_reminder_delivery_queue.sql', '0010_add_todoist_sync.sql']);
   await dropProjectNoPersonalChecks(projectUrl);
 
-  console.error(`done：${dbNameOf(projectUrl)}（0000-0006+0009）/ ${dbNameOf(personalUrl)}（0000-0007+0009）`);
+  console.error(`done：${dbNameOf(projectUrl)}（0000-0006+0009+0010）/ ${dbNameOf(personalUrl)}（0000-0007+0009+0010）`);
 }
 
 main().catch((err) => {
