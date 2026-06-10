@@ -27,6 +27,8 @@
 
 ## 🔴 A1 — AI_Copilot raw postgres MCP（strongly recommended，不再是 hard blocker）
 
+> ✅ 2026-06-10 查證結案（免動作）：該 raw postgres MCP 指向另一台無關 DB（system identifier 與 cc-memory project/personal 兩庫皆不同），不持任何 cc-memory URL，Gate 直接滿足。
+
 > Phase 3 v0.4 翻案後嚴重度降為 strongly recommended（personal DB URL 不配給 raw postgres MCP 就基本安全）。仍建議收緊。
 
 - [ ] 進 `AI_Copilot` repo `.mcp.json`
@@ -39,15 +41,17 @@
 
 ## 🔴 A2.1 — Zeabur infra（cc-memory-personal PG service）
 
+> ✅ 2026-06-10 完成：service `cc-memory-personal`（pgvector/pgvector:pg18，zeabur template deploy）；migration 0000-0007 全套；連線字串檔 `~/.ccm-personal-url`（mode 600）。
+
 > A2.2/A2.3/A2.4 code 已備好，但需要實體 DB URL 才能 deploy。
 
-- [ ] 在 Zeabur 開新 PostgreSQL service：**name = `cc-memory-personal`**，**region 與 project DB 同**（降延遲）
-- [ ] 取得 connection string，記為 secret 別名 `DATABASE_URL_PERSONAL`
-- [ ] 依 ADR-001 deployment topology 表配發：
+- [x] 在 Zeabur 開新 PostgreSQL service：**name = `cc-memory-personal`**，**region 與 project DB 同**（降延遲）
+- [x] 取得 connection string，記為 secret 別名 `DATABASE_URL_PERSONAL`
+- [x] 依 ADR-001 deployment topology 表配發：
   - `forced-mode personal` instance（hermes / `/hi` / Claude Code forced personal）→ 配
   - `project-mode` instance（一般 Claude Code）→ **禁配**
   - `admin / migration` 短期 maintenance → 兩 URL 都配，maintenance 結束撤回
-- [ ] 跑 migration 0000-0007 套到 personal DB：
+- [x] 跑 migration 0000-0007 套到 personal DB：
   ```bash
   DATABASE_URL=<PERSONAL_URL> tsx scripts/apply-migration.ts sql/migrations/0000_baseline.sql
   DATABASE_URL=<PERSONAL_URL> tsx scripts/apply-migration.ts sql/migrations/0001_add_tasks_feedback_bot_state.sql
@@ -63,6 +67,8 @@
 ---
 
 ## 🔴 A2.6 — Prod maintenance window 遷移（需 user 操作 + 線上）
+
+> ✅ 2026-06-10 完成（Step 0-7 全程）：備份 `~/backups/cc-memory/cc-memory-prod-20260610.dump`；preflight pre 7/7 / post-copy 11/11 / post-delete 11/11；0008 已套；launcher/cc-reminders.sh 改持 DATABASE_URL_PERSONAL；hermes cron 已 resume。
 
 > 先在 staging 跑完整 Step 0-7 演練（含模擬 fail rollback），prod 才進。
 
@@ -161,11 +167,13 @@ COMMIT;  -- 驗證不過改 ROLLBACK
 
 ## 🟡 A3a — hermes 完整 client（hermes repo）
 
+> ✅ 2026-06-10 e2e 通過：Telegram「幫我記錄代辦事項」→ cc_task_create → personal DB；提醒到點 cron 推回 Telegram 實收。修正三件：hermes SOUL.md 強制路由（內建 todo 工具改 cc_task_*）、延續 session 需刪舊 session 才吃新 SOUL、SOUL 補「不帶 project 參數」。
+
 > 既有 reminder poller 已串；本期擴成完整 read/write personal task + memory。
 
-- [ ] hermes env 補：`CC_FORCE_PROJECT_ID=__personal__` + `DATABASE_URL_PERSONAL`（**不持** `DATABASE_URL`）
-- [ ] 完整讀寫個人 task / memory（既有 `dueReminders` poller 已示範模式）
-- [ ] Gate：Telegram 訊息 → 個人 task 寫入 personal DB → reminder 到點推回 Telegram
+- [x] hermes env 補：`CC_FORCE_PROJECT_ID=__personal__` + `DATABASE_URL_PERSONAL`（**不持** `DATABASE_URL`）
+- [x] 完整讀寫個人 task / memory（既有 `dueReminders` poller 已示範模式）
+- [x] Gate：Telegram 訊息 → 個人 task 寫入 personal DB → reminder 到點推回 Telegram
 
 預估：1.5 天
 
