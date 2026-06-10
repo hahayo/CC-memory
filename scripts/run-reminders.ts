@@ -8,7 +8,9 @@
 //     - forced-mode（設了 CC_FORCE_PROJECT_ID）：忽略 projectId 參數，鎖定 forced namespace。
 //     - project-mode（未設）：必須提供 projectId，否則 fail-fast（不會誤撈全專案）。
 
-import 'dotenv/config';
+// Phase 3 v0.4：DB URL 走 src/config 啟動期決策（forced personal → DATABASE_URL_PERSONAL；
+// 含 sanitize 引號+\r）。缺 URL 在 import 時 throw → exit 1 + stderr。
+import { config } from '../src/config.js';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { getDueReminders } from '../src/services/reminders.js';
@@ -29,14 +31,13 @@ function parseArgs(argv: string[]): { rawProjectId?: string; limit?: number } {
 }
 
 async function main(): Promise<void> {
-  const url = process.env.DATABASE_URL?.replace(/\r/g, '').replace(/^"|"$/g, '');
-  if (!url) throw new Error('DATABASE_URL not set');
+  const url = config.databaseUrl;
 
   const { rawProjectId, limit } = parseArgs(process.argv.slice(2));
-  const config = loadScopeConfig();
+  const scopeConfig = loadScopeConfig();
   // applyScopePolicy：forced-mode 鎖定 forced namespace（忽略 rawProjectId）；
   // project-mode 需 rawProjectId，否則 fail-fast。
-  const projectId = applyScopePolicy(rawProjectId, { config, surface: 'scope' }) as string;
+  const projectId = applyScopePolicy(rawProjectId, { config: scopeConfig, surface: 'scope' }) as string;
 
   const client = postgres(url, { max: 1 });
   const db = drizzle(client);
