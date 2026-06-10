@@ -38,8 +38,14 @@ docker run --rm postgres:18 pg_dump "$(cat ~/.ccm-prod-url)" -Fc \
 ## Restore（personal DB 資料事故）
 
 ```bash
-# Step 1：止血——暫停 poller 防寫入
-hermes cron pause cc-memory-reminders
+# Step 1：止血——靜止「所有」personal DB writer（不只 poller；Codex review P1）
+hermes cron pause cc-memory-reminders        # 1a. reminder poller
+systemctl --user stop hermes-gateway.service # 1b. hermes 對話端（Telegram 寫入路徑）
+# 1c. 關閉所有掛 cc-memory-personal 的 Claude Code / Codex session（或確保 restore
+#     期間不呼叫其任何 cc_* 工具——MCP stdio instance 只在 tool call 時寫入）
+# 1d. 確認無殘留連線（除本機 psql 外應為 0）：
+psql "$(cat ~/.ccm-personal-url)" -tAc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid();"
 
 # Step 2：還原 dump
 docker run --rm -i postgres:18 pg_restore \
@@ -53,7 +59,8 @@ DATABASE_URL_PERSONAL=$(cat ~/.ccm-personal-url) \
 
 # P1-P7 全 PASS 才算 restore 完成
 
-# Step 4：恢復 poller
+# Step 4：恢復所有 writer
+systemctl --user start hermes-gateway.service
 hermes cron resume cc-memory-reminders
 ```
 
