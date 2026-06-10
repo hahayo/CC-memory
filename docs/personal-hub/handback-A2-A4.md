@@ -121,8 +121,13 @@ Step 5.6 preflight post-delete（COMMIT 後最終確認；已從「閘門」降�
 
 Step 6 env 切換 + 重啟 services
   - hermes / forced-mode instance 補 DATABASE_URL_PERSONAL；驗 config 啟動 PASS
-  - ⚠️ 部署順序警告 ②：hermes 重新部署必須與本步 env 切換同窗——repo 先 merge 沒問題，
-    但別提前 redeploy（poller 已改走 config.databaseUrl，fail-fast 會先弄停 prod 提醒）
+  - ⚠️ 部署順序警告 ②（2026-06-10 實證更正）：hermes 的 cron job `cc-memory-reminders`
+    （~/.hermes/cron，script cc-reminders.sh）**直接 cd 進本 repo working tree 跑
+    scripts/hermes-reminder-poll.ts——commit 即上線，沒有「merge 但不部署」的緩衝**。
+    Phase 3 fail-fast 上線當天即把該 cron 弄成每 5 分鐘 throw + Telegram 轟炸，
+    已於 2026-06-10 13:31 `hermes cron pause` 止血（__personal__ 當時 0 任務，零影響）。
+    本步完成 env 切換（cc-reminders.sh 補 export DATABASE_URL_PERSONAL）後再
+    `hermes cron resume cc-memory-reminders`
   - 結束 maintenance window 🚧
 
 Step 7 smoke

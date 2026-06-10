@@ -10,9 +10,10 @@
 // Phase 3 v0.4：DB URL 走 src/config 啟動期決策（forced personal → DATABASE_URL_PERSONAL；
 // 含 sanitize 引號+\r）。缺 URL 在 import 時 throw → main().catch 不會接到，但 ESM
 // top-level throw 一樣 exit 1 + stderr，stdout 保持空 → hermes --no-agent 視為靜默。
-// ⚠️ 部署順序：hermes 重新部署必須與 maintenance window 的 env 切換
-//（CC_FORCE_PROJECT_ID=__personal__ + DATABASE_URL_PERSONAL）同窗，否則 fail-fast
-// 會先弄停 prod 提醒（見 docs/personal-hub/handback-A2-A4.md）。
+// ⚠️ 部署順序（2026-06-10 實證）：hermes cron 的 cc-reminders.sh **直接跑本 repo
+// working tree——commit 即上線**。fail-fast 生效期間該 cron 必須先 `hermes cron pause
+// cc-memory-reminders`，等 maintenance window Step 6 補上 DATABASE_URL_PERSONAL 後再
+// resume（見 docs/personal-hub/handback-A2-A4.md Step 6 警告 ②）。
 import { config } from '../src/config.js';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
