@@ -9,29 +9,39 @@ import postgres from 'postgres';
 export const TEST_DB_URL =
   process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test';
 
+/** personal 側 test DB（Phase 3 遷移工具鏈測試用）；由 scripts/test-db-setup.ts 建立。 */
+export const TEST_PERSONAL_DB_URL =
+  process.env.TEST_DATABASE_URL_PERSONAL ??
+  TEST_DB_URL.replace(/\/cc_memory_test$/, '/cc_memory_test_personal');
+
 export type Sql = ReturnType<typeof postgres>;
 
 /**
- * 建立測試 PG 連線；連不上就 fail-loud（不要 silent skip）。
+ * 建立任意 test PG 連線；連不上就 fail-loud（不要 silent skip）。
  */
-export async function connectTestDb(): Promise<Sql> {
+export async function connectDb(url: string): Promise<Sql> {
   try {
-    const probe = postgres(TEST_DB_URL, { max: 1, idle_timeout: 2, connect_timeout: 2 });
+    const probe = postgres(url, { max: 1, idle_timeout: 2, connect_timeout: 2 });
     await probe`SELECT 1`;
     await probe.end();
   } catch (err) {
     const cause = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `\nTest PostgreSQL is not reachable at ${TEST_DB_URL}.\n` +
+      `\nTest PostgreSQL is not reachable at ${url}.\n` +
         `啟動本機 test DB：\n` +
         `  docker compose -f docker-compose.test.yml up -d\n` +
-        `  npx drizzle-kit push --config drizzle.test.config.ts\n\n` +
+        `  npx tsx scripts/test-db-setup.ts\n\n` +
         `或指定現有 test PG（例如 CI）：\n` +
         `  export TEST_DATABASE_URL=postgres://user:pass@host:port/db\n\n` +
         `原始錯誤：${cause}`
     );
   }
-  return postgres(TEST_DB_URL, { max: 1 });
+  return postgres(url, { max: 1 });
+}
+
+/** 建立測試 PG 連線（project 側預設 test DB）。 */
+export async function connectTestDb(): Promise<Sql> {
+  return connectDb(TEST_DB_URL);
 }
 
 /**
