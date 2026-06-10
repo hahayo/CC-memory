@@ -1,0 +1,14 @@
+{
+  // typecheck 專用 config（Codex B2，P0）：把 scripts/**（遷移工具鏈）與 tests/**
+  // 一併納入靜態驗證——build 用的 tsconfig.json 只編 src/，最危險的 admin scripts
+  // 原本不在任何 typecheck 範圍內。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*"]
+}

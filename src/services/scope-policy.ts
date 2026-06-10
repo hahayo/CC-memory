@@ -10,18 +10,22 @@
 //
 // 設計重點（codex 多輪 P0）：
 //   - 這是「應用層」邊界，可被 raw postgres / shell / 其他持有 DATABASE_URL 的 MCP 繞過。
-//     終極硬隔離需 DB role / RLS / view（列為強烈建議，非本模組保證）。
+//     終極硬隔離靠 Phase 3 v0.4 獨立 personal DB（DATABASE_URL_PERSONAL 物理切分 +
+//     secret 配發；見 docs/personal-hub/decisions/ADR-001-phase3-separate-db.md）；
+//     本模組仍是縱深防禦的第一層，非終局保證。
 //   - 規則作用在「已解析出的 projectId」上，因此 project_path / CLAUDE.md marker /
 //     git / basename 解析出保留 namespace 的情況一律被涵蓋（deny 不只擋顯式 project_id）。
 
 import { InvalidArgumentError } from './errors.js';
+import { PERSONAL_PROJECT_ID } from '../constants.js';
 
 // ---------------------------------------------------------------------------
 // 常數：保留 namespace
 // ---------------------------------------------------------------------------
 
-/** 個人近況/決策/待辦的保留 projectId。各 caller 明確帶入，不靠偵測。 */
-export const PERSONAL_PROJECT_ID = '__personal__';
+/** 個人近況/決策/待辦的保留 projectId。各 caller 明確帶入，不靠偵測。
+ *  定義移至 src/constants.ts（leaf module）；此處 re-export 保持既有 import 不破。 */
+export { PERSONAL_PROJECT_ID };
 
 /** 所有保留 namespace（未來可擴充）。 */
 export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([PERSONAL_PROJECT_ID]);
