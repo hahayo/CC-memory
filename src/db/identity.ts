@@ -55,14 +55,14 @@ export interface DistinctDbDiagnostics {
   serverVersionMajorMismatch: boolean;
 }
 
-async function has0007Marker(sql: postgres.Sql): Promise<boolean> {
+async function has0007Marker(sql: postgres.Sql<any>): Promise<boolean> {
   const r = await sql`
     SELECT 1 FROM pg_constraint WHERE conname = 'tasks_personal_only_check' LIMIT 1
   `;
   return r.length > 0;
 }
 
-async function systemIdentifier(sql: postgres.Sql): Promise<string | null> {
+async function systemIdentifier(sql: postgres.Sql<any>): Promise<string | null> {
   try {
     const r = await sql<{ id: string }[]>`
       SELECT system_identifier::text AS id FROM pg_control_system()
@@ -73,7 +73,7 @@ async function systemIdentifier(sql: postgres.Sql): Promise<string | null> {
   }
 }
 
-async function serverVersion(sql: postgres.Sql): Promise<string> {
+async function serverVersion(sql: postgres.Sql<any>): Promise<string> {
   const r = await sql<{ server_version: string }[]>`SHOW server_version`;
   return r[0].server_version;
 }
@@ -93,8 +93,8 @@ async function serverVersion(sql: postgres.Sql): Promise<string> {
  * 4. 弱檢查：兩邊 server_version major 一致，否則 console.error 警告（不中止）。
  */
 export async function assertDistinctDatabasesLive(
-  project: postgres.Sql,
-  personal: postgres.Sql
+  project: postgres.Sql<any>,
+  personal: postgres.Sql<any>
 ): Promise<DistinctDbDiagnostics> {
   // 1) advisory-lock probe
   const k1 = randomInt(1, 0x7fffffff);
