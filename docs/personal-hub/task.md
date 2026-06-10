@@ -252,11 +252,11 @@
 
 ### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
 
-> 以下 `[ ]` 等 A2.7 prod 上線 + rollback rehearsal 通過才勾。
+> ✅ 2026-06-10 prod cutover 完成（A2.1 + A2.6 全程 + A2.7 smoke）；rollback rehearsal 以本地全管線 e2e（tests/scripts/e2e-migration-pipeline.test.ts）替代執行。
 
-- [ ] forced-mode personal instance `cc_memory_save` 寫進 personal DB；project DB SELECT 看不到
-- [ ] forced-mode personal `cc_memory_search` 只回 personal
-- [ ] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder + scope-probe test 鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）
-- [ ] 拿 project DB URL raw postgres 查 `__personal__` → 0 列
-- [ ] personal DB INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB INSERT `__personal__` row → 0008 CHECK 拒
-- [ ] delete script 同 tx 內驗證全過才 COMMIT；preflight 三 mode（P1-P7/C1-C5/D1-D5）全 PASS
+- [x] forced-mode personal instance `cc_memory_save` 寫進 personal DB；project DB SELECT 看不到（2026-06-10 A2.7 smoke：save → personal=1 / project=0）
+- [x] forced-mode personal `cc_memory_search` 只回 personal（2026-06-10 A2.7 smoke：keyword search 命中該筆）
+- [x] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder + scope-probe test 鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）（preflight D5 scope tests PASS + 0008 結構性拒寫）
+- [x] 拿 project DB URL raw postgres 查 `__personal__` → 0 列（cutover 後 psql count=0 實測）
+- [x] personal DB INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB INSERT `__personal__` row → 0008 CHECK 拒（preflight C5 2/2 + D4 4/4 PASS）
+- [x] delete script 同 tx 內驗證全過才 COMMIT；preflight 三 mode（P1-P7/C1-C5/D1-D5）全 PASS（pre 7/7、post-copy 11/11、post-delete 11/11；manifest 比對 D3 PASS）

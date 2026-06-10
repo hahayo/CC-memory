@@ -8,7 +8,7 @@
 > - v0.1（2026-06-05）：首版。回填 Phase 0 已交付安全核心、寫定 reminder（Phase 1）/ read-only（Phase 2）完整規格、prod + 跨 repo roadmap。
 > - v0.2（2026-06-05）：Phase 1 reminders 實作落地，狀態與端對端驗收 checkbox 同步。
 > - v0.3（2026-06-05）：Phase 2 read-only mode（雙層 enforce + telemetry 開關）實作落地，狀態與驗收同步。
-> - v0.4（2026-06-09）：**Phase 3 翻案**——隔離策略從共用 DB + RLS 改為**獨立 personal DB**（threat model 真實對手是任何持 `DATABASE_URL` 的 process；RLS 對 owner / superuser / 漂掉的 role 設定靜默失效）。Non-goals line 184「個人資料用獨立資料庫」翻轉為 Goals。詳見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。本版只更新翻案文字；e2e 驗收 `[x]` 等 A2.7 prod 上線後再勾。
+> - v0.4（2026-06-09）：**Phase 3 翻案**——隔離策略從共用 DB + RLS 改為**獨立 personal DB**（threat model 真實對手是任何持 `DATABASE_URL` 的 process；RLS 對 owner / superuser / 漂掉的 role 設定靜默失效）。Non-goals line 184「個人資料用獨立資料庫」翻轉為 Goals。詳見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。本版只更新翻案文字；e2e 驗收 `[x]` 等 A2.7 prod 上線後再勾（✅ 2026-06-10 已勾，prod cutover 完成）。
 
 ---
 
@@ -350,12 +350,12 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 
 ### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
 
-> 以下 `[ ]` 等 A2.7 prod 上線 + rollback rehearsal 通過才勾。
+> ✅ 2026-06-10 prod cutover 完成（A2.1 + A2.6 全程 + A2.7 smoke）；rollback rehearsal 以本地全管線 e2e（tests/scripts/e2e-migration-pipeline.test.ts）替代執行。
 
-- [ ] forced-mode personal instance `cc_memory_save` 寫進 personal DB（從 personal DB SELECT 看得到、project DB 看不到）
-- [ ] forced-mode personal instance `cc_memory_search` 只回 personal
-- [ ] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder（`scope-policy.ts` `reservedExclusionCondition`）+ scope-probe integration test（control+treatment）鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）
-- [ ] 拿 project DB URL raw postgres `SELECT ... WHERE project_id='__personal__'` → 0 列（資料根本不在那個 DB）
-- [ ] personal DB 嘗試 INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB 嘗試 INSERT `__personal__` row → 0008 CHECK 拒
-- [ ] delete 由 `scripts/delete-personal-data.ts` 執行：同 tx 內 LOCK → 計數 → checksum 比對 → DELETE → 驗證全過才 COMMIT；preflight post-delete（D1-D5）為 COMMIT 後最終確認
+- [x] forced-mode personal instance `cc_memory_save` 寫進 personal DB（從 personal DB SELECT 看得到、project DB 看不到）（2026-06-10 A2.7 smoke：save → personal=1 / project=0）
+- [x] forced-mode personal instance `cc_memory_search` 只回 personal（2026-06-10 A2.7 smoke：keyword search 命中該筆）
+- [x] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder（`scope-policy.ts` `reservedExclusionCondition`）+ scope-probe integration test（control+treatment）鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）（preflight D5 scope tests PASS + 0008 結構性拒寫）
+- [x] 拿 project DB URL raw postgres `SELECT ... WHERE project_id='__personal__'` → 0 列（資料根本不在那個 DB）（cutover 後 psql count=0 實測）
+- [x] personal DB 嘗試 INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB 嘗試 INSERT `__personal__` row → 0008 CHECK 拒（preflight C5 2/2 + D4 4/4 PASS）
+- [x] delete 由 `scripts/delete-personal-data.ts` 執行：同 tx 內 LOCK → 計數 → checksum 比對 → DELETE → 驗證全過才 COMMIT；preflight post-delete（D1-D5）為 COMMIT 後最終確認（pre 7/7、post-copy 11/11、post-delete 11/11；manifest 比對 D3 PASS）
 - [ ] 非 forced personal instance 偵測到 `DATABASE_URL_PERSONAL` → warn + 拒絕載入該 URL（不 exit）；forced-mode personal 缺 `DATABASE_URL_PERSONAL` → exit
