@@ -76,23 +76,24 @@ export async function runOneTick(
 
   const deadList: string[] = [];
 
-  // Step 1：getDueReminders（DB tx 內含 reminder_log 寫入 + advance）
-  const due = await getDueReminders(db, { projectId, channel: 'hermes' });
-
-  // Step 2：enqueueDue（冪等 INSERT ON CONFLICT DO NOTHING）
-  // due 可能為空（本 tick 無新到期），但 queue 中可能有前幾輪失敗待重試的列。
-  if (due.length > 0) {
-    const queueItems = due.map(({ task, slot }) => {
-      const recur =
-        task.recurrenceIntervalDays !== null ? ` (每 ${task.recurrenceIntervalDays} 天)` : '';
-      return {
-        taskId: task.id,
-        scheduledFor: slot,
-        payload: `⏰ ${task.title}${recur}`,
-      };
-    });
-    await enqueueDue(db, queueItems);
-  }
+  // Step 1+2：getDueReminders + enqueueDue 在同一 outer tx 內（防 claim 後 enqueue 失敗靜默丟失）。
+  // getDueReminders 內部呼 db.transaction()——傳入已在 tx 中的 client 時 Drizzle/PG 以 savepoint 處理，
+  // FOR UPDATE SKIP LOCKED 在 savepoint 內依然有效。enqueueDue 的 ON CONFLICT DO NOTHING 保冪等。
+  await db.transaction(async (tx: DbClient) => {
+    const due = await getDueReminders(tx, { projectId, channel: 'hermes' });
+    if (due.length > 0) {
+      const queueItems = due.map(({ task, slot }) => {
+        const recur =
+          task.recurrenceIntervalDays !== null ? ` (每 ${task.recurrenceIntervalDays} 天)` : '';
+        return {
+          taskId: task.id,
+          scheduledFor: slot,
+          payload: `⏰ ${task.title}${recur}`,
+        };
+      });
+      await enqueueDue(tx, queueItems);
+    }
+  });
 
   // Step 3：claimDeliverable（含前幾輪退避後再次可投遞的列）
   const claimable = await claimDeliverable(db, CLAIM_LIMIT);
