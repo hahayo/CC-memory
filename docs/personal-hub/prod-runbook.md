@@ -6,11 +6,12 @@
 
 | 角色 | 說明 |
 |---|---|
-| **project DB** | Zeabur project `CC-memory`、service `postgresql` — schema migration 0000-0006 + 0008（反向 CHECK：拒 `__personal__` 寫入）。連線字串：`~/.ccm-prod-url`（mode 600） |
-| **personal DB** | 同 Zeabur project、service `cc-memory-personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue，personal-only，2026-06-10 套用）。連線字串：`~/.ccm-personal-url`（mode 600） |
+| **project DB** | Zeabur project `CC-memory`、service `postgresql` — schema migration 0000-0006 + 0008（反向 CHECK：拒 `__personal__` 寫入）+ 0010（todoist_id 欄，恆 NULL；shared Drizzle schema 需要，2026-06-10 套用）。連線字串：`~/.ccm-prod-url`（mode 600） |
+| **personal DB** | 同 Zeabur project、service `cc-memory-personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009 + 0010（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue personal-only；0010 todoist sync。皆 2026-06-10 套用）。連線字串：`~/.ccm-personal-url`（mode 600） |
 | **forced personal launcher** | `/home/haha/run-cc-memory-personal.sh`（只持 DATABASE_URL_PERSONAL；Claude Code `cc-memory-personal` / Codex / hermes 共用） |
 | **read-only launcher** | `/home/haha/run-cc-memory-personal-ro.sh`（+CC_READ_ONLY=1 +CC_SEARCH_FEEDBACK=off；Claude Code `cc-memory-hi`，/hi 注入用） |
 | **hermes reminder cron** | job `cc-memory-reminders`（id 8cca281df423，*/5min）→ `~/.hermes/scripts/cc-reminders.sh` → `scripts/hermes-reminder-poll.ts`（poller v2：at-least-once durable queue + 直送 Telegram；⚠️ cron 直接跑本 repo working tree——commit 即上線，**新 migration 必須先套 personal DB 再切換 working tree**，否則 poller 每 tick 報 relation does not exist） |
+| **hermes todoist-sync cron** | job `todoist-sync`（id b340b1a62e3a，*/15min，`--no-agent --deliver telegram`）→ `~/.hermes/scripts/cc-todoist-sync.sh` → `scripts/todoist-sync-poll.ts`（Todoist /sync 增量拉取 → upsert tasks；同樣跑 working tree） |
 | **project-mode instance** | Claude Code `cc-memory`（~/.claude.json 持 project DB URL，不變） |
 
 ---
@@ -89,6 +90,28 @@ psql "$(cat ~/.ccm-personal-url)" -c \
    ORDER BY fired_at DESC
    LIMIT 50;"
 ```
+
+### Todoist sync 健康（A3d）
+
+cron job `todoist-sync`（id b340b1a62e3a，*/15min，`--no-agent --deliver telegram`）→
+`~/.hermes/scripts/cc-todoist-sync.sh` → `scripts/todoist-sync-poll.ts`。
+無變動空 stdout（靜默）；有變動投遞一行摘要到 Telegram。
+
+```bash
+# 最近 tick 輸出
+ls -lt ~/.hermes/cron/output/b340b1a62e3a/ | head -5
+
+# sync_state 健康：updated_at 應在 15 分鐘內（cron 正常踢動）
+psql "$(cat ~/.ccm-personal-url)" -c \
+  "SELECT resource, updated_at, NOW() - updated_at AS staleness FROM sync_state;"
+
+# todoist 來源任務統計
+psql "$(cat ~/.ccm-personal-url)" -c \
+  "SELECT status, COUNT(*) FROM tasks WHERE source='todoist' GROUP BY status;"
+```
+
+token 失效（401）時 poller exit 1、sync_token 不前進；更新 `~/.ccm-todoist-token`
+（mode 600）後下一 tick 自動恢復。
 
 ### 投遞佇列健康（at-least-once delivery queue）
 
