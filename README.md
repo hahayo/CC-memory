@@ -126,7 +126,8 @@ cc_memory_search / cc_memory_list
 
 | 變數 | 說明 | 必填 |
 |------|------|------|
-| `DATABASE_URL` | PostgreSQL 連線字串 | ✅ |
+| `DATABASE_URL` | PostgreSQL 連線字串（project DB） | ✅ |
+| `DATABASE_URL_PERSONAL` | 獨立 personal DB 連線字串（Phase 3；見 `docs/personal-hub/decisions/ADR-001-phase3-separate-db.md`） | forced personal instance 必填；其他 instance 禁配（偵測到 warn + 拒載入該 URL） |
 
 ## 開發
 

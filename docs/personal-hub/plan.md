@@ -1,66 +1,62 @@
 # Personal-Hub Implementation Plan
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）✅ 已實作（`tool-policy.ts` + ListTools/handler 雙層 enforce + `CC_SEARCH_FEEDBACK` 開關，測試綠）· Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）✅ 已實作（`tool-policy.ts` + ListTools/handler 雙層 enforce + `CC_SEARCH_FEEDBACK` 開關，測試綠）· **Phase 3（v0.4 翻案：獨立 personal DB）** + 跨 repo = roadmap。
 >
 > 本 plan 對應 `spec.md`。Phase 0 回填已實作行為；Phase 1/2 寫到可直接 TDD 的細節；Phase 3 + 跨 repo 停在 roadmap-level（介面草案 / Gate / open questions）。
 >
 > **執行紀律**：每個 Phase 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
 >
-> change log：
+> change log（版本 namespace 註記：本檔 plan.md 走自己的 v0.x 序、spec.md 的 change log 走獨立 v0.4 序，兩檔版號互不對應）：
 > - v0.1（2026-06-05）：首版。
+> - v0.2（2026-06-09）：**Phase 3 翻案**——從共用 DB + RLS 改為**獨立 personal DB**（`DATABASE_URL_PERSONAL`）。Architecture 圖、instance 拓樸、Files、Rollout、Risks、OQ #6 全段重寫。詳見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。
+> - v0.3（2026-06-10）：Phase 3 code review 修復 cascade——新增 delete script（tx 內 DELETE→驗證→COMMIT，修 P0 MVCC 閘門失效）、0008 反向 CHECK、preflight 拆檔 + mode-prefixed cases（P1-P7/C1-C5/D1-D5）、search_feedback 只刪不搬決策。詳見 ADR-001 補記。
 
 ---
 
 ## Architecture
 
 ```
-                ┌────────────────────────────────────────────┐
-                │  PostgreSQL (Zeabur, 既有單一真實來源)        │
-                │  project_memories   ── __personal__ 列與專案列同表  │
-                │  tasks              ── + remind_at/snooze/recurrence (Phase 1) │
-                │  reminder_log       ── 新表 (Phase 1, 去重稽核)     │
-                │  project_memories.embedding ── personal 內容向量（__personal__ 列）│
-                │  search_feedback    ── retrieval telemetry（不存內容向量）│
-                │  [Phase 3] DB role/RLS: personal_rw / project_rw_non_personal / admin │
-                └───────────────────────┬────────────────────┘
-                                        │
-                          ┌─────────────▼─────────────┐
-                          │  src/services/            │  ← DB 存取唯一通道
-                          │  scope-policy (Phase 0 ✅) │     所有 tool 共用 scope 決策
-                          │  memories / tasks /       │
-                          │  reminders (Phase 1)      │
-                          └──────────────┬────────────┘
-                                         │
-                          ┌──────────────▼──────────────┐
-                          │  MCP stdio server (src/index)│
-                          │  scope policy 套用每個 tool   │
-                          │  [Phase 2] read-only 雙層 enforce │
-                          └──┬────────────┬─────────────┬┘
-                             │            │             │
-          forced-mode instance      project-mode      read-only instance
-          CC_FORCE_PROJECT_ID       (一般專案)         CC_READ_ONLY (Phase 2)
-          = __personal__            deny __personal__   注入消費端
-                │                                          │
-        ┌───────┴────────┐                        ┌────────┴─────────┐
-        │ hermes / /hi / │                        │ /hi 注入 (跨 repo)│
-        │ Claude Code    │                        │                  │
-        │ (個人 namespace)│                        └──────────────────┘
-        └────────────────┘
-                │
-       [跨 repo 階段] reminder 投遞 channel (Telegram / hermes push)
+     ┌──────────────────────────────┐    ┌──────────────────────────────┐
+     │  PostgreSQL: project DB       │    │  PostgreSQL: personal DB      │
+     │  DATABASE_URL                 │    │  DATABASE_URL_PERSONAL        │
+     │  project_memories (專案列)     │    │  project_memories (__personal__ 列)│
+     │  tasks (專案列)               │    │  tasks (__personal__ 列)       │
+     │  reminder_log (專案列)        │    │  reminder_log (__personal__ 列)│
+     │  search_feedback (telemetry)  │    │  search_feedback (telemetry)  │
+     │                               │    │  [Phase 3] CHECK project_id   │
+     │                               │    │  ='__personal__' on memories/tasks│
+     └────────────┬──────────────────┘    └────────────┬──────────────────┘
+                  │                                  │
+                  │ 一 process 一 scope 一 DB         │
+                  │ (無 request-level 切換 DB)        │
+                  ▼                                  ▼
+     ┌──────────────────────────────┐   ┌──────────────────────────────┐
+     │  cc-memory MCP process        │   │  cc-memory MCP process        │
+     │  project-mode                 │   │  forced-mode personal         │
+     │  (持 DATABASE_URL only)       │   │  (持 DATABASE_URL_PERSONAL    │
+     │  src/services/scope-policy ✅ │   │   + CC_FORCE_PROJECT_ID=      │
+     │  + memories/tasks/reminders   │   │     __personal__)             │
+     │  + [Phase 2] read-only guards │   │  scope-policy + [Phase 2]     │
+     └──────────────┬────────────────┘   └──────────────┬────────────────┘
+                    │                                   │
+         各專案 Claude Code 等           hermes / /hi / Claude Code (個人)
+              （deny __personal__）           ↳ [跨 repo] reminder 推 channel
 ```
 
-**instance 拓樸（兩種 + 一種 Phase 2）**
+**instance 拓樸（v0.4 翻案後，連線 DB 加入維度）**
 
-| instance | env | scope 行為 | 用途 |
-|---|---|---|---|
-| **forced-mode** | `CC_FORCE_PROJECT_ID=__personal__` | 硬鎖 `__personal__`，拒絕跨 project | hermes / `/hi` / Claude Code 存個人記憶+待辦 |
-| **project-mode** | （皆不設） | deny `__personal__`，一般專案隔離 | 各專案的 Claude Code |
-| **read-only**（Phase 2） | `CC_READ_ONLY=1` (+ 上述其一) | 疊加在上面，寫入類 tool 雙層拒絕 | `/hi` 注入等只讀消費端 |
+| instance | env (scope) | env (DB) | scope 行為 | 連接 DB | 用途 |
+|---|---|---|---|---|---|
+| **forced-mode personal** | `CC_FORCE_PROJECT_ID=__personal__` | `DATABASE_URL_PERSONAL` | 硬鎖 `__personal__`，拒絕跨 project | personal DB | hermes / `/hi` / Claude Code 存個人記憶+待辦 |
+| **project-mode** | （皆不設） | `DATABASE_URL`（**禁配** `DATABASE_URL_PERSONAL`） | deny `__personal__`，一般專案隔離 | project DB | 各專案的 Claude Code |
+| **read-only personal**（Phase 2） | `CC_READ_ONLY=1` + `CC_FORCE_PROJECT_ID=__personal__` | `DATABASE_URL_PERSONAL` | 疊加在 forced，寫入類 tool 雙層拒絕；`cc_reminders_due` 也歸寫入類拒（claim/update reminder_log） | personal DB（只讀） | `/hi` 注入等只讀消費端 |
+| **admin / migration** | （皆不設或視需要） | 同時持 `DATABASE_URL` + `DATABASE_URL_PERSONAL`（preflight 三 mode **含 post-delete** 與 delete script 皆需雙 URL） | maintenance 模式 | 兩邊都連 | preflight / migration / delete / backup |
 
 **強制規則**
 - 所有 tool（含 `cc_memory_search` 獨立分支）一律經 `applyScopePolicy()` 決策 scope，不繞過。
-- forced-mode 是**應用層**邊界；終極隔離靠 Phase 3 DB role/RLS。raw postgres / shell / 其他持 `DATABASE_URL` 的 MCP 可繞過應用層（已知、誠實標示）。
+- forced-mode 是**應用層**邊界；終極隔離靠 Phase 3 獨立 personal DB + secret 邊界（v0.4 翻案；原 RLS 方案見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)）。raw postgres / shell / 其他持 `DATABASE_URL` 的 MCP 拿到的只連 project DB；個人資料**根本不在那個 DB**。
+- **一 process 一 scope 一 DB**：單一 cc-memory MCP process 啟動鎖定一個 DB；跨 scope 起兩個 process，各持自己的連線字串。
+- **啟動期 fail-fast**：forced-mode personal 缺 `DATABASE_URL_PERSONAL` → exit；非 forced personal（project-mode 或 forced 非 personal）偵測到 `DATABASE_URL_PERSONAL` → warn + 拒絕載入該 URL（不 exit）（防誤配）；`CC_FORCE_PROJECT_ID` 與 `CC_MEMORY_PROJECT_ID` 同設 → exit（檢查在 `src/services/scope-policy.ts`，既有）。
 
 ---
 
@@ -238,7 +234,8 @@ applyScopePolicy(rawId, { config: loadScopeConfig(env), surface }) → finalScop
 
 | Env | 用途 | 階段 | 預設 / 必要性 |
 |---|---|---|---|
-| `DATABASE_URL` | PostgreSQL 連線（Zeabur） | 既有 | 必填 |
+| `DATABASE_URL` | PostgreSQL 連線（Zeabur，project DB） | 既有 | 必填 |
+| `DATABASE_URL_PERSONAL` | 獨立 personal DB 連線（Phase 3 v0.4 翻案；見 [ADR-001](decisions/ADR-001-phase3-separate-db.md)） | Phase 3 | forced-mode personal **必填**；project-mode **禁配**（偵測到 warn + 拒絕載入該 URL，不 exit） |
 | `CC_FORCE_PROJECT_ID` | **forced-mode**：鎖定單一 namespace（如 `__personal__`），硬性 scope | Phase 0 ✅ | 可選；設了即 forced-mode |
 | `CC_MEMORY_PROJECT_ID` | `resolveProjectId` 的 fallback layer | 既有 | 可選；**與 `CC_FORCE_PROJECT_ID` 互斥**（同設 fail） |
 | `GEMINI_API_KEY` | Gemini embedding；**personal instance 接受傳入**做 semantic search | Phase 1+ | 可選（未設則 keyword-only 降級） |
@@ -396,17 +393,21 @@ append (row, slot) to result
 | `/hi` 注入消費端（Phase 2） | `CC_READ_ONLY=1` + `CC_FORCE_PROJECT_ID=__personal__` | 只讀個人記憶/待辦 |
 
 - **`.mcp.json` 設定樣板**：各 repo 的 `.mcp.json` 為 cc-memory entry 帶對應 env。
-- **⚠️ Phase -1 前置（跨 repo）**：AI_Copilot 的 `.mcp.json` 目前掛了 raw postgres MCP——持有 `DATABASE_URL` 可繞過應用層 scope policy。在該環境啟用 personal forced-mode 前，**必須先移除/限制 raw postgres**，否則隱私邊界形同虛設。
+- **Phase -1 前置（跨 repo，v0.4 翻案後降為 strongly recommended）**：AI_Copilot 的 `.mcp.json` 目前掛了 raw postgres MCP。原本是 hard blocker（理由：持 `DATABASE_URL` 可繞過 forced-mode）；Phase 3 v0.4 後個人資料不在 project DB，raw postgres 拿 `DATABASE_URL` 只連 project DB、看不到個人資料。新 Gate：該環境 raw postgres **不持** `DATABASE_URL_PERSONAL` 且無寫入個人 DB 通道（仍建議清理，但已非 hard blocker）。
 
-### Phase 3：prod DB 硬隔離（roadmap，需 Zeabur prod URL）
+### Phase 3：prod 獨立 personal DB（roadmap；v0.4 翻案，原 RLS 方案見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)）
 
-- **DB role**：
-  - `personal_rw`：只能 `SELECT/INSERT/UPDATE` `project_id='__personal__'` 的 row。
-  - `project_rw_non_personal`：不能碰 `__personal__` 的 row。
-  - `admin`：全權（migration / 維運）。
-- **RLS policy**：對 `project_memories` / `tasks` / `reminder_log` 啟用 row-level security，policy 依 `current_user` role 限制 `project_id` 可見性。
-- **preflight（Codex #11）**：migration apply 前跑驗證腳本（確認 role 存在、RLS 不會把現有連線鎖死、additive 欄位無破壞）。
-- forced-mode instance 改用 `personal_rw` 連線字串、project-mode 用 `project_rw_non_personal` → 應用層邊界被繞過時，DB 層仍擋。
+> 翻案脈絡簡述：原方案 RLS（`personal_rw` / `project_rw_non_personal` / `admin` role + row policy）對 table owner / `BYPASSRLS` role / superuser 預設失效，`USING` / `WITH CHECK` 漏寫即靜默故障，攻擊面寬。改為獨立 personal DB——靠 secret 配發 + 物理切分回應 threat model（任何持 `DATABASE_URL` 的 process）。
+
+- **Zeabur infra**：開新 PG service `cc-memory-personal`（與既有 project DB 同 region 降延遲）；連線字串 = `DATABASE_URL_PERSONAL`。
+- **Deployment topology（見上方 instance 拓樸表）**：project-mode **只**配 `DATABASE_URL`；forced-mode personal **只**配 `DATABASE_URL_PERSONAL`；admin/migration 才同時持兩個。
+- **`resolveDatabaseUrl()` + fail-fast 矩陣**（`src/db/resolve-url.ts`，config.ts 重接）：依 forced-mode flag 選 URL；forced personal 缺 personal URL → throw；forced personal 兩 URL 同物理 DB → throw；非 forced personal 偵測到 personal URL → warn + 拒絕載入該 URL（不 exit）；forced 非 personal 不 throw。
+- **`src/db/client.ts` 單 process 鎖一 DB**：啟動連線一個 DB，無 request-level 切換。
+- **Migration 跨 DB 套用**：用 `scripts/apply-migration.ts`（非 `drizzle-kit push`），既有 0000-0006 全套到 personal DB；personal DB 多套 0007（`project_id='__personal__'` CHECK constraint on `project_memories` / `tasks`）；project DB 在 delete COMMIT 後多套 **0008 反向 CHECK**（`project_id <> '__personal__'` + search_feedback 兩 arm，防個人列回流——與 0007 互為鏡像）。**此類 CHECK 不進共用 `src/db/schema.ts`**——schema.ts 是兩 DB 共用 source，若放會污染另一邊；CHECK 是 per-DB 不變量，放 per-DB-only migration SQL。
+- **表 inventory 不手寫**：`scripts/lib/inventory.ts` 單一 SoT——`information_schema` query（`column_name='project_id'` + FK 關聯）+ `search_feedback` special-case（無 project_id 欄，混合列 predicate）+ `EXPECTED_INVENTORY` diff 斷言；migrate / preflight / delete 三方共用。
+- **Preflight 三 mode**：`scripts/preflight.ts --mode {pre-migration,post-copy,post-delete}`，mode-prefixed cases（P1-P7 / C1-C5 / D1-D5）覆蓋 connection identity（URL 層 host+port+database 比對——user 只進報表不參與判定；DB 活體 advisory-lock probe + 0007/0008 方向檢查）、schema 一致（columns/constraints/indexes + expected-delta allowlist）、inventory assertion、row count + checksum（`to_jsonb` + tx 內 `SET LOCAL TIME ZONE 'UTC'` 的 MD5 string_agg）、CHECK 雙向拒寫（C5 0007 / D4 0008）；ScopePolicy 排除正確性由 shared predicate（`scope-policy.ts` `reservedExclusionCondition`）+ scope-probe integration test（control+treatment）鎖。
+- **Delete script**：`scripts/delete-personal-data.ts`——單一 tx 內 LOCK TABLE → 重計數 → checksum 與 personal DB 精確比對 → DELETE → 同 tx 驗證 → COMMIT；dry-run 預設、`--execute` 才真刪、manifest 落盤供 D3 比對（修 P0：MVCC 下「DELETE 後另終端 preflight 再 COMMIT」閘門恆 PASS）。
+- **Maintenance window**：Step 0 backup → Step 1 開 personal DB + migration + preflight pre-migration → Step 2 停 writers → Step 3 migrate + preflight post-copy → Step 4 rollback judgement + delete dry-run → Step 5 delete script（tx 內 DELETE→驗證→COMMIT）→ Step 5.5 套 0008 → Step 5.6 preflight post-delete（COMMIT 後最終確認）→ Step 6 env 切換 + 重啟 → Step 7 smoke。任一驗證 fail → ROLLBACK / abort。
 
 ---
 
@@ -449,12 +450,23 @@ tests/services/tool-policy.test.ts   # ✅ 24 tests
 tests/mcp-read-only.test.ts          # ✅ 8 tests（ListTools 過濾 + 直呼雙層被拒 + telemetry 開關）
 ```
 
-### Personal-Hub Phase 3（prod，roadmap）
+### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
 
 ```
-sql/migrations/NNNN_db_roles_rls.sql   # personal_rw / project_rw_non_personal / admin + RLS policy（編號接 reminder migration 之後）
-scripts/preflight.ts                   # migration apply 前驗證
-docs/personal-hub/prod-runbook.md      # role 連線字串配置、RLS 驗證步驟
+src/db/resolve-url.ts                        # resolveDatabaseUrl() 純函式 + fail-fast 矩陣 + sanitizeUrl（config.ts 重接）
+src/db/identity.ts                           # connIdentity/samePhysicalDb + assertDistinctDatabasesLive（advisory probe）
+src/constants.ts                             # PERSONAL_PROJECT_ID 單一出處（scope-policy re-export）
+src/db/client.ts                             # 用 config.databaseUrl，啟動鎖一 DB
+sql/migrations/0007_personal_db_check_constraint.sql   # personal-DB-only CHECK project_id='__personal__'（不進共用 schema.ts）
+sql/migrations/0008_project_db_no_personal_check.sql   # project-DB-only 反向 CHECK（delete COMMIT 後套；互為鏡像）
+scripts/lib/{inventory,clients,checksum}.ts  # 工具鏈單一 SoT（EXPECTED_INVENTORY/personalWhere/adminClient/to_jsonb checksum）
+scripts/preflight.ts + scripts/preflight/*.ts  # 三 mode 拆檔，mode-prefixed cases（P1-P7/C1-C5/D1-D5）
+scripts/migrate-personal-data.ts             # copy-only：inventory diff + 活體檢查 + cursor 分頁 + rerun 語意
+scripts/delete-personal-data.ts              # tx 內 LOCK→計數→checksum→DELETE→驗證→COMMIT + manifest（dry-run 預設）
+scripts/test-db-setup.ts                     # idempotent 雙 test DB + migrations（本地 e2e 用）
+tests/scripts/e2e-migration-pipeline.test.ts # 全管線 e2e（staging 演練前移）
+docs/personal-hub/decisions/ADR-001-phase3-separate-db.md   # 翻案脈絡 + threat model + deployment topology + 補記
+docs/personal-hub/prod-runbook.md            # personal DB backup/restore/monitoring/rollback playbook
 ```
 
 ### 修改（一行，跨 track）
@@ -490,18 +502,19 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 | 2a | `tool-policy.ts`（isWriteTool / assertWritable / assertAllowed / loadToolPolicy） + TDD | 寫入 tool 判定 + read-only/allowlist 單測綠 | ✅ 24 tests |
 | 2b | `src/index.ts` ListTools 過濾 + handler 雙層 enforce | `CC_READ_ONLY=1` ListTools 無寫入 tool；直呼被拒；`CC_TOOL_ALLOWLIST` 子集兩層生效（含 read）；telemetry 開關；原 tests 不回歸 | ✅ 8 tests |
 
-### Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur prod URL）
+### Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur 開新 PG service；v0.4 翻案：獨立 personal DB）
 
 | Step | 交付 | Gate |
 |---|---|---|
-| 3a | preflight 腳本 | 驗證 role/RLS 不鎖死現有連線 |
-| 3b | RLS migration（role + RLS，編號接 reminder 之後）apply | `project_rw_non_personal` 查 `__personal__` 回 0 列；`personal_rw` 查他專案 0 列 |
+| 3a | A2.1 Zeabur 開 `cc-memory-personal` PG service；A2.2 `src/db/resolve-url.ts`（config.ts 重接）+ `src/db/client.ts` + tests；migration 0007 personal-only CHECK + 0008 project-only 反向 CHECK | 既有 npm test 不回歸；fail-fast 矩陣四案皆綠（forced 缺 personal URL exit、非 forced 偵測到 personal URL warn + 拒載入該 URL 不 exit、`CC_FORCE_PROJECT_ID` 與 `CC_MEMORY_PROJECT_ID` 同設 exit——檢查在 `src/services/scope-policy.ts`、forced 非 personal namespace 不 throw） |
+| 3b | A2.3 `scripts/migrate-personal-data.ts` + A2.4 `scripts/preflight.ts` 三 mode（P1-P7/C1-C5/D1-D5）+ A2.5 `scripts/delete-personal-data.ts`（tx 內 DELETE→驗證→COMMIT） | preflight 三 mode 全 PASS；本地全管線 e2e 綠（`tests/scripts/e2e-migration-pipeline.test.ts`，staging 演練前移）；staging 再跑完整 Step 0-7 演練 |
+| 3c | A2.6 prod maintenance window 上線（backup → migrate → preflight → delete script → 0008 → post-delete → env 切換）| A2.7 端對端驗收 7 條全綠；rollback rehearsal 通過 |
 
 ### 跨 repo roadmap（介面草案 / Gate / OQ 層級，不展開 task）
 
 | 階段 | 目標 | 介面草案 | Gate | Open Questions |
 |---|---|---|---|---|
-| **-1 前置** | AI_Copilot 移除/限制 raw postgres | 改 `.mcp.json` | 該環境無持 `DATABASE_URL` 的繞過通道 | raw postgres 有無其他依賴方？ |
+| **-1 前置（v0.4 翻案後 strongly recommended，非 hard blocker）** | AI_Copilot 清理 raw postgres（降攻擊面） | 改 `.mcp.json` | 該環境 raw postgres MCP **不持** `DATABASE_URL_PERSONAL` 且無寫入個人 DB 通道（Phase 3 v0.4 後 project `DATABASE_URL` 已無讀寫個人資料能力） | raw postgres 有無其他依賴方？ |
 | **hermes 整合** | hermes 用 personal forced-mode client | hermes 起 cc-memory MCP（`CC_FORCE_PROJECT_ID=__personal__`） | hermes 能讀寫 `__personal__`、讀不到專案 | hermes 的 MCP client 接法 |
 | **/hi 整合** | `/hi` 注入個人近況/待辦 | read-only instance（Phase 2）+ `cc_task_stats` | `/hi` 能注入但絕不誤寫 | 注入格式/篇幅 |
 | **reminder channel** | due 提醒推實際 channel | poller 呼 `getDueReminders({channel})` → 推送 | 端到端：設提醒 → 到點收到 | 用哪個 channel（Telegram/hermes push）；poller 跑在哪 |
@@ -515,7 +528,11 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 
 | 風險 | 影響 | 緩解 |
 |---|---|---|
-| forced-mode 被 raw postgres / shell 繞過 | 個人資料在持 `DATABASE_URL` 環境可被讀走 | 誠實標示為應用層邊界；Phase 3 DB RLS 終極隔離；Phase -1 先處理 AI_Copilot raw postgres |
+| forced-mode 被 raw postgres / shell 繞過 | 個人資料在持 `DATABASE_URL` 環境可被讀走 | v0.4 翻案後：Phase 3 獨立 personal DB——`DATABASE_URL`（project DB）裡根本沒有個人資料；secret 邊界 `DATABASE_URL_PERSONAL` 只配給 forced-mode personal / admin；project-mode instance 拒絕載入 personal URL；Phase -1 仍先處理 AI_Copilot raw postgres（strongly recommended，降為 non-blocker） |
+| 跨 DB 遷移過程個人資料丟 / 雙存 | 部分 row 缺漏或同時存在兩 DB | maintenance window 內順序：migrate copy → preflight post-copy（row count + checksum）通過才往下 → delete script 在同一 tx 內 LOCK + 重計數 + checksum 與 personal DB 精確比對後才 DELETE、同 tx 驗證全過才 COMMIT（任一不符自動 ROLLBACK）→ preflight post-delete 為 COMMIT 後最終確認；checksum 用 `to_jsonb` + UTC 的 MD5 string_agg |
+| project-mode instance 誤配 personal URL | 個人資料外洩到 project context | `src/config.ts` 啟動偵測：project-mode instance 看到 `DATABASE_URL_PERSONAL` → warn + 拒絕載入該 URL（不 exit，允許 admin 同持兩 URL） |
+| forced-mode personal instance 缺 personal URL 退回 project DB | 個人 instance 寫到錯 DB | `src/config.ts` 啟動 fail-fast：forced + `__personal__` + 缺 `DATABASE_URL_PERSONAL` → exit |
+| `cc_reminders_due` 在 read-only instance 被視為純讀 | claim/update reminder_log 仍會寫 | ✅ 已實作（Phase 2）：`src/services/tool-policy.ts:36` 將 `cc_reminders_due` 列入 `WRITE_TOOLS`（含 header comment 說明「名為撈但會認領寫 reminder_log」），雙層 enforce 已涵蓋；tests/services/tool-policy.test.ts + tests/mcp-read-only.test.ts 對應 case 綠 |
 | reminder 多 poller 重複投遞 | 同提醒響兩次 | `FOR UPDATE SKIP LOCKED` + `reminder_log` unique 去重雙保險 |
 | 已投遞一次性 slot starve 新 due（LIMIT 在去重前）| 新提醒永不被處理 | 查詢 `NOT EXISTS reminder_log` 在 LIMIT 前排除已投遞 slot（Codex P1） |
 | reminder poller 撈到別 namespace task | 破 Phase 0 隔離、個人 poller 投遞專案 task | `getDueReminders` / mutation 全帶 scope projectId，`WHERE project_id=$scope`（Codex P1）|
@@ -533,7 +550,7 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 3. reminder channel 選型（Telegram / hermes push / 系統通知）→ 跨 repo 階段決。
 4. ~~Todoist 匯出格式 → **blocking**，需使用者提供樣本~~ → ✅ 已決：改 **Option E**（cc-memory 內建薄 client、`cc_todoist_*` 直打 Todoist API v1），雙系統並存、無自動 sync；不再需要匯出樣本、不再 blocking。
 5. read-only telemetry：`CC_SEARCH_FEEDBACK` 預設 on/off → 暫定 on（評估需要），可調。
-6. Phase 3 RLS 對既有 single-connection 部署的影響 → preflight 驗證。
+6. ~~Phase 3 RLS 對既有 single-connection 部署的影響 → preflight 驗證。~~ → ✅ 已決：v0.4 翻案不採 RLS；改用獨立 personal DB（見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)）。新 OQ 已內化入 plan：deployment topology env 配發、preflight 三 mode、maintenance window 演練順序——皆已寫入 plan，非開放問題。
 
 ---
 
@@ -549,6 +566,11 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 ### Phase 2（read-only）
 - 不設 `CC_READ_ONLY` → 行為與現在完全相同；回滾 = 移除過濾邏輯。
 
-### Phase 3（prod RLS）
-- 高風險（可能鎖死連線）；**preflight 必過才 apply**；回滾 = `DROP POLICY` + role 還原 grant，schema 不變。
-- RLS migration 設計成可 `DOWN`（先驗 down 再 up）。
+### Phase 3（prod，v0.4 翻案：獨立 personal DB）
+- 風險集中在跨 DB 遷移步驟而非 DB 內部規則；**preflight 三 mode 全過才繼續**；任一 fail → ROLLBACK，maintenance window 結束、保留現狀。
+- maintenance window 演練先在 staging 跑完整 Step 0-7（含模擬 fail rollback），prod 才進。
+- Rollback playbook：
+  - Step 1-4 fail → personal DB drop，project DB 原樣，env 不切換。
+  - Step 5（delete script）同 tx 內驗證（計數 / checksum / 歸零）任一不符 → script 自動 ROLLBACK + exit 1，project DB 個人列原樣；preflight post-delete 是 COMMIT 後最終確認（MVCC 下「未 COMMIT 前由另一連線驗證」結構性不可行——其他連線看不到未 COMMIT 的刪除，見 ADR-001 補記）。
+  - Step 6 (env 切換) 後若有 prod 異常 → restore project DB backup（Step 0 已開）+ env 切回；personal DB 保留供事後比對。
+- 翻案前後對照：原 RLS 方案下「回滾 = DROP POLICY + role grant 還原」；現方案下沒有 policy 要 DROP，回滾窗口集中在「DELETE 是否 COMMIT」+「env 是否切換」兩個原子步驟。

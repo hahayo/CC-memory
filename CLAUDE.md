@@ -22,7 +22,7 @@ npm run clean    # 清除 build/ 目錄
 ## Architecture
 
 ### MCP Server (src/index.ts)
-主要進入點，實作 12 個 MCP 工具：
+主要進入點，實作 18 個 MCP 工具：
 
 Memory（6）：
 - `cc_memory_save` - 儲存記憶（summary, keywords, decisions, nextSteps）
@@ -39,6 +39,12 @@ Task（6）：
 - `cc_task_stats` - 任務統計 JSON（today/overdue/open/in_progress/completed_recently，日界 Asia/Taipei）
 - `cc_task_set_reminder` - 設定提醒（remind_at 觸發時點 + 可選 recurrence；Personal-Hub Phase 1）
 - `cc_task_snooze` - 暫緩提醒到 snooze_until（Personal-Hub Phase 1）
+
+Reminder（1）：
+- `cc_reminders_due` - 撈 + 認領到期提醒（poller 入口；會寫 reminder_log，read-only mode 下歸寫入類拒）
+
+Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
+- `cc_todoist_add` / `cc_todoist_projects` / `cc_todoist_list` / `cc_todoist_complete` / `cc_todoist_completed`
 
 > 除 `cc_memory_search` 外，所有工具皆 fail-fast：必須帶 `project_id` 或 `project_path`（MCP server 的 cwd 非 client cwd，無法可靠解析）。ScopePolicy（`src/services/scope-policy.ts`）統一決策 forced-mode / project-mode deny。
 
@@ -72,9 +78,11 @@ Task（6）：
 - `DATABASE_URL` - PostgreSQL 連線字串
 
 可選環境變數：
+- `DATABASE_URL_PERSONAL` - 獨立 personal DB 連線（Phase 3 v0.4；見 `docs/personal-hub/decisions/ADR-001-phase3-separate-db.md`）。forced personal instance **必填**；非 forced personal instance 偵測到 → warn + 拒絕載入該 URL（不 exit）
 - `GEMINI_API_KEY` - 啟用語義搜尋 embedding（未設則自動降級 keyword-only）
 - `CC_MEMORY_PROJECT_ID` - resolveProjectId 的 fallback layer（server 不知道自己在哪時用）
-- `CC_FORCE_PROJECT_ID` - forced-mode：此 instance 鎖定單一 namespace（如 `__personal__`），所有工具強制 scope、拒絕跨 project；與 `CC_MEMORY_PROJECT_ID` 互斥（同設啟動 fail）
+- `CC_FORCE_PROJECT_ID` - forced-mode：此 instance 鎖定單一 namespace（如 `__personal__`），所有工具強制 scope、拒絕跨 project；與 `CC_MEMORY_PROJECT_ID` 互斥（同設啟動 fail）。**設 `__personal__` 時必須同設 `DATABASE_URL_PERSONAL`**（缺則啟動 throw）
+- `TODOIST_API_TOKEN` - 啟用 cc_todoist_* 工具（需同時 forced personal）
 - `CC_READ_ONLY` - read-only mode（Phase 2）：寫入類 tool 在 ListTools 隱藏 + handler 拒絕（雙層 enforce）。給 `/hi` 注入等只讀消費端
 - `CC_TOOL_ALLOWLIST` - 逗號分隔 tool 白名單（Phase 2）：只露/允許集合內 tool（含 read）；集合外兩層皆拒
 - `CC_SEARCH_FEEDBACK` - search telemetry 開關（Phase 2，預設 on）：`off`/`0`/`false` 關閉 `cc_memory_search` 的 `search_feedback` 寫入
