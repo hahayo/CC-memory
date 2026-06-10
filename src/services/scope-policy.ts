@@ -16,8 +16,10 @@
 //   - 規則作用在「已解析出的 projectId」上，因此 project_path / CLAUDE.md marker /
 //     git / basename 解析出保留 namespace 的情況一律被涵蓋（deny 不只擋顯式 project_id）。
 
+import { notInArray, type SQL } from 'drizzle-orm';
 import { InvalidArgumentError } from './errors.js';
 import { PERSONAL_PROJECT_ID } from '../constants.js';
+import { projectMemories } from '../db/schema.js';
 
 // ---------------------------------------------------------------------------
 // 常數：保留 namespace
@@ -30,8 +32,25 @@ export { PERSONAL_PROJECT_ID };
 /** 所有保留 namespace（未來可擴充）。 */
 export const RESERVED_PROJECT_IDS: ReadonlySet<string> = new Set([PERSONAL_PROJECT_ID]);
 
+export const RESERVED_PROJECT_ID_LIST: string[] = [...RESERVED_PROJECT_IDS];
+
 export function isReservedProjectId(id: string): boolean {
   return RESERVED_PROJECT_IDS.has(id);
+}
+
+/**
+ * cross-project search 的保留 namespace 排除 predicate——單一 SoT（Codex A7）。
+ * searchMemories（src/services/memories.ts）與 scope-probe integration test
+ * （tests/scripts/scope-probe.test.ts）共用；改排除規則只能改這裡，防 service
+ * 與驗證端各寫一份 SQL 漂移。
+ *
+ * 放進 WHERE（非 post-filter）：避免個人資料先進 top-N、擠掉合法結果後才被濾掉
+ * （codex 第十三輪）。
+ */
+export function reservedExclusionCondition(excludeReserved: boolean): SQL | null {
+  return excludeReserved
+    ? notInArray(projectMemories.projectId, RESERVED_PROJECT_ID_LIST)
+    : null;
 }
 
 // ---------------------------------------------------------------------------

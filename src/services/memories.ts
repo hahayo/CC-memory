@@ -18,7 +18,6 @@ import {
   sql,
   cosineDistance,
   isNotNull,
-  notInArray,
   count,
   min,
   max,
@@ -26,7 +25,7 @@ import {
 } from 'drizzle-orm';
 
 import { projectMemories, type Memory, type NewMemory } from '../db/schema.js';
-import { RESERVED_PROJECT_IDS } from './scope-policy.js';
+import { reservedExclusionCondition } from './scope-policy.js';
 import type {
   DbClient,
   SaveMemoryInput,
@@ -282,15 +281,8 @@ interface ScoredSearchItem {
 }
 
 // 全專案搜尋（projectId undefined）時排除保留 namespace（隱私邊界方向 2）。
-// 放進 WHERE（非 post-filter）：避免個人資料先進 top-N、擠掉合法結果後才被濾掉
-// （codex 第十三輪）。
-const RESERVED_PROJECT_ID_LIST: string[] = [...RESERVED_PROJECT_IDS];
-
-function reservedExclusionCondition(excludeReserved: boolean): SQL | null {
-  return excludeReserved
-    ? notInArray(projectMemories.projectId, RESERVED_PROJECT_ID_LIST)
-    : null;
-}
+// predicate 抽到 scope-policy.ts 作單一 SoT（Codex A7）——service 與
+// scope-probe integration test 共用，防兩邊 SQL 漂移。
 
 async function keywordSearchRows(
   db: DbClient,
