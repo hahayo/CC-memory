@@ -7,10 +7,10 @@
 | 角色 | 說明 |
 |---|---|
 | **project DB** | Zeabur project `CC-memory`、service `postgresql` — schema migration 0000-0006 + 0008（反向 CHECK：拒 `__personal__` 寫入）。連線字串：`~/.ccm-prod-url`（mode 600） |
-| **personal DB** | 同 Zeabur project、service `cc-memory-personal`（pgvector/pgvector:pg18）— schema 0000-0007（0007 CHECK：只准 `__personal__`）。連線字串：`~/.ccm-personal-url`（mode 600） |
+| **personal DB** | 同 Zeabur project、service `cc-memory-personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue，personal-only，2026-06-10 套用）。連線字串：`~/.ccm-personal-url`（mode 600） |
 | **forced personal launcher** | `/home/haha/run-cc-memory-personal.sh`（只持 DATABASE_URL_PERSONAL；Claude Code `cc-memory-personal` / Codex / hermes 共用） |
 | **read-only launcher** | `/home/haha/run-cc-memory-personal-ro.sh`（+CC_READ_ONLY=1 +CC_SEARCH_FEEDBACK=off；Claude Code `cc-memory-hi`，/hi 注入用） |
-| **hermes reminder cron** | job `cc-memory-reminders`（id 8cca281df423，*/5min）→ `~/.hermes/scripts/cc-reminders.sh` → `scripts/hermes-reminder-poll.ts`（⚠️ cron 直接跑本 repo working tree——commit 即上線） |
+| **hermes reminder cron** | job `cc-memory-reminders`（id 8cca281df423，*/5min）→ `~/.hermes/scripts/cc-reminders.sh` → `scripts/hermes-reminder-poll.ts`（poller v2：at-least-once durable queue + 直送 Telegram；⚠️ cron 直接跑本 repo working tree——commit 即上線，**新 migration 必須先套 personal DB 再切換 working tree**，否則 poller 每 tick 報 relation does not exist） |
 | **project-mode instance** | Claude Code `cc-memory`（~/.claude.json 持 project DB URL，不變） |
 
 ---
@@ -89,6 +89,24 @@ psql "$(cat ~/.ccm-personal-url)" -c \
    ORDER BY fired_at DESC
    LIMIT 50;"
 ```
+
+### 投遞佇列健康（at-least-once delivery queue）
+
+```bash
+# pending 積壓與 dead-letter（dead > 0 = 有提醒投遞失敗 5 次被放棄，需人工處理）
+psql "$(cat ~/.ccm-personal-url)" -c \
+  "SELECT status, COUNT(*), MIN(next_attempt_at) AS oldest_next_attempt
+   FROM reminder_delivery_queue
+   GROUP BY status;"
+
+# dead-letter 明細（payload 含任務標題；同時會出現在 cron stdout 的 ⚠️ 告警）
+psql "$(cat ~/.ccm-personal-url)" -c \
+  "SELECT task_id, payload, attempts, last_error, created_at
+   FROM reminder_delivery_queue WHERE status = 'dead';"
+```
+
+dead 列處理：修復根因（如 Telegram token 失效）後，把該列 `status` 改回 `'pending'`、
+`next_attempt_at = NOW()`、`attempts = 0` 即可重新投遞；不需要的直接 DELETE。
 
 ### MCP instance 健康
 
