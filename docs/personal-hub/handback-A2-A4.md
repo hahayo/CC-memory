@@ -194,7 +194,12 @@ COMMIT;  -- 驗證不過改 ROLLBACK
 
 ---
 
-## 🟡 A3c — reminder channel 補齊（hermes repo）
+## ✅ A3c — reminder channel 補齊（2026-06-10 完成，PR #7 merged）
+
+> 實際落地：migration 0009 `reminder_delivery_queue` + `src/services/delivery-queue.ts`
+>（原子 UPDATE lease claim + status guard）+ poller v2 直送 Telegram + 4/8/16/32min
+> backoff、5 次 dead-letter（stdout ⚠️ 告警走 hermes cron admin alert）。
+> 細節見 `prod-runbook.md` 投遞佇列健康節。原設計備忘如下：
 
 - delivery semantics 決定：**at-least-once + dedupe**（不做 exactly-once，個人可接受偶爾雙發）
 - dedupe key：`(reminder_id, slot_id)`，client 端（Telegram channel）以此 dedupe
@@ -206,7 +211,14 @@ COMMIT;  -- 驗證不過改 ROLLBACK
 
 ---
 
-## 🟡 A3d — Todoist 自動 sync（cc-memory + hermes repo）
+## ✅ A3d — Todoist 自動 sync（2026-06-10 完成）
+
+> 實際落地與下方原設計有兩處偏離（皆已拍板）：
+> 1. **webhook → polling**：WSL 無公網入口，改 hermes cron */15min 跑
+>    `scripts/todoist-sync-poll.ts` → Todoist Sync API 增量拉取（sync_token 存 `sync_state` 表）。
+> 2. **軟刪 status='cancelled'**（非 'archived'——tasks_status_check 枚舉無 archived）。
+> Loop prevention 以 `source='todoist'` 標記 + sync 只打 /sync 讀端點（測試鎖死）。
+> migration 0010（todoist_id + sync_state，兩側 DB）。細節見 `prod-runbook.md` Todoist sync 健康節。原設計備忘如下：
 
 > 本期實作 scope：**Todoist → cc-memory 單向 sync**（反向 sync、複雜 conflict resolution 等留待後續 phase）。
 

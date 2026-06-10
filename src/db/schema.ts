@@ -115,13 +115,16 @@ export const tasks = pgTable(
     lastNotifiedAt: timestamp('last_notified_at', { withTimezone: true }),
     snoozeUntil: timestamp('snooze_until', { withTimezone: true }),
     recurrenceIntervalDays: integer('recurrence_interval_days'),
+    // Personal-Hub A3d — Todoist 單向 sync（0010，personal-only migration）。
+    // todoist_id：Todoist item id，upsert key；project DB 無此欄（personal-only）。
+    todoistId: text('todoist_id'),
     metadata: jsonb('metadata').notNull().default({}),
   },
   (table) => [
     check('tasks_title_length_check', sql`char_length(${table.title}) BETWEEN 1 AND 500`),
     check('tasks_status_check', sql`${table.status} IN ('open','in_progress','done','cancelled')`),
     check('tasks_priority_check', sql`${table.priority} IN ('low','normal','high')`),
-    check('tasks_source_check', sql`${table.source} IN ('manual','telegram','claude-code','codex','mcp')`),
+    check('tasks_source_check', sql`${table.source} IN ('manual','telegram','claude-code','codex','mcp','todoist')`),
     // recurrence 區間：null（一次性）或正整數，0 / 負數 由 CHECK 擋。
     check(
       'tasks_recurrence_interval_check',
@@ -142,6 +145,10 @@ export const tasks = pgTable(
     uniqueIndex('tasks_idempotency_project_key_idx')
       .on(table.projectId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
+    // Todoist upsert key（0010）：partial unique，未同步列（NULL）不受限。
+    uniqueIndex('tasks_todoist_id_uniq')
+      .on(table.todoistId)
+      .where(sql`${table.todoistId} IS NOT NULL`),
   ]
 );
 
@@ -211,6 +218,22 @@ export const reminderDeliveryQueue = pgTable(
 
 export type ReminderDeliveryQueue = typeof reminderDeliveryQueue.$inferSelect;
 export type NewReminderDeliveryQueue = typeof reminderDeliveryQueue.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// sync_state（Personal-Hub A3d — Todoist incremental sync token，0010 personal-only）
+// ---------------------------------------------------------------------------
+//
+// resource：sync 來源識別（如 'todoist'）。sync_token = Todoist Sync API 的
+// incremental token；token 只在整批 upsert 成功後前進（失敗下輪用舊 token 重拉）。
+
+export const syncState = pgTable('sync_state', {
+  resource: text('resource').primaryKey(),
+  syncToken: text('sync_token').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type SyncState = typeof syncState.$inferSelect;
+export type NewSyncState = typeof syncState.$inferInsert;
 
 // ---------------------------------------------------------------------------
 // search_feedback（v0.2 新增）— 由 Phase 1 TDD 加入
