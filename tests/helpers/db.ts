@@ -1,8 +1,8 @@
 // tests/helpers/db.ts
 //
 // 測試 DB 連線 + cleanup 共用 helper。
-// Cleanup 順序：reminder_log → tasks → search_feedback → project_memories → bot_user_state
-// （reminder_log FK→tasks，先子後父，避免 FK violation）。
+// Cleanup 順序：reminder_delivery_queue → reminder_log → tasks → search_feedback → project_memories → bot_user_state
+// （reminder_delivery_queue FK→tasks，reminder_log FK→tasks，先子後父，避免 FK violation）。
 
 import postgres from 'postgres';
 
@@ -45,10 +45,11 @@ export async function connectTestDb(): Promise<Sql> {
 }
 
 /**
- * 清空五張表；順序：reminder_log → tasks → search_feedback → project_memories → bot_user_state。
- * reminder_log 必須先刪（FK→tasks.id；先刪 tasks 會撞 FK violation）。
+ * 清空六張表；順序：reminder_delivery_queue → reminder_log → tasks → search_feedback → project_memories → bot_user_state。
+ * reminder_delivery_queue 與 reminder_log 均 FK→tasks.id，必須先刪子表再刪父表，避免 FK violation。
  */
 export async function resetAllTables(sql: Sql): Promise<void> {
+  await sql`DELETE FROM reminder_delivery_queue`;
   await sql`DELETE FROM reminder_log`;
   await sql`DELETE FROM tasks`;
   await sql`DELETE FROM search_feedback`;
