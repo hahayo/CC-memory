@@ -256,7 +256,7 @@
 
 - [ ] forced-mode personal instance `cc_memory_save` 寫進 personal DB；project DB SELECT 看不到
 - [ ] forced-mode personal `cc_memory_search` 只回 personal
-- [ ] project-mode 全專案 search 不含 `__personal__`（**插假 `__personal__` row 進 project DB 測 ScopePolicy 排除**）
+- [ ] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder + scope-probe test 鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）
 - [ ] 拿 project DB URL raw postgres 查 `__personal__` → 0 列
-- [ ] personal DB INSERT 非 `__personal__` row → CHECK constraint 拒
-- [ ] preflight 三 mode 全 PASS 才繼續 / COMMIT
+- [ ] personal DB INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB INSERT `__personal__` row → 0008 CHECK 拒
+- [ ] delete script 同 tx 內驗證全過才 COMMIT；preflight 三 mode（P1-P7/C1-C5/D1-D5）全 PASS
