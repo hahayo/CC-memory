@@ -141,12 +141,18 @@ async function main() {
     await admin.end({ timeout: 5 });
   }
 
-  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（'0008' 之前）
+  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009
   await applyMigrations(projectUrl, migrationFiles('0007'));
-  await applyMigrations(personalUrl, migrationFiles('0008'));
+  const personalMigrations = [
+    ...migrationFiles('0008'),                          // 0000-0007
+    '0009_add_reminder_delivery_queue.sql',             // personal-only
+  ];
+  await applyMigrations(personalUrl, personalMigrations);
+  // 0009 也套 project test DB：service tests 用 project DB 跑，需要 reminder_delivery_queue table
+  await applyMigrations(projectUrl, ['0009_add_reminder_delivery_queue.sql']);
   await dropProjectNoPersonalChecks(projectUrl);
 
-  console.error(`done：${dbNameOf(projectUrl)}（0000-0006）/ ${dbNameOf(personalUrl)}（0000-0007）`);
+  console.error(`done：${dbNameOf(projectUrl)}（0000-0006+0009）/ ${dbNameOf(personalUrl)}（0000-0007+0009）`);
 }
 
 main().catch((err) => {

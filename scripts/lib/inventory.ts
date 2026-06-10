@@ -15,6 +15,12 @@
 //
 // bot_user_state 維持排除：user-level state（telegram_user_id PK、無 project_id 欄）。
 // 既有 active_project_id='__personal__' 列的處置見 handback runbook（清掉或確認不需要）。
+//
+// reminder_delivery_queue 排除（Codex PR #7 P2）：migration 0009 是 personal-only
+//（prod-runbook：project DB = 0000-0006+0008），queue 列只存在 personal DB、從未
+// 存在 project DB，不屬 project→personal cutover 範圍。不排除的話 personal 側
+// discoverInventory 會經 FK 探勘（tasks FK）誤報 unexpected。投遞狀態是 transient
+// infra（ON DELETE CASCADE 跟隨 tasks），非需遷移的個人資料。
 
 import { PERSONAL_PROJECT_ID } from '../../src/constants.js';
 import { ident, type Queryable } from './clients.js';
@@ -49,7 +55,7 @@ export const SCHEMA_COMPARE_TABLES = [
   'search_feedback',
 ] as const;
 
-const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state'];
+const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state', 'reminder_delivery_queue'];
 
 /**
  * 動態 inventory 探勘：
