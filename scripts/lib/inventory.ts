@@ -15,6 +15,12 @@
 //
 // bot_user_state 維持排除：user-level state（telegram_user_id PK、無 project_id 欄）。
 // 既有 active_project_id='__personal__' 列的處置見 handback runbook（清掉或確認不需要）。
+//
+// reminder_delivery_queue 排除（Codex PR #7 P2）：migration 0009 是 personal-only
+//（prod-runbook：project DB = 0000-0006+0008），queue 列只存在 personal DB、從未
+// 存在 project DB，不屬 project→personal cutover 範圍。不排除的話 personal 側
+// discoverInventory 會經 FK 探勘（tasks FK）誤報 unexpected。投遞狀態是 transient
+// infra（ON DELETE CASCADE 跟隨 tasks），非需遷移的個人資料。
 
 import { PERSONAL_PROJECT_ID } from '../../src/constants.js';
 import { ident, type Queryable } from './clients.js';
@@ -32,15 +38,14 @@ export const EXPECTED_INVENTORY: InventoryEntry[] = [
   { table: 'project_memories', filter: { kind: 'project_id_eq', value: PERSONAL_PROJECT_ID } },
   { table: 'tasks', filter: { kind: 'project_id_eq', value: PERSONAL_PROJECT_ID } },
   { table: 'reminder_log', filter: { kind: 'task_fk', refTable: 'tasks', fkColumn: 'task_id' } },
-  { table: 'reminder_delivery_queue', filter: { kind: 'task_fk', refTable: 'tasks', fkColumn: 'task_id' } },
   { table: 'search_feedback', filter: { kind: 'feedback_personal' } },
 ];
 
 /** copy 順序（FK-safe：先父後子）。search_feedback 只刪不搬，不在此列。 */
-export const COPY_ORDER = ['project_memories', 'tasks', 'reminder_log', 'reminder_delivery_queue'] as const;
+export const COPY_ORDER = ['project_memories', 'tasks', 'reminder_log'] as const;
 
 /** delete 順序（FK-safe：先子後父；search_feedback 殿後，與其他表無 FK 關聯）。 */
-export const DELETE_ORDER = ['reminder_delivery_queue', 'reminder_log', 'tasks', 'project_memories', 'search_feedback'] as const;
+export const DELETE_ORDER = ['reminder_log', 'tasks', 'project_memories', 'search_feedback'] as const;
 
 /** preflight P6 schema 比對範圍（0007/0008 為 expected-delta，見 preflight）。 */
 export const SCHEMA_COMPARE_TABLES = [
@@ -50,7 +55,7 @@ export const SCHEMA_COMPARE_TABLES = [
   'search_feedback',
 ] as const;
 
-const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state'];
+const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state', 'reminder_delivery_queue'];
 
 /**
  * 動態 inventory 探勘：

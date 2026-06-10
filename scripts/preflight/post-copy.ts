@@ -9,11 +9,7 @@ import {
   countPersonalRows,
   type InventoryEntry,
 } from '../lib/inventory.js';
-import {
-  reminderDeliveryQueueChecksum,
-  reminderLogChecksum,
-  tableChecksum,
-} from '../lib/checksum.js';
+import { reminderLogChecksum, tableChecksum } from '../lib/checksum.js';
 import { PreflightAbort, checkIdentity, record, type CaseResult } from './shared.js';
 
 function requireUrl(name: string): string {
@@ -67,12 +63,7 @@ export async function postCopy(): Promise<CaseResult[]> {
         const [p, s] =
           table === 'reminder_log'
             ? [await reminderLogChecksum(personal), await reminderLogChecksum(project)]
-            : table === 'reminder_delivery_queue'
-              ? [
-                  await reminderDeliveryQueueChecksum(personal),
-                  await reminderDeliveryQueueChecksum(project),
-                ]
-              : [await tableChecksum(personal, table), await tableChecksum(project, table)];
+            : [await tableChecksum(personal, table), await tableChecksum(project, table)];
         record(
           results,
           'C3',
