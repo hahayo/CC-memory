@@ -54,6 +54,8 @@ import {
   type InventoryEntry,
 } from './lib/inventory.js';
 import {
+  reminderDeliveryQueueChecksum,
+  reminderDeliveryQueueChecksumIn,
   reminderLogChecksum,
   reminderLogChecksumIn,
   tableChecksum,
@@ -89,6 +91,7 @@ async function personalChecksums(sql: ReturnType<typeof adminClient>) {
     project_memories: await tableChecksum(sql, 'project_memories'),
     tasks: await tableChecksum(sql, 'tasks'),
     reminder_log: await reminderLogChecksum(sql),
+    reminder_delivery_queue: await reminderDeliveryQueueChecksum(sql),
   } as Record<string, string>;
 }
 
@@ -97,6 +100,7 @@ async function projectChecksumsIn(tx: Queryable) {
     project_memories: await tableChecksumIn(tx, 'project_memories'),
     tasks: await tableChecksumIn(tx, 'tasks'),
     reminder_log: await reminderLogChecksumIn(tx),
+    reminder_delivery_queue: await reminderDeliveryQueueChecksumIn(tx),
   } as Record<string, string>;
 }
 
@@ -169,6 +173,7 @@ export async function runDeletePersonalData(opts: DeleteOptions): Promise<Delete
         project_memories: await tableChecksum(project, 'project_memories'),
         tasks: await tableChecksum(project, 'tasks'),
         reminder_log: await reminderLogChecksum(project),
+        reminder_delivery_queue: await reminderDeliveryQueueChecksum(project),
       } as Record<string, string>;
       log(`\nChecksum 預覽（無 lock，僅參考；execute 時 tx 內精確比對）:`);
       for (const t of COPY_ORDER) {

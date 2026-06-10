@@ -182,6 +182,37 @@ export type ReminderLog = typeof reminderLog.$inferSelect;
 export type NewReminderLog = typeof reminderLog.$inferInsert;
 
 // ---------------------------------------------------------------------------
+// reminder_delivery_queue（Personal-Hub Phase 3 — at-least-once delivery）
+// ---------------------------------------------------------------------------
+
+export const reminderDeliveryQueue = pgTable(
+  'reminder_delivery_queue',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }).notNull(),
+    payload: text('payload').notNull(),
+    channel: text('channel').notNull().default('telegram'),
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  },
+  (table) => [
+    check('rdq_status_check', sql`${table.status} IN ('pending','delivered','dead')`),
+    uniqueIndex('rdq_slot_uniq').on(table.taskId, table.scheduledFor),
+    index('rdq_due_idx').on(table.status, table.nextAttemptAt),
+  ]
+);
+
+export type ReminderDeliveryQueue = typeof reminderDeliveryQueue.$inferSelect;
+export type NewReminderDeliveryQueue = typeof reminderDeliveryQueue.$inferInsert;
+
+// ---------------------------------------------------------------------------
 // search_feedback（v0.2 新增）— 由 Phase 1 TDD 加入
 // retrieval 評估用：query / mode / 排名結果 / 使用者選擇 / thumbs
 // ---------------------------------------------------------------------------

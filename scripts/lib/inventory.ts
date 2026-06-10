@@ -32,14 +32,15 @@ export const EXPECTED_INVENTORY: InventoryEntry[] = [
   { table: 'project_memories', filter: { kind: 'project_id_eq', value: PERSONAL_PROJECT_ID } },
   { table: 'tasks', filter: { kind: 'project_id_eq', value: PERSONAL_PROJECT_ID } },
   { table: 'reminder_log', filter: { kind: 'task_fk', refTable: 'tasks', fkColumn: 'task_id' } },
+  { table: 'reminder_delivery_queue', filter: { kind: 'task_fk', refTable: 'tasks', fkColumn: 'task_id' } },
   { table: 'search_feedback', filter: { kind: 'feedback_personal' } },
 ];
 
 /** copy 順序（FK-safe：先父後子）。search_feedback 只刪不搬，不在此列。 */
-export const COPY_ORDER = ['project_memories', 'tasks', 'reminder_log'] as const;
+export const COPY_ORDER = ['project_memories', 'tasks', 'reminder_log', 'reminder_delivery_queue'] as const;
 
 /** delete 順序（FK-safe：先子後父；search_feedback 殿後，與其他表無 FK 關聯）。 */
-export const DELETE_ORDER = ['reminder_log', 'tasks', 'project_memories', 'search_feedback'] as const;
+export const DELETE_ORDER = ['reminder_delivery_queue', 'reminder_log', 'tasks', 'project_memories', 'search_feedback'] as const;
 
 /** preflight P6 schema 比對範圍（0007/0008 為 expected-delta，見 preflight）。 */
 export const SCHEMA_COMPARE_TABLES = [

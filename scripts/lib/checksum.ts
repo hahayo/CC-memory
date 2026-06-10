@@ -48,3 +48,19 @@ export async function reminderLogChecksumIn(tx: Queryable): Promise<string> {
 export async function reminderLogChecksum(sql: postgres.Sql<any>): Promise<string> {
   return sql.begin((tx) => reminderLogChecksumIn(tx)) as Promise<string>;
 }
+
+/** reminder_delivery_queue（無 project_id 欄，task_id FK-scoped）tx 內版本。 */
+export async function reminderDeliveryQueueChecksumIn(tx: Queryable): Promise<string> {
+  await tx`SET LOCAL TIME ZONE 'UTC'`;
+  const r = await tx<{ checksum: string | null }[]>`
+    SELECT MD5(string_agg(to_jsonb(rdq)::text, '|' ORDER BY rdq.id)) AS checksum
+    FROM reminder_delivery_queue rdq
+    JOIN tasks t ON t.id = rdq.task_id
+    WHERE t.project_id = ${PERSONAL_PROJECT_ID}
+  `;
+  return r[0].checksum ?? 'empty';
+}
+
+export async function reminderDeliveryQueueChecksum(sql: postgres.Sql<any>): Promise<string> {
+  return sql.begin((tx) => reminderDeliveryQueueChecksumIn(tx)) as Promise<string>;
+}
