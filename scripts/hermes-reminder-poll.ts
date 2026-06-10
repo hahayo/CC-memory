@@ -1,51 +1,175 @@
-// scripts/hermes-reminder-poll.ts — hermes `--no-agent` reminder poller。
+// scripts/hermes-reminder-poll.ts — hermes `--no-agent` reminder poller v2。
 //
-// 撈 + 認領到期提醒（channel='hermes'）：
-//   - 有到期 → 印格式化訊息到 stdout（hermes --no-agent 投遞 verbatim）。
-//   - 無到期 → 空 stdout（hermes 視為靜默、不投遞）。
+// at-least-once durable delivery：
+//   1. getDueReminders：撈 + 認領到期提醒（同時寫 reminder_log，DB tx 內）
+//   2. enqueueDue：把 due 的 payload 放進 delivery queue（冪等，ON CONFLICT DO NOTHING）
+//   3. claimDeliverable(db, 20)：FOR UPDATE SKIP LOCKED，撈最多 20 筆待投遞
+//   4. 逐筆 POST Telegram sendMessage（10s timeout via AbortController）：
+//      - 成功（HTTP 200）→ markDelivered
+//      - 失敗（非 200 / 網路錯）→ markFailed；回 'dead' → stdout 印 ⚠️ 告警
+//   5. 回傳 {dead: string[]}（dead-letter task 標題清單）
 //
-// 生命週期刻意鏡像 scripts/run-reminders.ts：自建 postgres client → getDueReminders
-// → await client.end() → 自然退出。**不要用 process.exit() 在 stdout.write 之後**：
-// Node 對 pipe 的 stdout 是 async，process.exit() 會跳過 flush 造成截斷（hermes 抓的就是 pipe）。
-// Phase 3 v0.4：DB URL 走 src/config 啟動期決策（forced personal → DATABASE_URL_PERSONAL；
-// 含 sanitize 引號+\r）。缺 URL 在 import 時 throw → main().catch 不會接到，但 ESM
-// top-level throw 一樣 exit 1 + stderr，stdout 保持空 → hermes --no-agent 視為靜默。
-// ⚠️ 部署順序（2026-06-10 實證）：hermes cron 的 cc-reminders.sh **直接跑本 repo
-// working tree——commit 即上線**。fail-fast 生效期間該 cron 必須先 `hermes cron pause
-// cc-memory-reminders`，等 maintenance window Step 6 補上 DATABASE_URL_PERSONAL 後再
-// resume（見 docs/personal-hub/handback-A2-A4.md Step 6 警告 ②）。
+// backward compat：
+//   - stdout 只剩 dead-letter 告警（⚠️ 提醒投遞失敗 5 次已放棄: <title>）
+//   - 正常訊息改由本 poller 直接送 Telegram，不再靠 hermes --deliver 投遞
+//   - dead-letter 仍走 stdout，hermes cron admin alert 靠這
+//
+// prod 步驟備注（需手動執行）：
+//   hermes cron edit 8cca281df423 移除 --deliver telegram（改 --no-agent）
+//
+// 環境變數：
+//   TELEGRAM_API_BASE   mock 時可覆寫（預設 https://api.telegram.org）
+//   TELEGRAM_BOT_TOKEN  由 cc-reminders.sh 注入
+//   TELEGRAM_CHAT_ID    由 cc-reminders.sh 注入
+//
+// ⚠️ 不要用 process.exit() 在 stdout.write 之後：
+//   Node 對 pipe 的 stdout 是 async，process.exit() 會跳過 flush 造成截斷。
+
 import { config } from '../src/config.js';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { getDueReminders } from '../src/services/reminders.js';
 import { loadScopeConfig, applyScopePolicy } from '../src/services/scope-policy.js';
+import {
+  enqueueDue,
+  claimDeliverable,
+  markDelivered,
+  markFailed,
+} from '../src/services/delivery-queue.js';
+import type { DbClient } from '../src/services/types.js';
+
+const TELEGRAM_TIMEOUT_MS = 10_000;
+const CLAIM_LIMIT = 20;
+
+export interface RunOneTickOpts {
+  telegramApiBase?: string;
+  token?: string;
+  chatId?: string;
+  /** 測試用：覆寫 projectId（通常由 scope-policy 決定）*/
+  projectId?: string;
+}
+
+export interface RunOneTickResult {
+  dead: string[];
+}
+
+/**
+ * 一個 tick 的主邏輯，供測試直接呼叫。
+ * 生產環境由 main() 驅動；測試時注入 db + opts。
+ */
+export async function runOneTick(
+  db: DbClient,
+  opts?: RunOneTickOpts
+): Promise<RunOneTickResult> {
+  const telegramApiBase = opts?.telegramApiBase ?? process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
+  const token = opts?.token ?? process.env.TELEGRAM_BOT_TOKEN ?? '';
+  const chatId = opts?.chatId ?? process.env.TELEGRAM_CHAT_ID ?? '';
+
+  // projectId：明確傳入（測試用）> scope-policy 決策（生產用）
+  let projectId: string;
+  if (opts?.projectId !== undefined) {
+    projectId = opts.projectId;
+  } else {
+    const scopeConfig = loadScopeConfig();
+    projectId = applyScopePolicy(undefined, { config: scopeConfig, surface: 'scope' }) as string;
+  }
+
+  const deadList: string[] = [];
+
+  // Step 1：getDueReminders（DB tx 內含 reminder_log 寫入 + advance）
+  const due = await getDueReminders(db, { projectId, channel: 'hermes' });
+
+  // Step 2：enqueueDue（冪等 INSERT ON CONFLICT DO NOTHING）
+  // due 可能為空（本 tick 無新到期），但 queue 中可能有前幾輪失敗待重試的列。
+  if (due.length > 0) {
+    const queueItems = due.map(({ task, slot }) => {
+      const recur =
+        task.recurrenceIntervalDays !== null ? ` (每 ${task.recurrenceIntervalDays} 天)` : '';
+      return {
+        taskId: task.id,
+        scheduledFor: slot,
+        payload: `⏰ ${task.title}${recur}`,
+      };
+    });
+    await enqueueDue(db, queueItems);
+  }
+
+  // Step 3：claimDeliverable（含前幾輪退避後再次可投遞的列）
+  const claimable = await claimDeliverable(db, CLAIM_LIMIT);
+  if (claimable.length === 0) return { dead: deadList };
+
+  // Step 4：逐筆 POST Telegram sendMessage
+  for (const row of claimable) {
+    const sendUrl = `${telegramApiBase}/bot${token}/sendMessage`;
+    let success = false;
+    let errorMsg = 'unknown';
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
+
+      const resp = await fetch(sendUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: row.payload }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (resp.ok) {
+        success = true;
+      } else {
+        errorMsg = `HTTP ${resp.status}`;
+      }
+    } catch (err) {
+      errorMsg = err instanceof Error ? err.message : String(err);
+    }
+
+    if (success) {
+      await markDelivered(db, row.id);
+    } else {
+      const outcome = await markFailed(db, row.id, errorMsg);
+      if (outcome === 'dead') {
+        // 找到任務標題（payload 是 "⏰ <title>..." 格式）
+        const title = row.payload.replace(/^⏰ /, '').replace(/ \(每 \d+ 天\)$/, '');
+        const msg = `⚠️ 提醒投遞失敗 5 次已放棄: ${title}`;
+        process.stdout.write(msg + '\n');
+        deadList.push(title);
+      }
+    }
+  }
+
+  return { dead: deadList };
+}
+
+// ---------------------------------------------------------------------------
+// main（生產入口）
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const url = config.databaseUrl;
-
-  const scopeConfig = loadScopeConfig();
-  // forced-mode（CC_FORCE_PROJECT_ID=__personal__）：鎖定 forced namespace；非 forced 則 fail-fast。
-  const projectId = applyScopePolicy(undefined, { config: scopeConfig, surface: 'scope' }) as string;
-
   const client = postgres(url, { max: 1 });
   const db = drizzle(client);
   try {
-    const due = await getDueReminders(db, { projectId, channel: 'hermes' });
-    if (due.length === 0) return; // 空 stdout → hermes 靜默
-    const lines = due.map(({ task }) => {
-      const recur =
-        task.recurrenceIntervalDays !== null ? ` (每 ${task.recurrenceIntervalDays} 天)` : '';
-      return `⏰ ${task.title}${recur}`;
-    });
-    process.stdout.write(`📌 你有 ${due.length} 則到期提醒：\n${lines.join('\n')}\n`);
+    await runOneTick(db);
   } finally {
     await client.end();
   }
 }
 
-main().catch((err) => {
-  // 錯誤走 stderr（--no-agent 只投遞 stdout）→ 不打擾使用者；getDueReminders 為交易式，
-  // 失敗即未認領，下個週期自動重試（fail-safe）。
-  console.error('[hermes-reminder-poll] 失敗:', err);
-  process.exit(1);
-});
+// 只在直接執行時啟動（import 時不跑，避免測試模組載入觸發 main）。
+// tsx / ts-node 直接跑時，process.argv[1] 就是本檔路徑；
+// vitest import 時，process.argv[1] 會是 vitest 的 bin 路徑，不含本檔名。
+import path from 'node:path';
+
+const isMain =
+  process.argv[1] !== undefined &&
+  path.basename(process.argv[1]).replace(/\.[cm]?[jt]s$/, '') === 'hermes-reminder-poll';
+
+if (isMain) {
+  main().catch((err) => {
+    // 錯誤走 stderr（hermes --no-agent 只投遞 stdout）→ 不打擾使用者
+    console.error('[hermes-reminder-poll] 失敗:', err);
+    process.exit(1);
+  });
+}
