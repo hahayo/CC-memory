@@ -1,6 +1,6 @@
 # Personal-Hub Task Breakdown
 
-> **當前狀態（2026-06-05）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）✅ 全 Gate 綠（tool-policy 雙層 enforce + telemetry 開關；24 unit + 8 mcp tests）· Phase 3（prod RLS）+ 跨 repo = roadmap。
+> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）✅ 全 Gate 綠（tool-policy 雙層 enforce + telemetry 開關；24 unit + 8 mcp tests）· **Phase 3（v0.4 翻案：獨立 personal DB）** + 跨 repo = roadmap。翻案脈絡見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。
 >
 > **Phase 命名**：本檔的 `Personal-Hub Phase 0/1/2/3` 是 **personal-hub initiative 的 phase**，與既有 `docs/task.md` 的 Phase A/B/C（v0.3/v0.4 memory+auto-capture）是**不同 track**，勿混。
 >
@@ -139,26 +139,56 @@
 
 ---
 
-# Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur prod URL）
+# Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur 開新 PG service；v0.4 翻案：獨立 personal DB）
 
-> 終極硬隔離：把 Phase 0 應用層邊界升級成 DB role/RLS。**高風險（可能鎖死連線），preflight 必過才 apply。**
+> 終極硬隔離：個人資料搬到獨立 personal PostgreSQL service（`DATABASE_URL_PERSONAL`），靠 secret 配發 + 物理切分。原 RLS 方案 v0.4 翻案（owner / superuser 預設失效、policy 漏寫即靜默故障），見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。**風險集中在跨 DB 遷移；maintenance window + preflight 三 mode 全 PASS 才繼續。**
 
-## 3a — preflight
+## 3a — config + db client + migration 0007（離線可做；2026-06-09 session 已交付）
 
-- [ ] `scripts/preflight.ts`：驗證目標 PG 可建 role、RLS 不鎖死現有連線、additive 無破壞
-- [ ] dry-run 報告
+- [ ] A2.1 Zeabur 開 PG service `cc-memory-personal`（與 project DB 同 region）；取 `DATABASE_URL_PERSONAL`  ← **僅此項待 user**
+- [x] A2.2 `resolveDatabaseUrl()` + fail-fast 矩陣（`src/db/resolve-url.ts`，config.ts 重接；TDD 綠）
+  - forced-mode personal 缺 `DATABASE_URL_PERSONAL` → exit ✅
+  - forced-mode personal 兩 URL 同物理 DB → exit ✅
+  - 非 forced personal 偵測到 `DATABASE_URL_PERSONAL` 存在 → warn + 拒絕載入該 URL（不 exit）✅
+  - 兩衝突 env `CC_FORCE_PROJECT_ID` + `CC_MEMORY_PROJECT_ID` 同設 → exit（既有，`src/services/scope-policy.ts` `loadScopeConfig` 守）✅
+  - forced 非 personal namespace 不 throw ✅
+- [x] A2.2 `src/db/client.ts` 用 `config.databaseUrl`（已是 resolveDatabaseUrl 啟動期決策結果），加「一 process 一 scope 一 DB」原則註解
+  - ⚠️ `.env.example` topology 註解被 harness denylist 攔（`.env*` 在 denylist）；topology 知識完整在 [ADR-001](decisions/ADR-001-phase3-separate-db.md) deployment topology 表 + plan.md instance 拓樸表
+- [x] A2.3 `sql/migrations/0007_personal_db_check_constraint.sql`（personal-DB-only）+ `0008_project_db_no_personal_check.sql`（project-DB-only 反向 CHECK，delete COMMIT 後才套；互為鏡像防回流）。**不進共用 `src/db/schema.ts`**（schema.ts 是兩 DB 共用 source）。SQL header 註明套用邊
+- [x] A2.4 `scripts/preflight.ts` 拆檔三 mode，mode-prefixed cases（P1-P7/C1-C5/D1-D5；對真 test DB 煙霧測試全 PASS）
+- [x] A2.3 `scripts/migrate-personal-data.ts` lib 化（`scripts/lib/{inventory,clients,checksum}.ts` 單一 SoT）+ FK-safe 順序 + cursor pagination + `--dry-run` + rerun 語意
+- [x] A2.5 `scripts/delete-personal-data.ts`（P0 修復）：單一 tx 內 LOCK TABLE → 重計數 → checksum 與 personal DB 精確比對 → DELETE → 同 tx 驗證 → COMMIT + manifest；dry-run 預設；integration tests 6 cases 綠
+- [x] 全管線 e2e 演練（`tests/scripts/e2e-migration-pipeline.test.ts`；staging 演練前移、本地可重複）
 
-## 3b — DB role + RLS migration
+## 3b — preflight 三 mode + 遷移腳本（離線可做；本 session 已交付，等同 3a 末三項）
 
-- [ ] `sql/migrations/NNNN_db_roles_rls.sql`（編號接 reminder migration 之後）：`personal_rw` / `project_rw_non_personal` / `admin` role
-- [ ] RLS policy on `project_memories` / `tasks` / `reminder_log`（依 role 限 `project_id` 可見性）
-- [ ] 設計 DOWN（先驗 down 再 up）
-- [ ] forced-mode instance 切 `personal_rw` 連線；project-mode 切 `project_rw_non_personal`
+> 細項已收進 3a。以下保留為 mode-level 明細與 A2.6 maintenance window 步驟參照點，不重複 [x] 勾選。
 
-## Phase 3 Gate
-- [ ] preflight 通過
-- [ ] `project_rw_non_personal` 連線查 `__personal__` → 0 列
-- [ ] `personal_rw` 連線查他專案 → 0 列
+- [x] A2.4 `scripts/preflight.ts --mode pre-migration`（P1-P7）：URL 層 connection identity（host+port+database 比對；user 只進報表不參與判定）、DB 活體 advisory-lock probe + 0007/0008 方向檢查、current_database 一致、resolveDatabaseUrl 配對矩陣、schema 一致（columns/constraints/indexes + expected-delta allowlist）、inventory assertion
+- [x] A2.4 `scripts/preflight.ts --mode post-copy`（C1-C5）：identity 重跑（FAIL 即 abort）；personal DB `__personal__` row count == project DB 原始（含 reminder_log FK-scoped）；per-table checksum（`to_jsonb` + UTC 的 MD5 string_agg）一致；personal DB 其他 project_id 0 列；0007 CHECK 拒非 `__personal__` INSERT
+- [x] A2.4 `scripts/preflight.ts --mode post-delete`（D1-D5）：identity 重跑 + 雙 URL 必填；project DB 個人列全 0（4 predicate 含 search_feedback 混合列；排除 bot_user_state）；personal DB 列數 vs delete manifest 精確比對；0008 反向 CHECK 拒寫 probe；scope tests via vitest（test PG 不可達顯式 SKIP）——ScopePolicy SQL 排除正確性由 shared predicate + `tests/scripts/scope-probe.test.ts`（control+treatment）鎖
+- [x] A2.3 `scripts/migrate-personal-data.ts`：表 inventory 走 `scripts/lib/inventory.ts` 單一 SoT（`information_schema` query + `EXPECTED_INVENTORY` diff 斷言，**不手寫**）；copy project DB `__personal__` 列 → personal DB（search_feedback 不在 copy 範圍——拍板只刪不搬）
+
+## 3c — prod maintenance window（需 user / 線上）
+
+- [ ] Step 0 開 prod backup：project DB `pg_dumpall` 含 globals → 異地存放；空 personal DB backup
+- [ ] Step 1 跑 migration 0000-0007 到 personal DB；preflight pre-migration（P1-P7）PASS
+- [ ] Step 2 停 writers（hermes、reminder poller、Todoist sync），等 in-flight transactions drain
+- [ ] Step 3 跑 `scripts/migrate-personal-data.ts`；preflight post-copy（C1-C5）PASS
+- [ ] Step 4 rollback judgement：preflight fail → drop personal DB、project DB 原樣、結束 maintenance；PASS → 跑 delete dry-run（`tsx scripts/delete-personal-data.ts`，dry-run 預設，印計畫 + checksum 預覽）
+- [ ] Step 5 `tsx scripts/delete-personal-data.ts --execute --manifest-out <path>`：script 在單一 tx 內 LOCK → 重計數 → checksum 比對 → DELETE（含 search_feedback 混合列）→ 同 tx 驗證 → COMMIT；任一不符自動 ROLLBACK + exit 1
+- [ ] Step 5.5 套 0008 反向 CHECK 到 project DB（必須在 Step 5 COMMIT 之後）
+- [ ] Step 5.6 preflight post-delete（D1-D5，帶 `--manifest <path>`；COMMIT 後最終確認）PASS
+- [ ] Step 6 env 切換 + 重啟 services（hermes / forced-mode instance 補 `DATABASE_URL_PERSONAL`；hermes redeploy 與本步同窗）；結束 maintenance window
+- [ ] Step 7 跑 A2.7 端對端驗收
+
+## Phase 3 Gate（A2.7 端對端驗收 7 條）
+- [ ] preflight 三 mode 全 PASS（本地全管線 e2e 已綠；staging 再跑完整 Step 0-7 演練，D5 不得為 SKIP）
+- [ ] forced-mode personal `cc_memory_save` 寫進 personal DB、project DB 查不到
+- [ ] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder + scope-probe test 鎖；0008 後 project DB 已插不進 `__personal__` 列，D4 反向 CHECK probe 拒寫）
+- [ ] 拿 project DB URL raw postgres 查 `__personal__` → 0 列
+- [ ] personal DB INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB INSERT `__personal__` row → 0008 CHECK 拒
+- [ ] 非 forced personal 偵測到 `DATABASE_URL_PERSONAL` → warn + 拒載入該 URL（不 exit）；forced-mode personal 缺 URL → exit
 - [ ] 既有 forced/project instance 功能不回歸
 
 ---
@@ -167,9 +197,9 @@
 
 > 只列目標 + Gate + blocking OQ。介面草案見 `plan.md` 的 Rollout Order 跨 repo roadmap 表。**不在此展開逐項 task**（過早展開會變猜測）。
 
-## 階段 -1 — AI_Copilot raw postgres 前置
+## 階段 -1 — AI_Copilot raw postgres 前置（v0.4 翻案後降為 strongly recommended，非 hard blocker）
 - [ ] 移除/限制 AI_Copilot `.mcp.json` 的 raw postgres
-- Gate：該環境無持 `DATABASE_URL` 繞過通道，才在該環境啟用 personal forced-mode
+- Gate（新）：該環境 raw postgres MCP **不持** `DATABASE_URL_PERSONAL` 且無寫入個人 DB 通道。Phase 3 v0.4 後個人資料不在 project DB，project `DATABASE_URL` 已無讀寫個人資料能力（但仍建議清理 raw postgres 降攻擊面）
 
 ## hermes 整合
 - [ ] hermes 起 cc-memory MCP（`CC_FORCE_PROJECT_ID=__personal__`）
@@ -220,8 +250,13 @@
 - [x] `CC_TOOL_ALLOWLIST` 子集兩層生效；排除的 read tool 直呼也被拒
 - [x] `CC_SEARCH_FEEDBACK=off` → 不寫 telemetry
 
-### Personal-Hub Phase 3（prod，roadmap）
+### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
 
-- [ ] `project_rw_non_personal` 查 `__personal__` → 0 列
-- [ ] `personal_rw` 查他專案 → 0 列
-- [ ] preflight 通過才 apply
+> 以下 `[ ]` 等 A2.7 prod 上線 + rollback rehearsal 通過才勾。
+
+- [ ] forced-mode personal instance `cc_memory_save` 寫進 personal DB；project DB SELECT 看不到
+- [ ] forced-mode personal `cc_memory_search` 只回 personal
+- [ ] project-mode 全專案 search 不含 `__personal__`（排除 predicate 由 shared builder + scope-probe test 鎖；0008 後 project DB 已插不進 `__personal__` 列，反向 CHECK 由 preflight D4 probe 驗）
+- [ ] 拿 project DB URL raw postgres 查 `__personal__` → 0 列
+- [ ] personal DB INSERT 非 `__personal__` row → 0007 CHECK 拒；project DB INSERT `__personal__` row → 0008 CHECK 拒
+- [ ] delete script 同 tx 內驗證全過才 COMMIT；preflight 三 mode（P1-P7/C1-C5/D1-D5）全 PASS

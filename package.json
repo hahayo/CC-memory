@@ -10,7 +10,8 @@
     "start": "node build/index.js",
     "test": "vitest",
     "test:ci": "vitest run",
-    "lint": "eslint src/**/*.ts",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "lint": "eslint \"src/**/*.ts\" \"scripts/**/*.ts\" \"tests/**/*.ts\"",
     "clean": "rm -rf build",
     "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts"
   },

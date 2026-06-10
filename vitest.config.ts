@@ -16,6 +16,9 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // 清 ambient env（CC_FORCE_PROJECT_ID / DATABASE_URL_PERSONAL / CC_MEMORY_PROJECT_ID），
+    // 防 shell 環境讓 config / scope-policy 啟動期決策走到非測試分支。
+    setupFiles: ['tests/setup.ts'],
     pool: 'forks',
     poolOptions: {
       forks: {

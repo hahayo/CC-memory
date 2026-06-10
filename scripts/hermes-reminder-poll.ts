@@ -7,19 +7,25 @@
 // 生命週期刻意鏡像 scripts/run-reminders.ts：自建 postgres client → getDueReminders
 // → await client.end() → 自然退出。**不要用 process.exit() 在 stdout.write 之後**：
 // Node 對 pipe 的 stdout 是 async，process.exit() 會跳過 flush 造成截斷（hermes 抓的就是 pipe）。
-import 'dotenv/config';
+// Phase 3 v0.4：DB URL 走 src/config 啟動期決策（forced personal → DATABASE_URL_PERSONAL；
+// 含 sanitize 引號+\r）。缺 URL 在 import 時 throw → main().catch 不會接到，但 ESM
+// top-level throw 一樣 exit 1 + stderr，stdout 保持空 → hermes --no-agent 視為靜默。
+// ⚠️ 部署順序（2026-06-10 實證）：hermes cron 的 cc-reminders.sh **直接跑本 repo
+// working tree——commit 即上線**。fail-fast 生效期間該 cron 必須先 `hermes cron pause
+// cc-memory-reminders`，等 maintenance window Step 6 補上 DATABASE_URL_PERSONAL 後再
+// resume（見 docs/personal-hub/handback-A2-A4.md Step 6 警告 ②）。
+import { config } from '../src/config.js';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { getDueReminders } from '../src/services/reminders.js';
 import { loadScopeConfig, applyScopePolicy } from '../src/services/scope-policy.js';
 
 async function main(): Promise<void> {
-  const url = process.env.DATABASE_URL?.replace(/\r/g, '').replace(/^"|"$/g, '');
-  if (!url) throw new Error('DATABASE_URL not set');
+  const url = config.databaseUrl;
 
-  const config = loadScopeConfig();
+  const scopeConfig = loadScopeConfig();
   // forced-mode（CC_FORCE_PROJECT_ID=__personal__）：鎖定 forced namespace；非 forced 則 fail-fast。
-  const projectId = applyScopePolicy(undefined, { config, surface: 'scope' }) as string;
+  const projectId = applyScopePolicy(undefined, { config: scopeConfig, surface: 'scope' }) as string;
 
   const client = postgres(url, { max: 1 });
   const db = drizzle(client);
