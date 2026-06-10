@@ -4,7 +4,7 @@
 //
 // at-least-once durable queue：
 //   - enqueueDue：批量 INSERT ON CONFLICT DO NOTHING（冪等）
-//   - claimDeliverable：FOR UPDATE SKIP LOCKED 選列（poller-vs-poller 防重投）
+//   - claimDeliverable：原子 UPDATE + lease（poller-vs-poller 防重投，撐過 statement）
 //   - markDelivered：標記成功
 //   - markFailed：指數退避（4/8/16/32 min），第 5 次失敗 → dead
 //
@@ -15,17 +15,9 @@
 //   attempts 3 → +32min
 //   attempts ≥ 4 → dead（第 5 次失敗）
 
-import { and, eq, lte, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { reminderDeliveryQueue } from '../db/schema.js';
 import type { DbClient } from './types.js';
-
-// 退避間隔序列（毫秒）：attempts=0→4min, 1→8min, 2→16min, 3→32min
-const BACKOFF_MS: readonly number[] = [
-  4 * 60_000,
-  8 * 60_000,
-  16 * 60_000,
-  32 * 60_000,
-];
 
 export interface QueueRow {
   id: string;
@@ -61,39 +53,39 @@ export async function enqueueDue(
   return rows.length;
 }
 
+// claim 租約長度：必須 > 最壞批次投遞時間（CLAIM_LIMIT 20 × 10s timeout ≈ 200s）。
+// poller crash 後租約到期，列自動重新可投遞（at-least-once）。
+const CLAIM_LEASE_MS = 5 * 60_000;
+
 /**
- * Claim deliverable rows：
- *   WHERE status='pending' AND next_attempt_at <= now()
- *   ORDER BY next_attempt_at
- *   FOR UPDATE SKIP LOCKED
- *   LIMIT limit
+ * Claim deliverable rows（durable lease）：
+ *   單一原子 UPDATE 把 next_attempt_at 推進 NOW()+lease，
+ *   子查詢用 FOR UPDATE SKIP LOCKED 防多 poller 同 statement 互搶。
  *
- * FOR UPDATE SKIP LOCKED 讓多個 poller 不互搶同一列。
+ * 純 SELECT ... FOR UPDATE 不夠：row lock 在 statement 結束即釋放，撐不到
+ * HTTP 投遞完成。lease 讓 claim 持久化——另一個 poller 在租約內看不到該列；
+ * crash 則租約到期自動重新可投遞，不需額外 status（保持 CHECK 三態不變）。
  */
 export async function claimDeliverable(db: DbClient, limit: number): Promise<QueueRow[]> {
-  const rows = await db
-    .select({
-      id: reminderDeliveryQueue.id,
-      taskId: reminderDeliveryQueue.taskId,
-      payload: reminderDeliveryQueue.payload,
-      attempts: reminderDeliveryQueue.attempts,
-    })
-    .from(reminderDeliveryQueue)
-    .where(
-      and(
-        eq(reminderDeliveryQueue.status, 'pending'),
-        lte(reminderDeliveryQueue.nextAttemptAt, sql`NOW()`)
-      )
+  const rows = await db.execute(sql`
+    UPDATE reminder_delivery_queue
+    SET next_attempt_at = NOW() + make_interval(secs => ${CLAIM_LEASE_MS / 1000})
+    WHERE id IN (
+      SELECT id FROM reminder_delivery_queue
+      WHERE status = 'pending' AND next_attempt_at <= NOW()
+      ORDER BY next_attempt_at
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
     )
-    .orderBy(reminderDeliveryQueue.nextAttemptAt)
-    .limit(limit)
-    .for('update', { skipLocked: true });
+    RETURNING id, task_id AS "taskId", payload, attempts
+  `);
 
-  return rows;
+  return rows as unknown as QueueRow[];
 }
 
 /**
  * 標記成功投遞：status='delivered', delivered_at=NOW()。
+ * status guard：只轉換 pending 列，不覆寫 dead/delivered。
  */
 export async function markDelivered(db: DbClient, id: string): Promise<void> {
   await db
@@ -102,7 +94,7 @@ export async function markDelivered(db: DbClient, id: string): Promise<void> {
       status: 'delivered',
       deliveredAt: sql`NOW()`,
     })
-    .where(eq(reminderDeliveryQueue.id, id));
+    .where(and(eq(reminderDeliveryQueue.id, id), eq(reminderDeliveryQueue.status, 'pending')));
 }
 
 /**
@@ -131,7 +123,7 @@ export async function markFailed(
         WHEN attempts = 2 THEN NOW() + INTERVAL '16 minutes'
         ELSE                    NOW() + INTERVAL '32 minutes'
       END
-    WHERE id = ${id}
+    WHERE id = ${id} AND status = 'pending'
     RETURNING attempts, status
   `);
 

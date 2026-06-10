@@ -276,6 +276,71 @@ describe('services/delivery-queue', () => {
   });
 
   // =========================================================================
+  // claim 租約（lease）：claim 本身必須是 durable 的，撐過 statement 結束
+  // =========================================================================
+
+  it('claim 租約：claimDeliverable 後立即再 claim → 回空（lease 推進 next_attempt_at）', async () => {
+    const taskId = await makeTask();
+    const pastTime = new Date(Date.now() - 60_000);
+    await sql`
+      INSERT INTO reminder_delivery_queue (task_id, scheduled_for, payload, status, next_attempt_at)
+      VALUES (${taskId}, ${SLOT}, 'payload', 'pending', ${pastTime})`;
+
+    const first = await claimDeliverable(db, 10);
+    expect(first).toHaveLength(1);
+
+    // 第二個 poller（同 DB、不同 statement）不得撈到同一列
+    const second = await claimDeliverable(db, 10);
+    expect(second).toHaveLength(0);
+  });
+
+  it('claim 租約到期可重撈：next_attempt_at 被推進到未來約 lease 長度', async () => {
+    const taskId = await makeTask();
+    const pastTime = new Date(Date.now() - 60_000);
+    const inserted = await sql<{ id: string }[]>`
+      INSERT INTO reminder_delivery_queue (task_id, scheduled_for, payload, status, next_attempt_at)
+      VALUES (${taskId}, ${SLOT}, 'payload', 'pending', ${pastTime})
+      RETURNING id`;
+    const id = inserted[0].id;
+
+    const before = Date.now();
+    await claimDeliverable(db, 10);
+    const after = Date.now();
+
+    // status 仍 pending（crash 後租約到期自動重新可投遞，at-least-once）
+    const row = await getRow(id);
+    expect(row.status).toBe('pending');
+
+    // next_attempt_at ≈ now + 5 min lease（±5s）
+    const actual = row.next_attempt_at.getTime();
+    expect(actual).toBeGreaterThanOrEqual(before + 5 * 60_000 - 5_000);
+    expect(actual).toBeLessThanOrEqual(after + 5 * 60_000 + 5_000);
+  });
+
+  // =========================================================================
+  // status guard：markFailed 不得覆寫已 delivered 的列
+  // =========================================================================
+
+  it('status guard：markDelivered 後 markFailed → status 仍 delivered、attempts 不變', async () => {
+    const taskId = await makeTask();
+    const pastTime = new Date(Date.now() - 60_000);
+    const inserted = await sql<{ id: string }[]>`
+      INSERT INTO reminder_delivery_queue (task_id, scheduled_for, payload, status, next_attempt_at)
+      VALUES (${taskId}, ${SLOT}, 'payload', 'pending', ${pastTime})
+      RETURNING id`;
+    const id = inserted[0].id;
+
+    await markDelivered(db, id);
+    const outcome = await markFailed(db, id, 'late failure');
+
+    expect(outcome).toBe('retry'); // noop，不得回 dead
+    const row = await getRow(id);
+    expect(row.status).toBe('delivered');
+    expect(row.attempts).toBe(0);
+    expect(row.last_error).toBeNull();
+  });
+
+  // =========================================================================
   // delivered 不重撈
   // =========================================================================
 
