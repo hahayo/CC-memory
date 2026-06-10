@@ -106,50 +106,36 @@ export async function markDelivered(db: DbClient, id: string): Promise<void> {
 }
 
 /**
- * 標記失敗並設定指數退避。
- * - attempts < 4（即 0,1,2,3）→ 仍 'pending'，設 next_attempt_at = now + BACKOFF_MS[attempts]，回 'retry'
- * - attempts >= 4（第 5 次失敗）→ status='dead'，回 'dead'
+ * 標記失敗並設定指數退避（原子 UPDATE，無 TOCTOU）。
+ *
+ * 單一 UPDATE ... RETURNING：DB 端計算 attempts+1 與 status，避免 SELECT→UPDATE 競態。
+ * 間隔序列（attempts 0-3）：4/8/16/32 min。attempts+1 >= 5 → status='dead'。
  */
 export async function markFailed(
   db: DbClient,
   id: string,
   error: string
 ): Promise<'retry' | 'dead'> {
-  // 先讀目前 attempts
-  const current = await db
-    .select({ attempts: reminderDeliveryQueue.attempts })
-    .from(reminderDeliveryQueue)
-    .where(eq(reminderDeliveryQueue.id, id));
+  // 原子：attempts+1 並依新值決定 status 和 next_attempt_at。
+  // BACKOFF_MS 陣列以 SQL CASE 展開（避免 JS 端讀舊值後競態）。
+  const updated = await db.execute(sql`
+    UPDATE reminder_delivery_queue
+    SET
+      attempts        = attempts + 1,
+      last_error      = ${error},
+      status          = CASE WHEN attempts + 1 >= 5 THEN 'dead' ELSE 'pending' END,
+      next_attempt_at = CASE
+        WHEN attempts + 1 >= 5 THEN next_attempt_at
+        WHEN attempts = 0 THEN NOW() + INTERVAL '4 minutes'
+        WHEN attempts = 1 THEN NOW() + INTERVAL '8 minutes'
+        WHEN attempts = 2 THEN NOW() + INTERVAL '16 minutes'
+        ELSE                    NOW() + INTERVAL '32 minutes'
+      END
+    WHERE id = ${id}
+    RETURNING attempts, status
+  `);
 
-  const currentAttempts: number = current[0]?.attempts ?? 0;
-  const newAttempts = currentAttempts + 1;
-
-  if (currentAttempts >= 4) {
-    // 第 5 次（或更多）→ dead
-    await db
-      .update(reminderDeliveryQueue)
-      .set({
-        status: 'dead',
-        attempts: newAttempts,
-        lastError: error,
-      })
-      .where(eq(reminderDeliveryQueue.id, id));
-    return 'dead';
-  }
-
-  // retry with backoff
-  const backoffMs = BACKOFF_MS[currentAttempts] ?? BACKOFF_MS[BACKOFF_MS.length - 1];
-  const nextAttemptAt = new Date(Date.now() + backoffMs);
-
-  await db
-    .update(reminderDeliveryQueue)
-    .set({
-      status: 'pending',
-      attempts: newAttempts,
-      nextAttemptAt,
-      lastError: error,
-    })
-    .where(eq(reminderDeliveryQueue.id, id));
-
-  return 'retry';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const row = (updated as any)[0] as { attempts: number; status: string } | undefined;
+  return row?.status === 'dead' ? 'dead' : 'retry';
 }

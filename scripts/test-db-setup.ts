@@ -141,7 +141,7 @@ async function main() {
     await admin.end({ timeout: 5 });
   }
 
-  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007 + 0009（skip 0008 project-only）
+  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009
   await applyMigrations(projectUrl, migrationFiles('0007'));
   const personalMigrations = [
     ...migrationFiles('0008'),                          // 0000-0007

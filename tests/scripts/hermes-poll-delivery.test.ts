@@ -204,45 +204,25 @@ describe('scripts/hermes-poll-delivery — at-least-once delivery', () => {
   it('dead-letter：mock server 連續 500 五次 → status=dead，dead[] 含標題', async () => {
     const { taskId } = await makeTaskWithReminder(sql, '致命提醒C');
 
-    // 跑 5 輪；每輪前把 next_attempt_at 設成過去（讓 claimDeliverable 撈得到）
+    // 跑 5 輪，每輪前把 next_attempt_at 設成過去（讓 claimDeliverable 撈得到）。
+    // 保留每輪結果，第 5 輪（最後一輪）的 dead[] 應含任務標題。
+    let lastResult = { dead: [] as string[] };
     for (let i = 0; i < 5; i++) {
       mockServer.responseQueue.push(500);
       if (i > 0) {
-        // 回退 next_attempt_at
         await sql`UPDATE reminder_delivery_queue
                   SET next_attempt_at = NOW() - INTERVAL '1 second'
                   WHERE task_id = ${taskId}`;
       }
-      await runOneTick(db, tickOpts());
+      lastResult = await runOneTick(db, tickOpts());
     }
+
+    // 第 5 輪回傳 dead[]（attempts 0→4 完成後 → dead）
+    expect(lastResult.dead).toHaveLength(1);
+    expect(lastResult.dead[0]).toContain('致命提醒C');
 
     const row = await getQueueRow(sql, taskId);
     expect(row!.status).toBe('dead');
-
-    // 第 5 輪的回傳 dead[] 應含任務標題
-    // 重新跑一個 tick（DB 已 dead，不會再 claim）——只是確認 dead-letter 正確
-    // 改為在第 5 輪 tick 直接驗：需要抓到第 5 次的結果
-    // ↑ 需調整：5 輪迴圈中最後一輪的 result 才含 dead
-    // 重新跑整個場景，只取第 5 輪 result
-    // --- 已在迴圈外，補取最後一輪 result ---
-    // 用單獨斷言：dead list 可從第 5 輪 tick result 驗，但迴圈裡沒留 result5。
-    // 這裡改用 stdout 驗證：直接看 queue status 即可（已驗 dead），
-    // 並且以 attemptsFive 確認 dead 有 ⚠️ 告警路徑被觸發：
-
-    // 最後再跑一 tick（queue row 已 dead，claimDeliverable 不撈、dead list 為空）
-    // 驗方法：把 attempts 設回 4、status=pending 再跑一次
-    await sql`UPDATE reminder_delivery_queue
-              SET status = 'pending', attempts = 4,
-                  next_attempt_at = NOW() - INTERVAL '1 second'
-              WHERE task_id = ${taskId}`;
-    mockServer.responseQueue.push(500);
-    const finalResult = await runOneTick(db, tickOpts());
-    // 第 5 次失敗（attempts 從 4 → 5）→ dead
-    expect(finalResult.dead).toHaveLength(1);
-    expect(finalResult.dead[0]).toContain('致命提醒C');
-
-    const finalRow = await getQueueRow(sql, taskId);
-    expect(finalRow!.status).toBe('dead');
   });
 
   // =========================================================================

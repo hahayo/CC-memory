@@ -76,9 +76,11 @@ export async function runOneTick(
 
   const deadList: string[] = [];
 
-  // Step 1+2：getDueReminders + enqueueDue 在同一 outer tx 內（防 claim 後 enqueue 失敗靜默丟失）。
+  // Step 1+2：getDueReminders + enqueueDue 在同一 outer tx 內（原子：兩者同 commit 或同 rollback）。
   // getDueReminders 內部呼 db.transaction()——傳入已在 tx 中的 client 時 Drizzle/PG 以 savepoint 處理，
   // FOR UPDATE SKIP LOCKED 在 savepoint 內依然有效。enqueueDue 的 ON CONFLICT DO NOTHING 保冪等。
+  // 若 outer tx 因 enqueueDue 例外 rollback：reminder_log 寫入也一併撤銷，下一 tick 重撈（at-least-once）。
+  // enqueueDue 冪等確保重撈不會建出重複 queue 列（UNIQUE(task_id, scheduled_for)）。
   await db.transaction(async (tx: DbClient) => {
     const due = await getDueReminders(tx, { projectId, channel: 'hermes' });
     if (due.length > 0) {
