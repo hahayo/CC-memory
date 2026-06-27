@@ -28,7 +28,11 @@ services:
       - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
       - POSTGRES_DB=${POSTGRES_DB:-cc_memory_personal}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # PG 18+ 必須 mount 在 /var/lib/postgresql（不是 /data）—— 18+ image 改用
+      # major-version-specific subdirectory（為了相容 pg_upgrade --link），
+      # 舊的 /data mount 會被視為 "unused mount/volume" 並 hard-error 退出。
+      # ref: https://github.com/docker-library/postgres/pull/1259
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       # $$ 是 docker-compose escape；container 內變 $POSTGRES_USER
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
