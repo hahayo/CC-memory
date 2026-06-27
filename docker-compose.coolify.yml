@@ -1,0 +1,44 @@
+# docker-compose.coolify.yml
+# Coolify 部署：PostgreSQL + pgvector（personal DB / project DB 共用此 compose）
+#
+# 為何不寫 Dockerfile：
+#   pgvector/pgvector 已是 official image（postgres + pgvector 預裝），自寫
+#   Dockerfile 純粹多出 base / build / 版本偏移維護面。Coolify 把 compose
+#   當 single source of truth，env / volume / network 全在這裡定義。
+#
+# 對齊 Zeabur 現況：
+#   personal DB 在 Zeabur 用 pgvector/pgvector:pg18，dump 來源版本 PG 18.3。
+#   restore 流程見 README「## Coolify 部署」。
+#
+# Coolify 步驟：
+#   1. Coolify Dashboard → New Resource → Docker Compose Empty
+#   2. Git Source 指這個 repo，Compose file path = docker-compose.coolify.yml
+#   3. 部署完，到該 service Settings 開啟「Make it public」拿到 public port
+#   4. 本機 MCP server 用 public host:port 連線
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      # Coolify magic env：SERVICE_PASSWORD_* 首次部署隨機生成、寫入 Coolify
+      # Environment Variables 後 persist，重啟不變。username / dbname 走 default
+      # 但保留覆寫空間。
+      - POSTGRES_USER=${POSTGRES_USER:-cc_memory}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=${POSTGRES_DB:-cc_memory_personal}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # $$ 是 docker-compose escape；container 內變 $POSTGRES_USER
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # 刻意不在 compose 暴露 host port。
+    # 外部連線（本機 MCP server）走 Coolify Dashboard 的 "Make it public" 開關，
+    # 由 Coolify 配發隨機 public port 並掛上 TLS proxy；security 由平台層管。
+
+volumes:
+  postgres-data:

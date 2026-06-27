@@ -129,6 +129,64 @@ cc_memory_search / cc_memory_list
 | `DATABASE_URL` | PostgreSQL 連線字串（project DB） | ✅ |
 | `DATABASE_URL_PERSONAL` | 獨立 personal DB 連線字串（Phase 3；見 `docs/personal-hub/decisions/ADR-001-phase3-separate-db.md`） | forced personal instance 必填；其他 instance 禁配（偵測到 warn + 拒載入該 URL） |
 
+## Coolify 部署（PostgreSQL + pgvector）
+
+> 設計選擇：用 `docker-compose.coolify.yml`，不寫 Dockerfile。`pgvector/pgvector` 已是 official image，自寫 Dockerfile 純粹多出維護面；Coolify 也把 compose 當 single source of truth。
+
+### 1. Coolify 建立 service
+
+1. Coolify Dashboard → **New Resource → Docker Compose Empty**
+2. **Source** 接這個 GitHub repo，**Compose file path** 填 `docker-compose.coolify.yml`
+3. Environment Variables 區塊可留空（會用 compose 內的 default：`POSTGRES_USER=cc_memory`、`POSTGRES_DB=cc_memory_personal`），或手動覆寫
+4. **Deploy** —— `SERVICE_PASSWORD_POSTGRES` 會在第一次部署時隨機生成並寫回 Coolify Environment Variables（之後 restart 不變）
+
+### 2. 開放公網連線
+
+本機 MCP server 是 stdio 跑、要連 Coolify 上的 DB，所以必須開公網：
+
+1. 此 service → **Settings → Make it public**（Coolify 會配發隨機 public port + TLS proxy）
+2. 從 Coolify Dashboard 抓 connection string 的 5 個欄位：
+
+| 欄位 | 來源 |
+|------|------|
+| user | compose default = `cc_memory`（或 env 覆寫） |
+| password | 此 service → Environment Variables → `SERVICE_PASSWORD_POSTGRES` |
+| host | 此 service → Make it public 後配發的 public host |
+| port | 同上配發的 public port |
+| dbname | compose default = `cc_memory_personal`（或 env 覆寫） |
+
+組成 standard PostgreSQL URL（記得加 `?sslmode=require`），寫進本機 `DATABASE_URL_PERSONAL`。
+
+### 3. Restore 既有 dump（從 Zeabur 搬家）
+
+⚠️ **不要塞進 `/docker-entrypoint-initdb.d`** —— 那個只在**空 volume 首次啟動**時跑一次，dump restore 該用獨立流程。
+
+```bash
+# 從 Coolify 抓到的連線字串塞進環境變數（不要 echo 出來）
+read -rs -p "Paste Coolify NEW_URL: " NEW_URL
+export NEW_URL
+
+# 用對齊版本的 pg_restore：dump 是 PG 18 出的，必須 PG 18 client
+docker run --rm -v "$(pwd):/work" -w /work postgres:18 \
+  pg_restore --clean --if-exists --no-owner --no-acl \
+  -d "$NEW_URL" zeabur-ccmemory.dump
+
+# 驗證 schema 跟 extension
+docker run --rm postgres:18 psql "$NEW_URL" -c "\dt"
+docker run --rm postgres:18 psql "$NEW_URL" -c "SELECT extname, extversion FROM pg_extension;"
+```
+
+### 4. 推 schema（若 dump 落後最新 migration）
+
+```bash
+export DATABASE_URL_PERSONAL="$NEW_URL"
+npx drizzle-kit push
+```
+
+### 5. MCP server 切到新 DB
+
+把本機 MCP server 設定的 `DATABASE_URL_PERSONAL` 改成新的 Coolify URL，重啟 Claude Code / Codex 即生效。Zeabur 那邊先留著當 fallback，跑一陣子確認穩定再下線。
+
 ## 開發
 
 ```bash

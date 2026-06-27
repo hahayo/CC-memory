@@ -34,3 +34,8 @@ tests/tmp-migrations/
 
 # Claude Code agent metadata（含 worktree locks、local settings）
 .claude/
+
+# DB dumps（personal / prod 資料快照，禁止 commit）
+*.dump
+*.sql.gz
+*.backup
