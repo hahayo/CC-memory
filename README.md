@@ -140,24 +140,93 @@ cc_memory_search / cc_memory_list
 3. Environment Variables 區塊可留空（會用 compose 內的 default：`POSTGRES_USER=cc_memory`、`POSTGRES_DB=cc_memory_personal`），或手動覆寫
 4. **Deploy** —— `SERVICE_PASSWORD_POSTGRES` 會在第一次部署時隨機生成並寫回 Coolify Environment Variables（之後 restart 不變）
 
-### 2. 開放公網連線
+### 2. 建 SSH tunnel 連線（取代「Make it public」）
 
-本機 MCP server 是 stdio 跑、要連 Coolify 上的 DB，所以必須開公網：
+> **設計選擇變更**：原計畫用 Coolify「Make it public」公開 PG port，**否決**——明文 PostgreSQL protocol（網路通訊協定）+ challenge-response 認證不防 query 內容竊聽。改走 **SSH tunnel + 限制權限的 `pgtunnel` user**：DB bind 127.0.0.1（loopback，不暴露公網），client 透過 SSH local port forward 到 server 的 loopback 5432。Codex 對審後拍板（每台 client 獨立 key、sshd `PermitOpen` 鎖死、DB 最小權限、autossh 監控）。
 
-1. 此 service → **Settings → Make it public**（Coolify 會配發隨機 public port + TLS proxy）
-2. 從 Coolify Dashboard 抓 connection string 的 5 個欄位：
+> 同樣否決的方案：Tailscale（公司網路對控制面 DPI 阻擋實測過）、自架 WireGuard（公司網路擋 UDP 機率高）。
 
-| 欄位 | 來源 |
-|------|------|
-| user | compose default = `cc_memory`（或 env 覆寫） |
-| password | 此 service → Environment Variables → `SERVICE_PASSWORD_POSTGRES` |
-| host | 此 service → Make it public 後配發的 public host |
-| port | 同上配發的 public port |
-| dbname | compose default = `cc_memory_personal`（或 env 覆寫） |
+#### 2a. Server 端：建 `pgtunnel` user（一次性，per server）
 
-組成 standard PostgreSQL URL（記得加 `?sslmode=require`），寫進本機 `DATABASE_URL_PERSONAL`。
+無 shell、無 TTY、只能 port forward 到 127.0.0.1:5432：
+
+```bash
+# 在 Coolify server 上(root)
+sudo useradd -m -s /bin/false pgtunnel
+sudo -u pgtunnel mkdir -p ~pgtunnel/.ssh
+sudo -u pgtunnel touch ~pgtunnel/.ssh/authorized_keys
+sudo chmod 700 ~pgtunnel/.ssh
+sudo chmod 600 ~pgtunnel/.ssh/authorized_keys
+
+# sshd_config drop-in: 把 pgtunnel user 鎖到只能轉 127.0.0.1:5432
+sudo tee /etc/ssh/sshd_config.d/60-pgtunnel.conf >/dev/null <<'EOF'
+Match User pgtunnel
+    PermitOpen 127.0.0.1:5432
+    PermitTTY no
+    AllowAgentForwarding no
+    AllowTcpForwarding yes
+    X11Forwarding no
+    ForceCommand /bin/false
+EOF
+
+# 必先 sshd -t 驗 syntax,再 reload (broken config 直接 reload 會鎖住 sshd)
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+> ⚠️ 改任何 `sshd_config` 都先 `sshd -t`（dry-run 驗 syntax）再 reload。broken config 直接 reload 把 sshd 鎖住，過往救援要走 OVH KVM rescue mode（救援開機模式）回主 OS。
+>
+> ⚠️ **絕對不要 `rm /root/.ssh/authorized_keys`** —— Coolify 自己用來連 server 的 SSH key 也在這檔，砍掉 Coolify Web Terminal 跟所有 deploy 全壞，要走 rescue mode 重新 mount 把 key 加回去。
+
+#### 2b. Client 端：每台獨立 key + autossh
+
+每台機器跑一次：
+
+```bash
+# 1) 產一把專屬 key (不重用個人 SSH key,方便日後單台 revoke)
+ssh-keygen -t ed25519 -C "$(hostname)-cc-memory-tunnel" -f ~/.ssh/cc_memory_tunnel
+
+# 2) 把 pubkey 內容貼給 server admin,加進 /home/pgtunnel/.ssh/authorized_keys
+cat ~/.ssh/cc_memory_tunnel.pub
+
+# 3) 裝 autossh
+sudo apt install -y autossh  # 或對應 package manager (brew install autossh / 等)
+
+# 4) 加進 ~/.bashrc (idempotent guard, 重複 source 不會啟動第二支)
+cat >> ~/.bashrc <<'EOF'
+
+# cc-memory SSH tunnel to Coolify PG (idempotent; autossh 保活, 斷線自動重連)
+if command -v autossh >/dev/null 2>&1; then
+    if ! pgrep -x autossh >/dev/null 2>&1; then
+        autossh -M 0 -f -N \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o ExitOnForwardFailure=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -L 15432:127.0.0.1:5432 \
+            -i "$HOME/.ssh/cc_memory_tunnel" \
+            pgtunnel@<your-coolify-host> \
+            >> "$HOME/.cc-memory-tunnel.log" 2>&1
+    fi
+fi
+EOF
+
+# 5) 開新 terminal 觸發啟動, 確認 listener
+source ~/.bashrc
+ss -tnl | grep 15432   # 應該看到 127.0.0.1:15432 LISTEN
+pgrep -x autossh       # 應該看到 1 個 pid
+```
+
+Connection string 寫進本機 `DATABASE_URL_PERSONAL`（指 loopback、不需要 TLS）：
+
+```
+postgres://cc_memory:<password>@127.0.0.1:15432/cc_memory_personal?sslmode=disable
+```
+
+> 為什麼 `sslmode=disable`：流量已在 SSH tunnel（加密 channel）內、loopback 不過網路介面，PG 端再加 TLS 是 double-encryption（雙重加密）多餘開銷。
 
 ### 3. Restore 既有 dump（從 Zeabur 搬家）
+
+⚠️ **Dump 來源是 Zeabur 上的 personal DB**（service `cc-memory-personal`），不是 project DB（service `postgresql`）。兩個 DB 在 Zeabur 是分開的 service，搬到 Coolify 只搬 personal；project DB 待後續另做。
 
 ⚠️ **不要塞進 `/docker-entrypoint-initdb.d`** —— 那個只在**空 volume 首次啟動**時跑一次，dump restore 該用獨立流程。
 
@@ -169,7 +238,7 @@ export NEW_URL
 # 用對齊版本的 pg_restore：dump 是 PG 18 出的，必須 PG 18 client
 docker run --rm -v "$(pwd):/work" -w /work postgres:18 \
   pg_restore --clean --if-exists --no-owner --no-acl \
-  -d "$NEW_URL" zeabur-ccmemory.dump
+  -d "$NEW_URL" zeabur-personal.dump
 
 # 驗證 schema 跟 extension
 docker run --rm postgres:18 psql "$NEW_URL" -c "\dt"
