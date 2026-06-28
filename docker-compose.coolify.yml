@@ -40,9 +40,12 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    # 刻意不在 compose 暴露 host port。
-    # 外部連線（本機 MCP server）走 Coolify Dashboard 的 "Make it public" 開關，
-    # 由 Coolify 配發隨機 public port 並掛上 TLS proxy；security 由平台層管。
+    # PG 只 bind host loopback（不對 internet 暴露 5432）。本機連線經 SSH tunnel：
+    #   ssh -L 5432:127.0.0.1:5432 root@coolify.hahauccu.com
+    # 然後本機 DATABASE_URL_PERSONAL 連 127.0.0.1:5432 即可。
+    # 不走「Make it public」，因 PG protocol 無 TLS、明文走公網有風險。
+    ports:
+      - "127.0.0.1:5432:5432"
 
 volumes:
   postgres-data:
