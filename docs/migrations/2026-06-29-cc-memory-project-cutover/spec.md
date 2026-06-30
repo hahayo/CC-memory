@@ -1,5 +1,28 @@
 # cc-memory project DB Cutover — Spec
 
+> ⚠️ **STATUS: SUPERSEDED-IN-PART (2026-06-30)** — Actual runbook (實際執行藍本) is [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md).
+>
+> **History**：Plan A (dump+restore) 於 2026-06-30 Phase 0 discovery (預檢發現) 後切到 **Plan B (drizzle-kit push from `src/db/schema.ts`)**。原因：Zeabur project mode (專案模式) DB 從沒實質寫過資料（業務表全 0 rows + 6 rows 早期 dev telemetry (開發測試遙測)），dump/restore 無意義 → 改用 fresh schema (全新結構) push 一步落地最新結構。
+>
+> **本檔角色**：reference anchor (參照錨點)，保留 Codex 6 輪對審決策歷程。**不是 actual runbook**。
+>
+> **SUPERSEDED 區塊（精細到 clause 條款）**：
+> - `## Goals` 第 1 點「cc-memory project DB **從 Zeabur 完整搬到** Coolify」 — Plan B 下動作是「Coolify 端建立同名 `cc_memory_project` DB + drizzle-kit push fresh schema」，**無資料搬遷**；原 wording (措辭)「完整搬到」失效
+> - `## Goals` 第 3 點「Cutover 後 `cc_memory_search / list / stats` **回應跟 Zeabur 一致（同 query 同結果）**」 — Plan B 預期 `cc_memory_stats` 回 0 筆 / `cc_memory_search` 回 empty (空集)；**不要求**跟 Zeabur 結果一致（含丟掉 6 rows 早期 dev telemetry）
+> - `## Non-goals` 第 3 點「❌ Schema 改動（**不在本 cutover 範圍，純資料搬遷**）」 — Plan B 主動跑 `drizzle-kit push` + 套 0008 per-DB CHECK constraint，schema 改動已**納入** scope (範圍)
+> - `## Constraints` 第 1 點「Zeabur 不能被誤動：**dump 過程**是 read-only (唯讀)」 — Plan B 無 dump 動作；Zeabur read-only 約束仍 active 但「dump 過程」wording 過時
+> - `## Constraints` 第 7 點「Cutover 期間 cc-memory 全停：從 **Phase 2 (dump)** 開始到 Phase 5 (verify) 結束 ... **triple drift gate**（Phase 3.6 + Task 4.0 + Task 4.3.5）」 — Plan B 從 **Phase 1.5 (drizzle-kit push)** 開始到 Phase 5 結束；triple drift gate 簡化為 **single sanity check (單一健全度檢查)**（wrapper 結構對稱 + `.claude.json` 結構 + `env.DATABASE_URL` 已移除）
+> - `## Constraints` 第 8 點「資料一致性驗證：cutover 後跑**全表 ordered checksum + count + schema-aware timestamp drift gate**」 — Plan B 無資料搬遷，整條 unapplicable
+> - `## Success Criteria` > `### 資料一致性（強化版，Codex 對審）` — 同上，Plan B 無資料搬遷，整節 unapplicable
+>
+> Plan B 下完整「Success / Verify 清單」見 addendum「仍保留的核心驗證」：7 tables + pgvector extension + wrapper 結構對稱 + `.claude.json` 結構 + MCP 連通 + `cc_memory_stats` 回 0 筆但不報錯。
+>
+> **仍 active (有效) 區塊（Plan B 照跑）**：Why / Goals 第 2/4/5 點（不含已 supersede 的 #1 #3）/ Secret Delivery Decision / Non-goals 第 1/2/4/5/6 點（不含已 supersede 的 #3）/ Constraints 第 2-6 點（不含已 supersede 的 #1/#7/#8）/ Pre-conditions / App Tables Inventory / Success Criteria 之 功能完備 + Rollback 可用（不含已 supersede 的「資料一致性」節）/ Out of Scope / References。
+>
+> **Cross-ref (交叉參照)**：[addendum 全文](./addendum-2026-06-30-plan-b.md)，特別是「為什麼從 Plan A 切到 Plan B」+「Plan B 步驟」+「仍保留的核心驗證」三節。
+
+---
+
 **日期**：2026-06-29
 **狀態**：Draft（待 user review）
 **範圍**：cc-memory project DB（**不含** `__personal__` namespace；`__personal__` 已於 6/8 完成 cutover）
@@ -134,7 +157,7 @@ cutover 後 `~/.claude.json` `cc-memory` entry 結構：
 
 ### 功能完備
 - [ ] Coolify 新 database `cc_memory_project` 存在且可連（owner = `cc_memory`）
-- [ ] Zeabur `zeabur` DB 內**全部 app tables**（見 inventory）搬到 Coolify 新 db
+- [ ] ~~Zeabur `zeabur` DB 內**全部 app tables**（見 inventory）搬到 Coolify 新 db~~ ⚠️ **SUPERSEDED by Plan B (addendum)** — Plan B 不搬資料；改為「drizzle-kit push from `src/db/schema.ts` 一步建 7 tables + apply 0008 per-DB CHECK constraint」，新 db 預期空表
 - [ ] **新 wrapper `~/run-cc-memory-project.sh` 存在**（mode 755，跟 `~/run-cc-memory-personal.sh` 對稱）
 - [ ] **`~/.claude.json` `cc-memory` entry 改成 wrapper command**（不再含 `env.DATABASE_URL` 明文 secret）
 - [ ] `~/.ccm-project-url` 寫好（mode 600，wrapper 讀取的 URL 來源）

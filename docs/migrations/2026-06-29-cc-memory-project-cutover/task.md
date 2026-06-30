@@ -1,5 +1,37 @@
 # cc-memory project DB Cutover — Tasks (TDD)
 
+> ⚠️ **STATUS: SUPERSEDED-IN-PART (2026-06-30)** — Actual runbook (實際執行藍本) is [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md).
+>
+> **History**：Plan A (dump+restore) 於 2026-06-30 Phase 0 discovery 後切到 **Plan B (drizzle-kit push from `src/db/schema.ts`)**。Zeabur project mode DB 從沒實質寫過資料 → dump/restore 無意義。
+>
+> **本檔角色**：reference anchor，保留 Codex 6 輪對審決策歷程。**不是 actual runbook**。
+>
+> **SUPERSEDED tasks**：
+> - **Phase 2 整段（Task 2.1 / 2.2 / 2.3 / 2.4）** — Zeabur dump SKIPPED，無資料可 dump
+> - **Phase 3 整段（Task 3.1 / 3.2 / 3.3 / 3.4 / 3.5 / 3.6）** — Coolify restore + checksum 比對 SKIPPED；replace by addendum 新增 **Phase 1.5 (drizzle-kit push)** + **Phase 1.5b (補 0008 per-DB CHECK constraint)** + **Phase 1.6 (schema verify)**
+> - **Task 0.5（PG version + pgvector extversion 兩端比對）** — Plan B 無跨端資料搬遷，比對 unapplicable；視為 PASS（只需 Coolify 端 pgvector 0.5+ 能承載 `vector(1536)` 欄位定義即可；本 session Phase 0 已驗 0.8.3）
+> - **Task 0.6（Drizzle migration mode 確認）** — 已驗證 Zeabur 用 push mode (推送模式) + 本機 repo 無 `drizzle/` generated dir (產生的目錄)，這正是 Plan B 採 drizzle-kit push 的根據（已固定路徑，不必再分流）
+> - **Task 1.0（取 Coolify root URL，根帳號連線字串）** — 條件觸發已確認**不需要**：Task 0.4 跑出 `cc_memory` 是 superuser (超級使用者，`rolsuper=t`)，直接用 `~/.ccm-personal-url` 連線即可 CREATE DATABASE
+> - **Task 4.0（Pre-switch drift gate）** + **Task 4.3.5（Full drift gate）** — Plan B 無資料 drift (漂移)，簡化為 single sanity check (單一健全度檢查)：「wrapper 結構對稱 + `.claude.json` cc-memory entry 改對 + `env.DATABASE_URL` 已移除」
+>
+> **新增 tasks（addendum + Codex review round 7 blocker fix）**：
+> - **Phase 1.5** — `npx drizzle-kit push --config drizzle.config.ts` 從 `src/db/schema.ts` 一步建 7 tables
+> - **Phase 1.5b** — 手動 apply `sql/migrations/0008_project_db_no_personal_check.sql`（per-DB CHECK constraint，schema.ts 之外、project DB 必須）
+> - **Phase 1.6** — 驗 7 tables 全在 + pgvector extension 在 + 3 個 `*_no_personal_check` constraint 在
+>
+> **仍 active tasks（Plan B 照跑）**：
+> - TDD 模式說明
+> - **Phase 0**：Task 0.1 / 0.2 / 0.3 / 0.4（0.5 / 0.6 視為 PASS、1.0 跳過）
+> - **Phase 1**：Task 1.1 / 1.2 / 1.3 / 1.4
+> - **Phase 4**：Task 4.1 / 4.2 / 4.3 / 4.4（Task 4.0 / 4.3.5 簡化為 sanity check）
+> - **Phase 5**：Task 5.1 / 5.2 / 5.3
+> - **Phase 6**：Task 6.1 / 6.2 / 6.3
+> - **Final Commit**：Task 7.1
+>
+> **Cross-ref**：[addendum 全文](./addendum-2026-06-30-plan-b.md)，特別是「Plan B 步驟」+「仍保留的核心驗證」兩節。
+
+---
+
 **Source of truth**：`./spec.md` + `./plan.md`
 
 ## TDD 模式說明
@@ -729,6 +761,8 @@
 
 ### Task 5.3 — VERIFY: query 行為一致
 
+> ⚠️ **SUPERSEDED by Plan B (addendum)** — 本 task 原要求「cutover 前 vs 後 top-5 結果完全一樣」，前提是資料搬遷後等價。Plan B 無資料搬遷 → **改為**：`cc_memory_stats project_id="cc-memory"` 應**回 0 筆但不報錯**；`cc_memory_search` 跑任一 query 應**回 empty (空集) 但不報錯**（不要求跟 Zeabur 等價）。失敗的 rollback 路徑（改回 `.claude.json.bak-cutover-<ts>`）仍 active。
+
 - [ ] **VERIFY**：跑 3-5 個典型 `cc_memory_search` query（從慣用 query 挑）：
   - 例：「v0.4 spec」「personal hub Phase 1」「Coolify 部署」
   - cutover 前 vs 後 top-5 結果完全一樣（順序也是）
@@ -739,6 +773,8 @@
 ## Phase 6 — Mark Zeabur deprecated
 
 ### Task 6.1 — 更新 deployment memory
+
+> ⚠️ **SUPERSEDED-IN-PART by Plan B (addendum)** — 原 entry 含「dump 檔路徑（scratchpad）：保留 30 天」項目，Plan B 不產 dump artifact，**這項刪掉**。其他項目（cutover date、Zeabur → Coolify 路徑、`.claude.json` backup 30 天、Step F 觸發條件）+ **新增 Plan B 專屬項目**（Plan B 路徑說明、Phase 0 空殼發現、Phase 1.5 drizzle-kit push + Phase 1.5b apply 0008、實際耗時、Zeabur 可立即下線結論）仍 active。
 
 - [ ] **GREEN**：在 `~/.claude/projects/-home-haha-CC-project-CC-memory/memory/deployment-zeabur-prod.md` 加 entry：
   - cutover date: 2026-06-29

@@ -36,7 +36,8 @@ Phase 0 Task 0.1 + 0.2 跑出來的真實 Zeabur 狀態：
 | **Phase 2（dump）** | ❌ **SKIP**（沒實質資料） |
 | **Phase 3（restore + verify）** | ❌ **SKIP**（沒資料要 verify checksum） |
 | **NEW Phase 1.5（drizzle-kit push）** | 在 Coolify cc_memory_project 跑 `DATABASE_URL='<coolify-project-url>' npx drizzle-kit push --config drizzle.config.ts`，從 `src/db/schema.ts` 一步落地全 schema（含 reminder_delivery_queue + 7 tables） |
-| **NEW Phase 1.6（schema verify）**| `\dt public.*` 應列 7 表；`SELECT extversion FROM pg_extension WHERE extname='vector'` 應有 |
+| **NEW Phase 1.5b（補 0008 per-DB CHECK constraint）** | `DATABASE_URL='<coolify-project-url>' npx tsx scripts/apply-migration.ts sql/migrations/0008_project_db_no_personal_check.sql`（或 fallback `psql '<coolify-project-url>' -f sql/migrations/0008_project_db_no_personal_check.sql`）。**為何必補**：0008 是 per-DB 不變量（每資料庫範圍 invariant，禁止 `__personal__` 寫入 project DB），不在 `src/db/schema.ts` 共用結構內，drizzle-kit push 不會自動套；漏補會失去 ADR-001 防 `__personal__` 回流 project DB 的結構性保證 |
+| **NEW Phase 1.6（schema verify）**| (a) `\dt public.*` 應列 7 表；(b) `SELECT extversion FROM pg_extension WHERE extname='vector'` 應有；(c) `SELECT conname FROM pg_constraint WHERE conname LIKE '%no_personal_check'` 應列 3 個 constraint（`project_memories_no_personal_check` / `tasks_no_personal_check` / `search_feedback_no_personal_check`）|
 | Phase 4（寫 wrapper + switch）| ✅ 照跑（Task 4.1-4.4）|
 | Task 4.0 / Task 4.3.5（triple drift gate）| **簡化**：沒實質資料要凍結（Zeabur project 沒人在用），triple gate 改成 single sanity check（確認 wrapper + .claude.json 結構對） |
 | Phase 5（restart + verify）| ✅ 照跑（cc_memory_stats 預期 0 rows；cc_memory_search 預期 empty）|
@@ -49,6 +50,7 @@ Phase 0 Task 0.1 + 0.2 跑出來的真實 Zeabur 狀態：
 | Phase 0 (剩) | 5 min |
 | Phase 1 (CREATE DATABASE + pgvector) | 5-10 min |
 | Phase 1.5 (drizzle-kit push) | 5 min |
+| Phase 1.5b (補 0008 per-DB CHECK constraint) | 1-2 min |
 | Phase 1.6 (schema verify) | 2 min |
 | Phase 4 (wrapper + switch) | 10 min |
 | Phase 5 (restart + verify) | 5 min |
@@ -72,7 +74,8 @@ Phase 0 Task 0.1 + 0.2 跑出來的真實 Zeabur 狀態：
 - [ ] **`.claude.json` cc-memory entry 改對**（Task 4.4 verify）：command = wrapper, env.DATABASE_URL 不存在
 - [ ] **MCP 連通**（Task 5.2）：`/mcp` 顯示 `cc-memory: ✓ connected`
 - [ ] **Tool query 正常**（Task 5.3）：`cc_memory_stats project_id="cc-memory"` 回 0 筆但不報錯
-- [ ] **Schema 完整**（NEW Phase 1.6）：7 tables + pgvector extension
+- [ ] **Schema 完整**（NEW Phase 1.6）：7 tables + pgvector extension + 3 個 `*_no_personal_check` constraint（`project_memories_no_personal_check` / `tasks_no_personal_check` / `search_feedback_no_personal_check`）
+- [ ] **Per-DB CHECK constraint 已套**（NEW Phase 1.5b）：0008_project_db_no_personal_check.sql apply 後，端對端 probe (探測) `INSERT INTO project_memories (project_id, type, summary, writer_host, idempotency_key) VALUES ('__personal__', 'session', 'should fail', 'test', 'cutover-probe')` 應被 `project_memories_no_personal_check` 拒
 
 ## References
 

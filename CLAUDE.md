@@ -4,6 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 <!-- cc-memory: project="CC-memory" -->
 
+## 溝通規則（hard reminder，違反立刻 self-correct）
+
+本 repo 強制執行 `~/.claude/rules/communication-style.md`（全域規則）：
+
+- **英文技術名詞／縮寫／術語第一次出現**（chat reply、commit message、PR description、docs、code 周邊解釋文字）**必須立即在括號內附簡短繁中註解**。
+- 常見字（repo / commit / hook / agent / push / migration / superuser / implication / schema）也照辦，不要因為「太常見」省略。
+- Identifier（程式碼／檔案路徑／指令名稱）本身不加註，只在周邊解釋文字加註。
+- 同段同詞不重複加註；精簡 ≠ 失真，註解不能改變條件、限制、風險、責任邊界。
+
+例：`implication (含義／連帶影響)`、`superuser (超級使用者)`、`pgvector (向量擴充模組)`、`push mode (推送模式)`、`per-DB CHECK constraint (每資料庫範圍的檢查約束)`、`drift gate (漂移檢查關卡)`、`fresh schema (全新結構)`。
+
+**Self-correct policy**：發現任一回覆漏註，下一則回覆**前 3 行內**先承認並補註，不要假裝沒事繼續。
+
 ## Project Overview
 
 CC-memory 是一個 Claude Code 專案記憶同步系統，透過 MCP (Model Context Protocol) 協議提供跨裝置的專案記憶管理功能。系統使用 Drizzle ORM 連接 PostgreSQL（Zeabur 部署），支援關鍵字搜尋和專案隔離。

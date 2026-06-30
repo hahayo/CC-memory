@@ -1,5 +1,25 @@
 # cc-memory project DB Cutover — Plan
 
+> ⚠️ **STATUS: SUPERSEDED-IN-PART (2026-06-30)** — Actual runbook (實際執行藍本) is [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md).
+>
+> **History**：Plan A (dump+restore) 於 2026-06-30 Phase 0 discovery 後切到 **Plan B (drizzle-kit push from `src/db/schema.ts`)**。Zeabur project mode DB 從沒實質寫過資料 → dump/restore 無意義。
+>
+> **本檔角色**：reference anchor，保留 Codex 6 輪對審決策歷程。**不是 actual runbook**。
+>
+> **SUPERSEDED 區塊（精細到 clause 條款）**：
+> - `### Phase 2 — Zeabur dump (5-10 min)` — 整段 SKIP，無資料可 dump
+> - `### Phase 3 — Coolify restore + 全表一致驗證 (15-25 min)` — 整段 SKIP；replace by addendum 新增的 **Phase 1.5 (drizzle-kit push)** + **Phase 1.5b (補 0008 per-DB CHECK constraint，每資料庫範圍檢查約束)** + **Phase 1.6 (schema verify，結構驗證)**
+> - `## Files Impact` > `### 新增` 內「`/tmp/.../zeabur-cc-memory-dump-<timestamp>.sql`（**dump 檔**，scratchpad）」 — Plan B 不產 dump artifact (轉儲產物)，這條 file impact 不會發生
+> - `## Verification Matrix` — 跟 checksum (校驗碼) / row count / drift gate (漂移檢查關卡) 相關的列 unapplicable；只保留 schema completeness (結構完整性) / functional check (功能檢查) 列
+> - `## Timeline Estimate` — Plan A 估 60-80 min；Plan B 實際估 35-45 min（見 addendum 估時表）
+> - `## Open Questions / needs_human` — Q1（Zeabur dump 工具）/ Q2（pgvector binary format (二進位格式) 跨版本相容性）已 unapplicable
+>
+> **仍 active 區塊（Plan B 照跑）**：Goal / Architecture / Files Impact 之 `### 新增`（不含已 supersede 的 dump 檔項目）+ `### 修改` + `### 不動` + `### 後續觸發` / Phase 0 (Pre-flight) / Phase 1 (CREATE DATABASE + pgvector) / Phase 4 (Switch over wrapper) / Phase 5 (Restart + Verify) / Phase 6 (Mark deprecated) / Rollback Path / Dependencies & Unblocks / References。**新增 Phase 1.5 / 1.5b / 1.6** 見 addendum，取代原 Phase 2/3。
+>
+> **Cross-ref**：[addendum 全文](./addendum-2026-06-30-plan-b.md)，特別是「Plan B 步驟」（取代 Phase 2/3）+「Plan B 估時」+「仍保留的核心驗證」三節。
+
+---
+
 **Source of truth**：`./spec.md`
 **Task breakdown**：`./task.md`
 **狀態**：Draft（待 user review）
@@ -7,6 +27,8 @@
 ---
 
 ## Goal
+
+> ⚠️ **SUPERSEDED by Plan B (addendum)** — 本段為 Plan A 目標（資料搬遷 + query 等價）。Plan B 改為「Coolify 端建立同名 `cc_memory_project` DB + drizzle-kit push fresh schema + 套 0008 per-DB CHECK constraint + 切換 wrapper，**無資料搬遷**」，預期 `cc_memory_stats` 回 0 筆 + `cc_memory_search` 回 empty (空集)。Plan B 不要求 query 行為跟 Zeabur 一致。詳見 [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md)。
 
 把 cc-memory project DB 從 Zeabur (`43.153.156.125:30156/zeabur`) 搬到 Coolify 同 PG service 內新 database `cc_memory_project`，本機 `~/.claude.json` `cc-memory` MCP entry 切換 connection string，零資料遺失、零 query 行為差異。
 
@@ -169,6 +191,8 @@ After (wrapper convention 統一)
 ---
 
 ## Verification Matrix
+
+> ⚠️ **SUPERSEDED-IN-PART by Plan B (addendum)** — 下表內所有 **Phase 2 / Phase 3** row（Dump 檔合理 / 全表 row count / 每表 ordered checksum / Schema-aware triple drift gate / `pgvector extversion` 兩端比對 / Drizzle migration mode 兩端比對）+ **Phase 5 內「同 Zeabur 結果」/「Top-5 search 順序一致」** row，在 Plan B 下 unapplicable (不適用)。Plan B 的 verify 清單見 [addendum](./addendum-2026-06-30-plan-b.md) 內「仍保留的核心驗證」+ `task.md` 新增 Phase 1.5b（套 0008）/ Phase 1.6（驗 3 個 `*_no_personal_check` constraint）。Phase 0 / 1 / 4 / 5 內 schema completeness + functional check + wrapper 結構對稱 + `.claude.json` 結構 + MCP 連通 row 仍 active。
 
 | 驗證項 | 命令 / 方法 | 預期 | 階段 |
 |---|---|---|---|
