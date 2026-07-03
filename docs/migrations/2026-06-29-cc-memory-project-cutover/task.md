@@ -1,6 +1,13 @@
 # cc-memory project DB Cutover — Tasks (TDD)
 
-> ⚠️ **STATUS: SUPERSEDED-IN-PART (2026-06-30)** — Actual runbook (實際執行藍本) is [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md).
+> ✅ **STATUS: EXECUTED (2026-07-01 02:50 GMT+8)** — Plan B 完整跑完 Phase 0-5：
+> - Phase 1 catalog cross-check 全對齊 `src/db/schema.ts`（7 tables / 22 indexes / 14 CHECK / 2 FKs / vector(1536) / 77 cols）
+> - Codex 雙輪對審 Phase 1 + Phase 4 全 converged（Round 2 全 withdrawn / needs_human = governance out-of-scope）
+> - Phase 5 RW round-trip probe 全綠（`cc_memory_save` → psql-verify probe row 落在 Coolify `cc_memory_project` / Zeabur 無此 row → `cc_memory_search` 命中 → `cc_memory_get` 回正確 summary + writer_host → `cc_memory_delete` 軟刪 → post-delete stats 0 active）
+> - deployment memory entry 已寫入（`~/.claude/projects/-home-haha-CC-project-CC-memory/memory/deployment-zeabur-prod.md`，含教訓 + rollback flow）
+> - Phase 6 Zeabur 不停 service（Step F deferred，1-2 週後再 conscious decision）
+>
+> ⚠️ **原 STATUS: SUPERSEDED-IN-PART (2026-06-30)** — Actual runbook (實際執行藍本) is [`addendum-2026-06-30-plan-b.md`](./addendum-2026-06-30-plan-b.md).
 >
 > **History**：Plan A (dump+restore) 於 2026-06-30 Phase 0 discovery 後切到 **Plan B (drizzle-kit push from `src/db/schema.ts`)**。Zeabur project mode DB 從沒實質寫過資料 → dump/restore 無意義。
 >
@@ -53,12 +60,12 @@
 
 ### Task 0.1 — autossh tunnel 活著
 
-- [ ] **VERIFY**：`pgrep -x autossh && ss -tln | grep ':15432' && echo "[tunnel OK]"`
+- [x] **VERIFY**：`pgrep -x autossh && ss -tln | grep ':15432' && echo "[tunnel OK]"`
   - 預期：autossh pid + LISTEN row + `[tunnel OK]`
 
 ### Task 0.2 — Zeabur 可讀（記下 row 數）
 
-- [ ] **VERIFY**：
+- [x] **VERIFY**：
   ```bash
   ZUR=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude.json')))['mcpServers']['cc-memory']['env']['DATABASE_URL'])")
   psql "$ZUR" -c "SELECT current_database(), current_user, COUNT(*) AS rows FROM project_memories"
@@ -68,12 +75,12 @@
 
 ### Task 0.3 — Coolify PG 可寫（用 cc_memory user）
 
-- [ ] **VERIFY**：`psql "$(cat ~/.ccm-personal-url)" -c "SELECT current_database(), current_user"`
+- [x] **VERIFY**：`psql "$(cat ~/.ccm-personal-url)" -c "SELECT current_database(), current_user"`
   - 預期：db=cc_memory_personal, user=cc_memory
 
 ### Task 0.4 — 抽 cc_memory user CREATEDB 權限
 
-- [ ] **VERIFY**：`psql "$(cat ~/.ccm-personal-url)" -c "SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user"`
+- [x] **VERIFY**：`psql "$(cat ~/.ccm-personal-url)" -c "SELECT rolname, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user"`
   - 結果分流：
     - `rolcreatedb=t` → 跳 Task 1.0、走 Task 1.1（cc_memory user 直接 createdb）
     - `rolcreatedb=f` → 走 Task 1.0（要 Coolify root URL）
@@ -153,7 +160,7 @@
 
 ### Task 1.1 — RED: 新 db 還不存在
 
-- [ ] **RED**：
+- [x] **RED**：
   ```bash
   URL=$(test -f ~/.ccm-root-url && cat ~/.ccm-root-url || cat ~/.ccm-personal-url)
   psql "$URL" -c "SELECT COUNT(*) FROM pg_database WHERE datname='cc_memory_project'"
@@ -163,7 +170,7 @@
 
 ### Task 1.2 — GREEN: CREATE DATABASE cc_memory_project
 
-- [ ] **GREEN**：
+- [x] **GREEN**：
   ```bash
   URL=$(test -f ~/.ccm-root-url && cat ~/.ccm-root-url || cat ~/.ccm-personal-url)
   psql "$URL" -c "CREATE DATABASE cc_memory_project OWNER cc_memory"
@@ -173,7 +180,7 @@
 
 ### Task 1.3 — VERIFY: 新 db 存在且空
 
-- [ ] **VERIFY**：
+- [x] **VERIFY**：
   ```bash
   set -e
   URL=$(test -f ~/.ccm-root-url && cat ~/.ccm-root-url || cat ~/.ccm-personal-url)
@@ -211,7 +218,7 @@
 > ```
 > 用法：`_gen_proj_url && psql "$(cat /tmp/cutover-tmp-proj.url)" -c "..." && rm /tmp/cutover-tmp-proj.url`
 
-- [ ] **RED**：
+- [x] **RED**：
   ```bash
   set -e
   python3 -c "
@@ -226,7 +233,7 @@
   rm /tmp/cutover-tmp-proj.url
   ```
   - 預期：0 row（還沒裝）
-- [ ] **GREEN**：
+- [x] **GREEN**：
   ```bash
   set -e
   python3 -c "
@@ -241,7 +248,7 @@
   rm /tmp/cutover-tmp-proj.url
   ```
   - 預期：`CREATE EXTENSION`
-- [ ] **VERIFY**：同 RED query，預期 1 row
+- [x] **VERIFY**：同 RED query，預期 1 row
 
   > 註：Task 2/3 dump+restore 內 dump 檔會自帶 schema 含 extension 宣告，這步是「先確保 target 環境 binary 可用」避免 restore 時 `CREATE EXTENSION vector` 失敗
 
@@ -614,8 +621,8 @@
 
 ### Task 4.1 — backup `~/.claude.json`
 
-- [ ] **VERIFY**（pre-state）：`ls -la ~/.claude.json`，記 size
-- [ ] **GREEN**：
+- [x] **VERIFY**（pre-state）：`ls -la ~/.claude.json`，記 size
+- [x] **GREEN**：
   ```bash
   TS=$(date +%Y%m%d-%H%M%S)
   cp ~/.claude.json ~/.claude.json.bak-cutover-$TS
@@ -626,13 +633,13 @@
 
 ### Task 4.2 — 寫 `~/.ccm-project-url`
 
-- [ ] **GREEN**：直接從 `~/.ccm-personal-url` 替換 db name 產生（cc_memory_personal → cc_memory_project）
+- [x] **GREEN**：直接從 `~/.ccm-personal-url` 替換 db name 產生（cc_memory_personal → cc_memory_project）
   ```bash
   python3 -c "import re,os; p=open(os.path.expanduser('~/.ccm-personal-url')).read(); new=re.sub(r'/cc_memory_personal(\?|$)', r'/cc_memory_project\1', p); assert new!=p, '[err] no substitute happened'; open(os.path.expanduser('~/.ccm-project-url'),'w').write(new); os.chmod(os.path.expanduser('~/.ccm-project-url'), 0o600); print('[written]')"
   ls -la ~/.ccm-project-url
   ```
   - 預期：`-rw------- ... ~/.ccm-project-url`
-- [ ] **VERIFY**：
+- [x] **VERIFY**：
   ```bash
   sed -E 's#://([^:]+):[^@]+@#://\1:****@#' ~/.ccm-project-url
   ```
@@ -640,8 +647,8 @@
 
 ### Task 4.3 — 寫 wrapper script `~/run-cc-memory-project.sh`
 
-- [ ] **RED**：`test ! -f ~/run-cc-memory-project.sh && echo "[ok, no existing wrapper]"`
-- [ ] **GREEN**：（結構跟 `~/run-cc-memory-personal.sh` 對稱；參考 personal wrapper code）
+- [x] **RED**：`test ! -f ~/run-cc-memory-project.sh && echo "[ok, no existing wrapper]"`
+- [x] **GREEN**：（結構跟 `~/run-cc-memory-personal.sh` 對稱；參考 personal wrapper code）
   ```bash
   cat > ~/run-cc-memory-project.sh <<'EOF'
   #!/usr/bin/env bash
@@ -668,7 +675,7 @@
   chmod 755 ~/run-cc-memory-project.sh
   ls -l ~/run-cc-memory-project.sh
   ```
-- [ ] **VERIFY**：
+- [x] **VERIFY**：
   ```bash
   test -f ~/run-cc-memory-project.sh && test -x ~/run-cc-memory-project.sh && echo "[wrapper ready + executable]"
   # 跟 personal wrapper 結構 diff (應該只差 DATABASE_URL 變數名 + .ccm-project-url vs .ccm-personal-url + 沒 CC_FORCE_PROJECT_ID + 沒 Todoist)
@@ -710,7 +717,7 @@
 
 ### Task 4.4 — 改 `~/.claude.json` cc-memory entry 結構（direct env → wrapper）
 
-- [ ] **GREEN**：
+- [x] **GREEN**：
   ```bash
   python3 << 'PYEOF'
   import json, os
@@ -735,7 +742,7 @@
   print('  args    =', cc['args'])
   PYEOF
   ```
-- [ ] **VERIFY**：
+- [x] **VERIFY**：
   ```bash
   python3 /tmp/claude-1000/-home-haha-CC-project-CC-memory/da215639-1554-4edc-83e3-189b155d3707/scratchpad/inspect_db_routes.py | grep -A 8 '\[cc-memory\]'
   ```
@@ -755,7 +762,7 @@
 
 ### Task 5.2 — VERIFY: cc-memory MCP 連通（新 session）
 
-- [ ] **VERIFY**（新 Claude Code session 內）：
+- [x] **VERIFY**（新 Claude Code session 內）：
   - 跑 `/mcp` 確認 `cc-memory: ✓ connected`
   - 跑 `cc_memory_stats project_id="cc-memory"` → 數字跟 Task 3.3 的 Coolify CN 一致
 
@@ -763,7 +770,7 @@
 
 > ⚠️ **SUPERSEDED by Plan B (addendum)** — 本 task 原要求「cutover 前 vs 後 top-5 結果完全一樣」，前提是資料搬遷後等價。Plan B 無資料搬遷 → **改為**：`cc_memory_stats project_id="cc-memory"` 應**回 0 筆但不報錯**；`cc_memory_search` 跑任一 query 應**回 empty (空集) 但不報錯**（不要求跟 Zeabur 等價）。失敗的 rollback 路徑（改回 `.claude.json.bak-cutover-<ts>`）仍 active。
 
-- [ ] **VERIFY**：跑 3-5 個典型 `cc_memory_search` query（從慣用 query 挑）：
+- [x] **VERIFY**：跑 3-5 個典型 `cc_memory_search` query（從慣用 query 挑）：
   - 例：「v0.4 spec」「personal hub Phase 1」「Coolify 部署」
   - cutover 前 vs 後 top-5 結果完全一樣（順序也是）
   - 失敗：rollback Phase 4（`cp ~/.claude.json.bak-cutover-<ts> ~/.claude.json` → 重啟 Claude Code）
@@ -776,7 +783,7 @@
 
 > ⚠️ **SUPERSEDED-IN-PART by Plan B (addendum)** — 原 entry 含「dump 檔路徑（scratchpad）：保留 30 天」項目，Plan B 不產 dump artifact，**這項刪掉**。其他項目（cutover date、Zeabur → Coolify 路徑、`.claude.json` backup 30 天、Step F 觸發條件）+ **新增 Plan B 專屬項目**（Plan B 路徑說明、Phase 0 空殼發現、Phase 1.5 drizzle-kit push + Phase 1.5b apply 0008、實際耗時、Zeabur 可立即下線結論）仍 active。
 
-- [ ] **GREEN**：在 `~/.claude/projects/-home-haha-CC-project-CC-memory/memory/deployment-zeabur-prod.md` 加 entry：
+- [x] **GREEN**：在 `~/.claude/projects/-home-haha-CC-project-CC-memory/memory/deployment-zeabur-prod.md` 加 entry：
   - cutover date: 2026-06-29
   - 從 Zeabur `43.153.156.125:30156/zeabur` → Coolify `127.0.0.1:15432/cc_memory_project`
   - dump 檔路徑（scratchpad）：保留 30 天
@@ -797,7 +804,7 @@
 
 ### Task 7.1 — 三檔（spec/plan/task）+ memory update commit
 
-- [ ] **GREEN**：用 `/commit` skill
+- [x] **GREEN**：用 `/commit` skill
   - Staged files：
     - `docs/migrations/2026-06-29-cc-memory-project-cutover/spec.md`
     - `docs/migrations/2026-06-29-cc-memory-project-cutover/plan.md`

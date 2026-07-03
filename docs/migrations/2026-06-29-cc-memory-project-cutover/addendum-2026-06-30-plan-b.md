@@ -70,12 +70,12 @@ Phase 0 Task 0.1 + 0.2 跑出來的真實 Zeabur 狀態：
 
 雖然 Phase 2/3 跳，但下列仍要驗：
 
-- [ ] **Wrapper 結構對稱**（Task 4.3 verify）：`diff ~/run-cc-memory-personal.sh ~/run-cc-memory-project.sh` 結構合理
-- [ ] **`.claude.json` cc-memory entry 改對**（Task 4.4 verify）：command = wrapper, env.DATABASE_URL 不存在
-- [ ] **MCP 連通**（Task 5.2）：`/mcp` 顯示 `cc-memory: ✓ connected`
-- [ ] **Tool query 正常**（Task 5.3）：`cc_memory_stats project_id="cc-memory"` 回 0 筆但不報錯
-- [ ] **Schema 完整**（NEW Phase 1.6）：7 tables + pgvector extension + 3 個 `*_no_personal_check` constraint（`project_memories_no_personal_check` / `tasks_no_personal_check` / `search_feedback_no_personal_check`）
-- [ ] **Per-DB CHECK constraint 已套**（NEW Phase 1.5b）：0008_project_db_no_personal_check.sql apply 後，端對端 probe (探測) `INSERT INTO project_memories (project_id, type, summary, writer_host, idempotency_key) VALUES ('__personal__', 'session', 'should fail', 'test', 'cutover-probe')` 應被 `project_memories_no_personal_check` 拒
+- [x] **Wrapper 結構對稱**（Task 4.3 verify）：`diff ~/run-cc-memory-personal.sh ~/run-cc-memory-project.sh` 結構合理
+- [x] **`.claude.json` cc-memory entry 改對**（Task 4.4 verify）：command = wrapper, env.DATABASE_URL 不存在
+- [x] **MCP 連通**（Task 5.2）：`/mcp` 顯示 `cc-memory: ✓ connected`
+- [x] **Tool query 正常**（Task 5.3）：`cc_memory_stats project_id="cc-memory"` 回 0 筆但不報錯
+- [x] **Schema 完整**（NEW Phase 1.6）：7 tables + pgvector extension + 3 個 `*_no_personal_check` constraint（`project_memories_no_personal_check` / `tasks_no_personal_check` / `search_feedback_no_personal_check`）
+- [x] **Per-DB CHECK constraint 已套**（NEW Phase 1.5b）：0008_project_db_no_personal_check.sql apply 後，端對端 probe (探測) `INSERT INTO project_memories (project_id, type, summary, writer_host, idempotency_key) VALUES ('__personal__', 'session', 'should fail', 'test', 'cutover-probe')` 應被 `project_memories_no_personal_check` 拒
 
 ## References
 
