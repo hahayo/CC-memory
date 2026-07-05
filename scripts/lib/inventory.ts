@@ -21,6 +21,13 @@
 // 存在 project DB，不屬 project→personal cutover 範圍。不排除的話 personal 側
 // discoverInventory 會經 FK 探勘（tasks FK）誤報 unexpected。投遞狀態是 transient
 // infra（ON DELETE CASCADE 跟隨 tasks），非需遷移的個人資料。
+//
+// observations 排除（v0.5 M1）：auto-capture 細粒度表（migration 0011，兩側都建）。
+// 不屬已執行完畢的 cutover 範圍，且個人列由分側 routing CHECK **結構性**擋住——
+// project DB 0012 拒 __personal__（delete 掃描恆 0 筆）、personal DB 0013 只准
+// __personal__；v0.5 不做 personal 自動採集，personal 側恆空。不排除的話
+// discoverInventory 會以 project_id 欄 +（rollup_memory_id→project_memories）FK
+// 探勘各報一筆 unexpected。結構保證優於掃描，語義同 reminder_delivery_queue 先例。
 
 import { PERSONAL_PROJECT_ID } from '../../src/constants.js';
 import { ident, type Queryable } from './clients.js';
@@ -55,7 +62,7 @@ export const SCHEMA_COMPARE_TABLES = [
   'search_feedback',
 ] as const;
 
-const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state', 'reminder_delivery_queue'];
+const EXCLUDED_TABLES = ['search_feedback', 'bot_user_state', 'reminder_delivery_queue', 'observations'];
 
 /**
  * 動態 inventory 探勘：
