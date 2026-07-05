@@ -8,15 +8,15 @@
 
 | Track | 目錄 | 狀態 | 一句話 |
 |---|---|---|---|
-| **Track 1：memory 核心（v0.3 → v0.4）** | `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**Phase C 🟡 dormant（休眠）** | Phase C = auto-capture（自動採集），是「取代 claude-mem」的主線；設計完成（2026-04-23）、實作 0%，重啟前需 design refresh（見下） |
+| **Track 1：memory 核心（v0.3 → v0.5）** | `docs/auto-capture-v0.5/` + `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**v0.5 active（SDD 起草）** | auto-capture（自動採集）是「取代 claude-mem」主線；v0.4 Phase C 休眠設計已被 v0.5 observation-first（觀察紀錄優先）SDD 取代 |
 | **Track 2：personal-hub 個人中樞** | `docs/personal-hub/` | ✅ **已交付**（2026-06-10 prod cutover） | Phase 0-3 + Todoist 5 tools + at-least-once（至少一次投遞）queue 全上線；維運見 `personal-hub/prod-runbook.md` |
 | **Track 3：project DB cutover** | `docs/migrations/2026-06-29-cc-memory-project-cutover/` | ✅ **EXECUTED**（2026-07-01） | Zeabur → Coolify，Plan B fresh schema（全新結構）；`addendum-2026-06-30-plan-b.md` 是 actual runbook；剩 Step F（Zeabur 退役）待做 |
 
-## 長期目標：取代 claude-mem（進度 0%，卡在 Track 1 Phase C）
+## 長期目標：取代 claude-mem（v0.5 SDD active）
 
-- **明文出處**：`docs/spec.md` Goal 8 品質閘（quality gate）三硬指標（Top-5 交集 ≥3／人工命中 rank ≤ claude-mem／錯抓率 <10%，AND 全達才停用）+ `docs/superpowers/specs/2026-04-22-auto-capture-design.md` Goal 5。
-- **2026-07-05 盤點結論**：CC-memory 的儲存/檢索核心（pgvector 語義 + hybrid 搜尋、跨裝置 PostgreSQL、治理）已強於 claude-mem；差距集中 4 項——① 全自動 capture 管線（hook + 背景 worker，難度 L）② session-start 自動注入 + token 經濟學（M）③ 細粒度 observation（觀察紀錄）模型（M）④ 3 層 token 節約檢索含 timeline（M）。
-- **重啟 Phase C 前置**：對照上述 4 項差距做一次 design refresh——檢查 `docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md` 是否涵蓋 ③ 與 ④，再動工。
+- **目前載體**：`docs/auto-capture-v0.5/{spec,plan,task}.md`。v0.4 Phase C 舊設計只供溯源，不再是實作依據。
+- **明文出處**：v0.5 SDD 的 Go/No-Go 品質閘（quality gate，品質關卡）三硬指標：10 組 benchmark query（基準查詢，固定 5 + 真實 5）中 ≥7 組 Top-5 交集 ≥3、10 組平均人工 first-relevant rank ≤ claude-mem 平均 rank、錯抓率 <10%，AND 全達才停用。`docs/spec.md` 的 Goal 8 是舊 v0.4 口徑，已在 Phase C 章節加 SUPERSEDED marker。
+- **2026-07-05 盤點結論**：CC-memory 的儲存/檢索核心（pgvector 語義 + hybrid 搜尋、跨裝置 PostgreSQL、治理）已強於 claude-mem；差距集中 4 項——① 全自動 capture 管線（hook + 背景 worker，難度 L）② session-start 自動注入 + token 經濟學（M）③ 細粒度 observation（觀察紀錄）模型（M）④ 3 層 token 節約檢索含 timeline（M）。v0.5 已把 ③/④ 納入主線。
 - **授權紅線**：claude-mem 為 AGPL-3.0，只抄架構思路（hook 佈局、佇列語義、taxonomy、3 層檢索），不搬任何原始碼。
 
 ## 文件清單與狀態
@@ -28,6 +28,7 @@
 | `../CLAUDE.md` | repo 總覽：18 個 MCP tools、env vars、設計模式（第一入口） |
 | `../README.md` | 安裝 + Coolify 部署（SSH tunnel 流程） |
 | `INDEX.md`（本檔） | track 導覽 |
+| `auto-capture-v0.5/{spec,plan,task}.md` | Track 1 v0.5 auto-capture SDD（Spec-Driven Development，規格驅動開發）三件套；取代 v0.4 Phase C 休眠設計 |
 | `personal-hub/prod-runbook.md` | 維運手冊（2026-07-05 已更新為 Coolify 拓樸） |
 | `personal-hub/{spec,plan,task}.md` + `decisions/ADR-001-*.md` | Track 2 SDD（已交付，仍為維運依據）；ADR-001 = 獨立 personal DB 決策 SSOT |
 | `migrations/2026-06-29-cc-memory-project-cutover/` 四件 | Track 3 SDD（EXECUTED；addendum 為 actual runbook） |
@@ -37,11 +38,7 @@
 
 ### Dormant（休眠——內容有效但未動工，重啟前需 refresh）
 
-| 檔案 | 角色 |
-|---|---|
-| `docs/{spec,plan,task}.md` 的 Phase C 章節 | Track 1 v0.4 骨架 + 品質閘指標 |
-| `superpowers/specs/2026-04-22-auto-capture-design.md` | auto-capture 完整設計（1056 行，Phase C 的 source of truth） |
-| `superpowers/plans/2026-04-23-v04-phase-c-implementation.md` | Phase C 實作 plan（M1-M5） |
+（空）——v0.4 Phase C 已移至 Superseded；v0.5 SDD active。
 
 ### Superseded / Historical / Stale（已標記，僅供溯源）
 
@@ -53,9 +50,12 @@
 | `codex-review-log.md` | HISTORICAL（Phase A review loop，round 24 收斂） |
 | `usage.md`、`setup.md` | PARTIALLY STALE（只涵蓋 v0.1 手動流程 + Zeabur，全面更新待排） |
 | `plans/archive/v0.2-spec-v1.2-revision.md` | 已在 archive/（正確歸檔範例） |
+| `docs/{spec,plan,task}.md` 的 Phase C 章節 | SUPERSEDED（被 `auto-capture-v0.5/{spec,plan,task}.md` 取代；章節內文保留溯源） |
+| `superpowers/specs/2026-04-22-auto-capture-design.md` | SUPERSEDED（被 `auto-capture-v0.5/spec.md` 取代；架構思路可溯源） |
+| `superpowers/plans/2026-04-23-v04-phase-c-implementation.md` | SUPERSEDED（被 `auto-capture-v0.5/plan.md` + `task.md` 取代；M1-M5 慣例可溯源） |
 | `superpowers/plans/2026-06-10-personal-hub-remaining-roadmap.md`、`2026-06-10-todoist-sync-polling.md` | 已執行完畢（A3b-A3d 全 merge） |
 
 ## 版號說明
 
 - `package.json` **0.4.0**（2026-07-05 bump）= 現況：Phase A（v0.3）+ personal-hub Phase 0-3 + Todoist + project DB cutover。
-- ⚠️ 「v0.4」在歷史文件裡有兩個用法：`docs/spec.md` 的 v0.4 = Phase C auto-capture（未實作）；ADR-001 的「Phase 3 v0.4」= personal DB 分離（已交付）。命名衝突已存在，本索引一律以 **track 名稱**指涉；未來 Phase C 實作時建議另立 0.5.x 並同步修正 spec 命名。
+- ⚠️ 「v0.4」在歷史文件裡有兩個用法：`docs/spec.md` 的 v0.4 = Phase C auto-capture（未實作且已 superseded）；ADR-001 的「Phase 3 v0.4」= personal DB 分離（已交付）。Track 1 auto-capture 後續以 **v0.5 / 0.5.x** 指涉。

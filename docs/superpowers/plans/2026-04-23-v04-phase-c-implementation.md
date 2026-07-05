@@ -1,3 +1,5 @@
+> **[SUPERSEDED（已被取代）2026-07-05]** 本 v0.4 Phase C implementation plan 已被 `docs/auto-capture-v0.5/plan.md` 與 `docs/auto-capture-v0.5/task.md` 取代。保留本文作為 milestone/Gate 慣例溯源；不要依本文開工實作。
+
 # v0.4 Phase C — Auto-capture Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

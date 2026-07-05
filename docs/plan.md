@@ -1,13 +1,13 @@
 # CC-memory Implementation Plan（v0.3 Phase A 已交付 + v0.4 Phase C 規劃）
 
-> **當前狀態**：Phase A ✅（tag `v0.3-phase-a`，248 tests 綠） · Phase B ❌ 取消 · Phase C = v0.4 Stage 1（設計 ready，pending implementation）
+> **當前狀態**：Phase A ✅（tag `v0.3-phase-a`，248 tests 綠） · Phase B ❌ 取消 · ~~Phase C = v0.4 Stage 1（設計 ready，pending implementation）~~ **Phase C v0.4 已 SUPERSEDED（已被取代，2026-07-05）**——auto-capture（自動採集）現行載體為 `docs/auto-capture-v0.5/{spec,plan,task}.md`
 >
 > **Phase 劃分（2026-04-23 更新）：**
 > - **Phase A — MCP only** ✅ 已交付：Phase 0 + Phase 1 + Phase 2 + Phase 5-A
 > - ~~**Phase B — HTTP + Telegram**~~ ❌ 取消（2026-04-23）：Phase 3 / 4 / 5-B 整塊放棄
-> - **Phase C — v0.4 自動採集**（pending）：M1 (schema+refine) + M2 (capture) + M3 (retrieval+cross-project) + M4 (reinject) + M5 (benchmark)
+> - ~~**Phase C — v0.4 自動採集**（pending）：M1 (schema+refine) + M2 (capture) + M3 (retrieval+cross-project) + M4 (reinject) + M5 (benchmark)~~（**SUPERSEDED 2026-07-05**：現行 M1-M6 見 `docs/auto-capture-v0.5/plan.md`）
 >
-> **完整 Phase C 設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（source of truth）。本 plan 在既有 Phase A / Phase B 骨架上補入 Phase C 章節 + 把 Phase B 相關段標取消。
+> ~~**完整 Phase C 設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（source of truth）~~ 該 design 已 SUPERSEDED 僅供溯源；auto-capture 的 source of truth（唯一真實來源）= `docs/auto-capture-v0.5/`。本 plan 在既有 Phase A / Phase B 骨架上補入 Phase C 章節 + 把 Phase B 相關段標取消。
 >
 > change log：
 > - v1.3.1（2026-04-21）：plan.md 加 `## Dependencies` / `## Environment Variables` / `## Testing Strategy` / `## Risks`；Phase A Groundwork 區塊；Phase 標題
@@ -160,7 +160,9 @@ CREATE TABLE bot_user_state (
 
 ### `session_summaries`（v0.4 Phase C 新增）
 
-完整 schema 見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model。要點：
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：v0.5 不建 `session_summaries` 表——改為 `observations` 新表 + session rollup 寫入既有 `project_memories(type='session')`，見 `docs/auto-capture-v0.5/plan.md` §Data Model；以下 DDL 為 v0.4 歷史草案。
+
+~~完整 schema 見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model。~~要點：
 
 ```sql
 CREATE TABLE session_summaries (
@@ -666,7 +668,7 @@ src/tools/*.ts              # 保留當薄殼
 # ~~README.md HTTP + bot + Codex MCP 設定章節~~
 # ~~.env.example 新增所有 HTTP/bot env~~
 
-# Phase C（v0.4 pending）
+# ~~Phase C（v0.4 pending）~~ SUPERSEDED 2026-07-05——現行檔案影響清單見 docs/auto-capture-v0.5/plan.md §Files Impact
 src/db/schema.ts            # 加 session_summaries / refine_audit_log / project_memories.source_summary_id / search_feedback.result_source_breakdown
 src/index.ts                # 註冊 6 個新 MCP tool（save-summary、recent-summaries、refine-{delete,promote,merge,edit}）
 src/services/memories.ts    # searchMemories 擴展跨表+跨專案+加權
@@ -714,6 +716,8 @@ docs/next-session-handoff.md # 每個 Milestone 結束更新
 ### ~~Phase B — 後續階段（HTTP + Telegram）~~ ❌ 已於 2026-04-23 取消
 
 ### Phase C — v0.4 自動採集（~7.5 日 dev + 2 週觀察）
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本 Phase C v0.4 rollout 已由 `docs/auto-capture-v0.5/{spec,plan,task}.md` 取代；以下內容僅供歷史溯源，不重寫內文。
 
 完整任務清單、Gate 條件、依賴見 `docs/task.md` 和 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Rollout Plan。
 

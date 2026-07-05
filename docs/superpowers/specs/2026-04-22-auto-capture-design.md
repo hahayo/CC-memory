@@ -1,3 +1,5 @@
+> **[SUPERSEDED（已被取代）2026-07-05]** 本 v0.4 auto-capture design 已被 `docs/auto-capture-v0.5/spec.md` 取代。保留本文作為架構思路與決策歷史溯源；不要依本文開工實作。
+
 # CC-memory v0.4 — 自動採集（Auto-capture）Design Spec
 
 **建立日期**：2026-04-22

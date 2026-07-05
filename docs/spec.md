@@ -2,9 +2,9 @@
 
 > **🔀 Track 分流（2026-06-05）**：本檔 v0.4 Phase C auto-capture 為**規劃完成、實作 deferred**（**非進行中**）。目前 in-flight 的是獨立 initiative **personal-hub**（CC-memory 升格跨工具個人記憶+待辦中樞），其 SDD 三件套在 `docs/personal-hub/{spec,plan,task}.md`，Phase 0 安全核心已交付（commit `01dd5e4`）。兩條 track 互不污染：本檔保留 v0.3/v0.4 歷史，個人中樞內容一律在 `docs/personal-hub/`。
 
-> **當前版本：v0.4 draft**（2026-04-23 升版）· Phase A 已交付（tag `v0.3-phase-a`）；**Phase B 已取消**；新增 **Phase C — v0.4 自動採集（Stage 1）**。
+> **當前版本：v0.4 draft**（2026-04-23 升版）· Phase A 已交付（tag `v0.3-phase-a`）；**Phase B 已取消**；~~新增 **Phase C — v0.4 自動採集（Stage 1）**~~ **Phase C v0.4 全部內容已 SUPERSEDED（已被取代，2026-07-05）**——本檔各章節的 Phase C／`session_summaries` 段落均屬 v0.4 歷史口徑僅供溯源，auto-capture 現行 spec = `docs/auto-capture-v0.5/spec.md`；Phase A 內容不受影響仍有效。
 >
-> **完整 Phase C 設計請見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（1056 行、13 User Stories、5 Milestones、7 Risks）。本 spec 保留 Phase A 既有內容、Phase B 標記為取消、新增 Phase C 骨架對照 design doc。
+> ~~**完整 Phase C 設計請見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md`**（1056 行、13 User Stories、5 Milestones、7 Risks）~~ **該 design 與本檔 Phase C 章節已 SUPERSEDED（已被取代，2026-07-05）**——auto-capture（自動採集）現行 spec = `docs/auto-capture-v0.5/spec.md`。本 spec 保留 Phase A 既有內容、Phase B 標記為取消、Phase C 骨架僅供溯源。
 >
 > change log：
 > - v1.3.1（2026-04-21）：拆分 Phase A (MCP) / Phase B (HTTP + Telegram)；新增 `## Constraints`
@@ -40,6 +40,8 @@ Codex 魔鬼代言人審查指出三個「3-6 個月會重寫」的陷阱：
 路線 A 的核心原則：**先證明 retrieval 可信 + 手動寫入夠用，再談自動化**。
 
 ### v0.4 方向調整（2026-04-23）
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本節所述 v0.4 技術路線（session_summaries 單表／Claude CLI subprocess）已被 v0.5 覆寫，見 `docs/auto-capture-v0.5/spec.md` 的「v0.4 決策覆寫表」；以下為歷史決策紀錄。
 
 Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策：
 - **Phase B 取消**：HTTP REST API + Telegram bot + thumbs feedback 整塊放棄
@@ -85,7 +87,7 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 - **Phase A — MCP** ✅（v0.3 已交付）：終端機（Claude Code / Codex MCP stdio）
 - ~~**Phase B — HTTP REST API + Telegram bot**~~ ❌（已於 2026-04-23 取消，見下方 §Phase B 區塊）
-- **Phase C — v0.4 自動採集（Stage 1）**（pending）：Stop hook capture + SessionStart re-inject + refine tools + benchmark
+- ~~**Phase C — v0.4 自動採集（Stage 1）**（pending）~~（**SUPERSEDED 2026-07-05**：auto-capture 現行載體 = `docs/auto-capture-v0.5/`）
 
 每個 US 皆對應具體驗收條件與 Goal / Design Principle。
 
@@ -166,6 +168,8 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 ### Phase C — v0.4 自動採集（Stage 1）
 
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本 Phase C v0.4 章節已由 `docs/auto-capture-v0.5/{spec,plan,task}.md` 取代；以下內容僅供歷史溯源，不重寫內文。
+
 > **完整 User Stories（US-1 ~ US-13）見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §User Stories。** 以下列主題對照表。
 
 | US# | 主題 | 對應 design doc §US |
@@ -195,6 +199,8 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 ## Non-goals（Out of Scope，明確不做）
 
+> ⚠️ **2026-07-05 註**：本節維持 v0.3/v0.4 當時口徑。其中「`observations` 細粒度表（Stage 2）」「session_summaries only，不做 observations 細粒度」兩項已被 **v0.5 SDD 翻案**——observations 是 v0.5 M1 核心、session rollup（工作階段彙總）改寫既有 `project_memories(type='session')`、`session_summaries` 表不再建。詳見 `docs/auto-capture-v0.5/spec.md` 的「v0.4 決策覆寫表」。
+
 ### Phase A / v0.3 原 Non-goals（仍有效）
 
 - ❌ ~~Stop hook 自動抽取~~ → **v0.4 Phase C 已啟動**（session_summaries only，不做 observations 細粒度）
@@ -220,6 +226,8 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 ---
 
 ## Scope 摘要
+
+> ⚠️ **2026-07-05 註**：下表 Phase C 各列（`session_summaries`／`refine_audit_log`／capture-runner + Claude CLI／reinject-runner／search 加權擴展／refine 四工具／benchmark）為 v0.4 歷史口徑，已被 `docs/auto-capture-v0.5/` 取代，不再是實作依據；Phase A 各列仍有效。
 
 | 項目 | 階段 | 說明 |
 |---|---|---|
@@ -256,6 +264,8 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 - ~~架構隔離 / bot 進程~~ → Phase B 取消後此條失效
 
 ### Phase C 新 Constraints（詳見 design doc §Constraints 12 條）
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本小節為 v0.4 口徑（248 tests 基線／Claude CLI subprocess 等已失真）；現行約束見 `docs/auto-capture-v0.5/spec.md` §Constraints（592 tests 基線、RAM 三紅線、Gemini Flash worker）。
 - **不回歸**：現有 248 tests 全綠，v0.4 不得造成既有測試失敗
 - **Precision-first**：寧漏不要錯抓；Claude CLI 失敗寫 queue 不強寫 DB
 - **LLM 摘要走 Claude CLI subprocess**：不呼叫 Anthropic API、不呼叫 Gemini LLM API
@@ -283,6 +293,9 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 ### ~~Phase B 開工時適用~~ ❌ 已取消（原則保留為歷史紀錄）
 
 ### Phase C 必守
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本小節為 v0.4 口徑（兩表並存／Claude CLI）；現行原則見 `docs/auto-capture-v0.5/spec.md` §Design Principles（observation-first、rollup 寫入 `project_memories`）。
+
 - **抄 claude-mem 不重發明**：prompt (`code.json`)、hook 事件（Stop + SessionStart）、LLM provider（Claude CLI）、SKIP_TOOLS 清單皆抄 claude-mem 10.5.2
 - **兩表並存不合表**：`project_memories`（curated）與 `session_summaries`（auto）分表，retrieval 層統一
 - **同 session upsert**：不保留 session 中間版本，避免污染 top-K
@@ -308,7 +321,9 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 
 ### Phase C 品質閘（claude-mem 切換 Go/No-Go）
 
-> 完整細節見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Success Criteria。
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：現行品質閘口徑（rollup 為對比單位、≥30 筆 auto rollup/observation、592 tests 基線）見 `docs/auto-capture-v0.5/spec.md` §Success Criteria；下述 session_summaries 口徑為 v0.4 歷史版。
+>
+> ~~完整細節見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Success Criteria。~~
 
 **觀察窗**：併用 claude-mem 至少 2 週 + 累積 ≥ 30 筆 session_summaries，兩條件都滿足才跑品質閘。
 
@@ -340,6 +355,8 @@ Phase A 靠 MCP `cc_memory_search` 被動寫入 `search_feedback`（query / quer
 - [ ] Telegram 10 秒內撤銷成功、超時 403、重複按 no-op
 
 ### Phase C（v0.4 本期必過）
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：v0.5 端對端驗收清單見 `docs/auto-capture-v0.5/spec.md` §端對端驗收；以下為 v0.4 歷史版。
 
 > 完整端對端驗收清單見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §端對端驗收。
 

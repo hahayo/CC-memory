@@ -1,0 +1,453 @@
+# CC-memory v0.5 auto-capture Implementation Plan
+
+> **對應 spec（規格）**：[spec.md](spec.md)。本 plan（計畫）只描述未來實作，不代表本輪已修改程式碼。
+>
+> **執行紀律**：每個 milestone（里程碑）開 feature branch（功能分支）`feature/v05-m<N>-<name>`，先 TDD（Test-Driven Development，測試驅動開發）再實作，Gate（關卡）過才 merge（合併）。
+>
+> **基線**：現行全綠 592 tests（2026-07-05 repo 基線，43 檔全綠；lint（靜態檢查）基準 0 errors / 4 warnings；test DB（測試資料庫）用 `docker-compose.test.yml` + `scripts/test-db-setup.ts`）不回歸。
+
+---
+
+## Architecture（架構）
+
+```
+Claude Code session
+  │
+  ├─ PostToolUse hook（掛鉤）
+  │    └─ O(1) append thin JSONL 到本機 spool（緩衝暫存區）
+  │
+  ├─ Stop hook
+  │    └─ append sentinel（哨兵）{ transcript_path, hwm_offset }
+  │
+  ▼
+~/.cache/cc-memory/spool/<project>/<session>.jsonl
+  │
+  └─ hermes cron（排程任務）cc-memory-auto-capture */5min
+       ├─ health check（健康檢查）SSH tunnel（通道）與 project DB（專案資料庫）
+       ├─ file lock（檔案鎖）+ rotation（輪替）+ high-water mark（高水位）commit
+       ├─ batch harvest（批次收割）transcript 增量窗口
+       ├─ Gemini Flash LLM（大型語言模型）一次呼叫
+       ├─ JSON schema validation（結構驗證）
+       ├─ write rollup → project_memories(type='session')
+       └─ write observations → observations
+             │
+             ├─ SessionStart injector（注入器）→ Recent Activity index（索引）
+             └─ Retrieval（檢索）→ search → timeline → get_observations
+```
+
+### 模組邊界
+
+| 模組 | 責任 | 不做 |
+|---|---|---|
+| hook wrappers（掛鉤包裝） | 解析 hook input（輸入）、SKIP_TOOLS、append local spool | DB 寫入、LLM、重試 |
+| spool service（緩衝服務） | atomic append（原子附加）、lock、HWM、rotation、dead-letter（死信） | 解析 LLM 內容 |
+| capture worker（擷取工作程序） | claim batch（認領批次）、呼叫 LLM、驗 schema、寫 DB | 常駐 daemon（守護程序） |
+| observation service（觀察紀錄服務） | insert/query/archive observations | personal 自動採集 |
+| retrieval service（檢索服務） | search 輕索引、timeline、batch get | 改破 `SearchResultEnvelope` |
+| injection service（注入服務） | Recent Activity 格式化、token budget（語彙預算） | 寫 `search_feedback` |
+| refine service（整理服務） | delete only + audit metadata（稽核中繼資料） | promote/merge/edit |
+
+## Data Model（資料模型）
+
+### `observations` 草案
+
+Drizzle（TypeScript ORM）風格偽碼，實作時需對齊 `src/db/schema.ts` 命名與 import（匯入）慣例：
+
+```ts
+export const observations = pgTable(
+  'observations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: text('project_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    rollupMemoryId: uuid('rollup_memory_id').references(() => projectMemories.id),
+
+    type: text('type').notNull(), // decision | bugfix | feature | refactor | discovery | change
+    title: text('title').notNull(),
+    subtitle: text('subtitle'),
+    facts: text('facts').array().notNull().default(sql`'{}'::text[]`),
+    concepts: text('concepts').array().notNull().default(sql`'{}'::text[]`),
+    files: text('files').array().notNull().default(sql`'{}'::text[]`),
+    narrative: text('narrative').notNull(),
+
+    embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
+    discoveryTokens: integer('discovery_tokens').notNull(),
+    sourceHook: text('source_hook').notNull(), // post-tool-use | stop-rollup
+    contentHash: text('content_hash').notNull(),
+    writerHost: text('writer_host').notNull(),
+    status: text('status').notNull().default('active'),
+    metadata: jsonb('metadata').notNull().default({}),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('observations_type_check', sql`${table.type} IN (...)`),
+    check('observations_status_check', sql`${table.status} IN ('active','archived')`),
+    check('observations_discovery_tokens_check', sql`${table.discoveryTokens} > 0`),
+    uniqueIndex('observations_content_uniq')
+      .on(table.projectId, table.sessionId, table.contentHash)
+      .where(sql`${table.status} = 'active'`),
+    index('observations_project_active_idx')
+      .on(table.projectId, table.observedAt.desc())
+      .where(sql`${table.status} = 'active'`),
+    index('observations_session_idx').on(table.projectId, table.sessionId, table.observedAt),
+    index('observations_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+  ]
+);
+```
+
+`observations_no_personal_check` 與 `observations_personal_only_check` 不放在共用 `schema.ts`：它們是 per-DB invariant（分側資料庫不變量），若由 Drizzle generate（產生）帶到錯側，會重演 0007/0008 檔頭明示的錯側 CHECK 風險。
+
+### Rollup 寫入
+
+rollup 不開 `session_summaries` 新表，改用既有 `project_memories`，並保留「同 project 與同 session 一筆 active canonical」語義：
+
+| 欄位 | 寫法 |
+|---|---|
+| `type` | `'session'` |
+| `summary` | LLM 產出的 session summary |
+| `keywords/decisions/next_steps` | 結構化 JSON 映射到既有欄位 |
+| `metadata.capture` | `{ version:'0.5', session_id, observation_ids, model, spool_offsets, summarize_count, discovery_tokens }` |
+| `embedding` | 沿用 `src/utils/embedding.ts`，失敗可為 NULL |
+| `idempotency_key` | `capture:v05:<project>:<session>` |
+
+worker 對既有 rollup 做 upsert update：summary 可重生成或合併，embedding 重算，`metadata.capture.observation_ids` 與 `metadata.capture.spool_offsets` append，`metadata.capture.summarize_count` 遞增，`metadata.capture.discovery_tokens` 寫入時計算並覆蓋。observations 本身 append-only，不受 rollup upsert 影響；每筆 observation 的 `rollupMemoryId` 指向該 canonical rollup。
+
+### 為何不建 `pending_observations`
+
+v0.5 不建遠端 pending queue（待處理佇列）。hook 不走網路是硬約束；跨機重試由各機 spool 自理。遠端 queue 只有在未來需要「A 機 capture、B 機 worker 代處理」時才另開 SDD。
+
+## Files Impact（檔案影響）
+
+### 新增
+
+```
+src/services/capture-spool.ts          # spool append/lock/HWM/rotation/dead-letter
+src/services/capture-worker.ts         # harvest + LLM + schema validation + DB write
+src/services/observations.ts           # insert/search-index/timeline/get/archive
+src/services/capture-llm.ts            # Gemini Flash adapter + schema parser
+src/services/recent-activity.ts        # SessionStart index builder
+src/tools/timeline.ts                  # cc_memory_timeline
+src/tools/get-observations.ts          # cc_memory_get_observations
+src/tools/refine-delete.ts             # cc_memory_refine_delete
+scripts/run-auto-capture.ts            # hermes cron worker
+scripts/probe-claude-hooks.ts          # M2a payload/offset gate
+hooks/post-tool-use-capture.sh         # O(1) spool append
+hooks/stop-capture-sentinel.sh         # sentinel append
+tests/services/*capture*.test.ts       # spool/worker/LLM validation
+tests/services/observations.test.ts    # DB + timeline/get
+tests/mcp-observations.test.ts         # MCP tools
+tests/scripts/probe-claude-hooks.test.ts
+```
+
+### 修改
+
+```
+src/db/schema.ts                       # add observations（implementation round only）
+sql/migrations/0011_add_observations.sql
+sql/migrations/0012_observations_no_personal_check.sql
+sql/migrations/0013_observations_personal_only_check.sql
+scripts/test-db-setup.ts               # 0011 雙側；0012 project test；0013 personal test
+src/index.ts                           # register new tools + central guards
+src/services/memories.ts               # search 輕索引化，保持 envelope
+src/services/feedback.ts               # 若需記 result kind，必須維持既有欄位長度不變量
+src/services/tool-policy.ts            # add write tool cc_memory_refine_delete
+src/services/scope-policy.ts           # ensure observations path uses same project policy
+CLAUDE.md                              # 工具清單與 env 總表 cascade，實作完成後再更新
+docs/INDEX.md                          # v0.5 狀態
+```
+
+### 不動
+
+```
+skills/**
+package.json        # 除非實作輪確定需 script；本 SDD 不預設新增 npm package
+claude-mem plugin   # 併用期保留
+```
+
+## Spool Reliability Spec（可靠性規格）
+
+可靠性不得低於 `src/services/delivery-queue.ts` 的 at-least-once（至少一次）claim-lease（租約認領）模式。
+
+| 項目 | v0.5 規格 | Gate |
+|---|---|---|
+| path | `~/.cache/cc-memory/spool/<project>/<session>.jsonl` | project/session sanitize（安全正規化）測試 |
+| permission（權限） | 目錄 0700、檔案 0600 | chmod test |
+| atomic append | `open(O_APPEND)` + 單行 JSON + newline；失敗吞掉 | concurrent append 100 次無破行 |
+| file lock | worker processing（處理）時鎖 session spool；hook append 不等待長鎖 | worker/hook race 測試 |
+| HWM commit | DB transaction（交易）成功後才更新 `.hwm`；LLM 失敗不前進 | crash recovery 測試 |
+| idempotency | content hash + DB unique index 擋重複 | 重跑同 spool 不重複 insert |
+| rotation | 單檔 >10MB 或 session 結束 24h 後 rotate `.sealed` | rotation 測試 |
+| size cap | 全 spool >500MB 時停止 capture 並 stdout 告警 | flood（洪水）測試 |
+| dead-letter | schema 驗證失敗或 attempts ≥5 寫 `.dead/<hash>.json` | metadata 不含敏感全文；含錯誤碼 |
+| recovery | worker crash 後下輪從 HWM 重讀，最多造成重複不造成遺失 | at-least-once 測試 |
+
+### Hook SKIP_TOOLS policy（掛鉤跳過工具政策）
+
+預設 skip 清單沿用 v0.4 frozen 值：`ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion`。`CC_MEMORY_SKIP_TOOLS` 若設定，語義是**整個覆蓋預設清單**，不是 union（聯集）；空字串代表不 skip 任何 tool。hook 端只做這個廉價集合判斷，完整節流與 retry 留給 worker。
+
+### HWM commit 時機
+
+1. worker 讀取 spool window：`[hwm_offset, current_size)`。
+2. 讀 transcript 增量與 hook events 合成 batch。
+3. 呼叫 LLM 並做 schema validation。
+4. DB transaction 內 upsert rollup + insert observations。
+5. transaction commit 成功後，原子寫 `.hwm.tmp` 再 rename（重新命名）成 `.hwm`。
+6. 任一步失敗：HWM 不前進，下輪重試。
+
+## Search Contract（搜尋契約）
+
+`cc_memory_search` v0.5 改成「輕索引化」，但不改 service envelope（服務信封）核心欄位：
+
+```ts
+interface SearchResultEnvelope<T = MemoryIndexResult> {
+  results: T[];
+  effectiveMode: SearchMode;
+  rankingMeta: { rankPositions: number[]; scores: number[] | null };
+  queryContext: SearchQueryContext;
+}
+```
+
+上方是 v0.5 目標型別示意；現行 `src/services/types.ts` 的 default generic（預設泛型）仍是 `Memory`，實作時以 additive 擴充（增量擴充）方式導入，不得讓既有消費端被迫改型別。
+
+規則：
+- `rankPositions.length === results.length`。
+- `scores !== null` 時 `scores.length === results.length`。
+- `result.id` 仍可寫入 `search_feedback.result_ids`；observation index id 與 rollup id 不可混淆，必要時 metadata 標 `result_kind`，不得改既有陣列長度。
+- 注入器不呼叫 `recordSearchQuery`。
+
+### Mixed Corpus Ranking（混合語料排序）
+
+預設權重：
+
+| 來源 | 預設權重 | env override |
+|---|---:|---|
+| manual `project_memories` | 1.00 | `CC_MEMORY_WEIGHT_MANUAL` |
+| canonical session rollup | 0.85 | `CC_MEMORY_WEIGHT_ROLLUP` |
+| `decision` observation index | 0.80 | `CC_MEMORY_WEIGHT_OBSERVATION_DECISION` |
+| 其他 observation index | 0.65 | `CC_MEMORY_WEIGHT_OBSERVATION_AUTO` |
+
+排序策略是 precision-first（精準優先）：manual/decision 類結果不應被低信心 observation 洪水淹沒；env 值只調權重，不改 `SearchResultEnvelope` 形狀。
+
+### Timeline Semantics（時間軸語義）
+
+`cc_memory_timeline(anchor_id, depth_before, depth_after)` 僅在同 project 且同 session 內排序。anchor 若是 observation，取同 session 依 `observed_at` 前後 N 筆；anchor 若是 rollup，先找 `rollupMemoryId` 指向該 rollup 的 observations，再以這組 observations 的時間範圍回前後文。v0.5 不做跨 session timeline；跨 session 發現靠 search index。
+
+## Environment Variables（環境變數）
+
+| 名稱 | 預設值 | 讀取元件 | 缺值或降級行為 |
+|---|---|---|---|
+| `CC_CAPTURE_LLM` | `gemini-flash` | capture worker | 未支援 provider 時 fail-fast 到 dead-letter metadata |
+| `GEMINI_API_KEY` | 無 | capture LLM / embedding | 缺值時 capture 靜默停用並 stdout 告警；既有 search 降級沿用 `embedding.ts` |
+| `CC_MEMORY_SKIP_TOOLS` | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | hook wrapper | 設定後整個覆蓋預設；空字串代表不 skip |
+| `CC_MEMORY_SPOOL_DIR` | `~/.cache/cc-memory/spool` | hook / worker | 缺值用預設；無法建立時 hook 吞錯、worker 告警 |
+| `CC_MEMORY_SPOOL_MAX_MB` | `500` | worker | 超過上限停止 capture 並 stdout 告警 |
+| `CC_MEMORY_INCLUDE_OBSERVATIONS` | `on` | search service | `off` 時 search 只回 manual/rollup |
+| `CC_MEMORY_INJECT_RECENT` | `off` | SessionStart injector | off 時 stdout 空 |
+| `CC_MEMORY_INJECT_TOKEN_BUDGET` | `1200` | SessionStart injector | 超過先截 observation ids，再截 summary text |
+| `CC_MEMORY_WEIGHT_MANUAL` | `1.00` | search ranking | parse 失敗用預設 |
+| `CC_MEMORY_WEIGHT_ROLLUP` | `0.85` | search ranking | parse 失敗用預設 |
+| `CC_MEMORY_WEIGHT_OBSERVATION_DECISION` | `0.80` | search ranking | parse 失敗用預設 |
+| `CC_MEMORY_WEIGHT_OBSERVATION_AUTO` | `0.65` | search ranking | parse 失敗用預設 |
+
+## Injection Pollution Defense（注入污染防線）
+
+- `CC_MEMORY_INJECT_RECENT=off` 預設。
+- 併用期兩週內只 capture，不注入。
+- 注入內容加 metadata marker（標記）`source=cc-memory-inject`；worker 看到該 marker 直接排除。
+- token budget 預設 1,200；超過先截 observations ids，再截 summary text。
+- 每列 rollup 的 `discovery_tokens` 讀 `metadata.capture.discovery_tokens`；注入器不即時計算。
+- 注入 stdout 不含全文 observation narrative，只含索引。
+- 空結果 stdout 空，不注入 placeholder（佔位文字）。
+
+## Milestones
+
+### M1：Schema + migrations 0011-0013（1 到 1.5 天）
+
+依賴：無，但需先確認 `sql/migrations/meta/_journal.json` 政策。
+
+交付：
+- `observations` Drizzle schema + migration 0011。
+- `0012_observations_no_personal_check.sql`（project-only）與 `0013_observations_personal_only_check.sql`（personal-only）。
+- project/personal/test 三側套用規格與 CHECK 矩陣；新表為空，不需要 0008 當年的 maintenance window。
+- `observations` DB tests。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- migration 在 test project/personal DB 可套：0011 雙側，0012 project test，0013 personal test。
+- Coolify project DB 與 personal DB 套 0011-0013 前有 backup（備份）與 tunnel health check。
+
+### M2a：Hook 端與 payload gate（1 天）
+
+依賴：M1 schema 可先不存在，因 hook 只寫本地。
+
+交付：
+- `scripts/probe-claude-hooks.ts` 實測 PostToolUse payload 與 transcript offset。
+- `hooks/post-tool-use-capture.sh`、`hooks/stop-capture-sentinel.sh`。
+- spool append library（函式庫）最小版。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- 三種 tool event（事件）與 Stop sentinel offset 可重現。
+- hook p95 <20ms。
+- hook 網路斷線時行為不變。
+- `CC_MEMORY_SKIP_TOOLS` 預設清單與整體覆蓋語義有測試。
+
+### M2b：Cron worker + LLM extraction（2 天）
+
+依賴：M1 + M2a。
+
+交付：
+- `scripts/run-auto-capture.ts`。
+- Gemini Flash adapter、JSON schema validation、dead-letter。
+- rollup + observations 寫入 transaction。
+- per-session canonical rollup upsert；同 session 多個 harvest window 只更新同一筆 rollup。
+- hermes cron draft（草稿）註冊說明，draft-first 不直接改使用者 settings（設定）。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- worker 在 DB tunnel down 時不呼叫 LLM。
+- malformed LLM output 不落 DB。
+- 同 spool 重跑不重複 observation。
+- 同 session 兩個 harvest window 只產生一筆 active rollup，`summarize_count/spool_offsets/observation_ids` 更新。
+
+### M3：3 層 retrieval（2 天）
+
+依賴：M1 有 observations。
+
+交付：
+- `cc_memory_search` 輕索引回應。
+- `cc_memory_timeline`。
+- `cc_memory_get_observations`。
+- `search_feedback` 相容性測試。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- search → timeline → get 三步可取回完整 facts/files/narrative。
+- envelope 長度不變量與 DB CHECK 都綠。
+- `CC_MEMORY_INCLUDE_OBSERVATIONS=off` 可退回只查 `project_memories`。
+- mixed corpus 預設權重排序符合 manual > rollup > decision observation > other observation。
+
+### M4：SessionStart injector + discovery_tokens（1.5 天）
+
+依賴：M3 的 index result shape。
+
+交付：
+- Recent Activity formatter。
+- 讀取 `metadata.capture.discovery_tokens`；不在注入時重新估算。
+- CJK-aware `estimateDiscoveryTokens()` 驗收測試（helper 由 M2b 寫入路徑使用）。
+- SessionStart hook wrapper 與 payload schema。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- 預設 flag off 無輸出。
+- flag on 時輸出 token budget 內的索引。
+- 20 筆樣本估算誤差 ±20%。
+- 每列 `discovery_tokens` 來自 rollup metadata。
+
+### M5：refine_delete + governance（0.5 到 1 天）
+
+依賴：M1。
+
+交付：
+- `cc_memory_refine_delete` 支援 rollup/observation。
+- `tool-policy.ts` write classification。
+- ScopePolicy project guard。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- read-only ListTools 隱藏 + 直呼拒絕。
+- allowlist 排除時直呼拒絕。
+- archived 結果不進 search/timeline/get。
+
+### M6：Benchmark harness（1 天）
+
+依賴：M3 有三層 retrieval。
+
+交付：
+- query fixture（固定查詢資料）。
+- CC-memory vs claude-mem 結果映射。
+- 人工標註 template。
+
+Gate：
+- 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
+- 至少 10 組 query 可產 markdown report（報告）。
+- result unit（結果單位）為 rollup，observation 為 drill-down。
+- 10 組 query 中 ≥7 組 Top-5 交集 ≥3，平均 first-relevant rank 與錯抓率可計算。
+
+## Migration Journal Policy
+
+現況：
+- `_journal.json` 記到 0006。
+- 0007/0008 是 per-DB hand-written（手寫）CHECK。
+- 0009/0010 也是手寫/特殊套用，其中 0010 明文要求兩側 DB 都套以避免 schema drift。
+
+v0.5 規則：
+
+1. **0011-0013 檔名固定**：`0011_add_observations.sql`、`0012_observations_no_personal_check.sql`、`0013_observations_personal_only_check.sql`。
+2. **允許 drizzle generate 產 0011 草稿，但必須人工審 SQL**：若 generate 編號錯或帶 unrelated diff（無關差異），丟棄重生或手修。
+3. **0012/0013 必須手寫並用 `scripts/apply-migration.ts` 指定 DB 套用**：per-DB CHECK 不放共用 `schema.ts`，避免把 project-only 或 personal-only invariant 帶到錯側。
+4. **journal 不自動假裝完整**：若用手寫 0011-0013，`_journal.json` 不補假 entry；plan/task 記明 0007-0013 的實際套用狀態由 `scripts/test-db-setup.ts` 和 prod runbook 管。
+5. **test DB 套用來源**：`scripts/test-db-setup.ts` 必須知道 0011-0013；0011 套 project/personal test DB，0012 套 project test DB，0013 套 personal test DB。0008 仍沿用既有 e2e 自套自清模式，不在 M1 一般 setup 驗。
+6. **prod 狀態記錄**：套用 Coolify project DB + personal DB 後，在 benchmark/report 或 runbook 留 `applied_at`、operator、DB identity（身份）與 checksum（校驗碼）摘要。
+7. **新空表無 maintenance window**：observations 是新表，0012/0013 不需要 0008 當年「先清資料再套 CHECK」順序；仍需備份與 catalog verify。
+8. **不做 destructive rollback（破壞式回滾）**：0011-0013 additive；回滾等於 feature flag off + 不寫表。
+
+## Deployment（部署）
+
+### Phase 1：schema first
+
+1. 確認 SSH tunnel alive。
+2. 備份 project DB 與 personal DB。
+3. 同一維護窗口套 0011 到 Coolify project DB 與 personal DB。
+4. 套 0012 到 project DB，套 0013 到 personal DB。
+5. 跑 catalog verify（表/欄位/index/CHECK）確認兩側欄位一致、路由 CHECK 分側存在。
+6. 再 merge 實作 branch 或切 worker working tree（工作目錄）。hermes reminder/todoist cron 每 5/15min 直跑 working tree，兩側 DB 未就位前不得讓含 `observations` 的 `schema.ts` 上 main。
+
+### Phase 2：capture only 併用期
+
+1. hook settings 走 draft-first：產 `.md` 草稿給使用者審，不直接寫 `~/.claude/settings.json`。
+2. hermes cron 新增 `cc-memory-auto-capture` 草稿，對齊既有 `cc-memory-reminders` */5min 與 `todoist-sync` */15min。
+3. `CC_MEMORY_INJECT_RECENT=off`。
+4. 並行 claude-mem 2 週，收 ≥30 筆 auto rollup/observation。
+
+### Phase 3：quality gate
+
+1. 跑 M6 benchmark。
+2. 人工標註 Top-5/rank/錯抓率。
+3. Go：停用 claude-mem plugin、停止 worker/chroma、保留 SQLite 檔。
+4. No-Go：關閉 CC-memory auto-capture，保留資料供分析。
+
+## Risks
+
+| 風險 | 影響 | 緩解 |
+|---|---|---|
+| SSH tunnel down | worker 連不上 DB | 起手 health check；spool 累積；stdout 告警 |
+| LLM output drift（輸出漂移） | 寫入錯 schema | type guard（型別守門）/JSON schema 驗證，整包 dead-letter |
+| spool flood | 磁碟爆 | 500MB cap + 停止 capture 告警 |
+| PostToolUse payload 改版 | hook 讀不到 tool name | M2a 實測 gate；fallback transcript tail hash |
+| duplicate observations | 檢索污染 | contentHash unique + HWM commit after DB |
+| search envelope drift | `search_feedback` 寫壞 | M3 contract tests |
+| injection loop | 注入內容又被摘要 | metadata marker 排除 + 注入不寫 feedback |
+| personal 污染 | 自動採集個人資料 | worker 排除 `__personal__` + observations 0012/0013 CHECK |
+
+## Dependencies & Unblocks
+
+| 依賴 | 解除時機 |
+|---|---|
+| PostToolUse payload/offset 實測 | M2a 前 |
+| 0011-0013 migrations applied to prod project/personal | M2b 前 |
+| hermes cron draft review | M2b 部署前 |
+| Search contract design | M3 前 |
+| CJK token estimate acceptance | M4 前 |
+| ≥30 auto records | M6 品質閘前 |
+
+## Self-Review Checklist
+
+- [ ] 沒有引用 claude-mem 原始碼或 prompt 文字。
+- [ ] 沒有把 v0.5 scope 擴到 personal auto-capture。
+- [ ] 沒有新增常駐 daemon。
+- [ ] 所有 write tools 進 read-only/allowlist guard。
+- [ ] 所有 Gate 都含 592 tests + build + lint。
+- [ ] migration 0011-0013 不依賴 `_journal.json` 假完整。

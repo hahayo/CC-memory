@@ -1,13 +1,13 @@
 # CC-memory Task Breakdown（v0.3 Phase A ✅ + v0.4 Phase C 規劃）
 
-> **當前狀態**：Phase A 全 Gate 綠 ✅（tag `v0.3-phase-a`，248 tests）· Phase B ❌ 整塊取消 · Phase C 設計完成，pending implementation
+> **當前狀態**：Phase A 全 Gate 綠 ✅（tag `v0.3-phase-a`，248 tests）· Phase B ❌ 整塊取消 · ~~Phase C 設計完成，pending implementation~~ **Phase C v0.4 已 SUPERSEDED（已被取代，2026-07-05）**——auto-capture 現行載體與任務清單見 `docs/auto-capture-v0.5/{spec,plan,task}.md`
 >
 > **執行紀律**：每個 Milestone 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
 >
 > **Phase 劃分（2026-04-23 更新）：**
 > - **Phase A** ✅：Phase 0 + 1 + 2 + 5-A
 > - ~~**Phase B**~~ ❌：Phase 3 / 4 / 5-B 整塊取消（見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Context）
-> - **Phase C — v0.4 自動採集**（pending）：M1 + M2 + M3 + M4 + M5（~7.5 日 + 2 週觀察）
+> - ~~**Phase C — v0.4 自動採集**（pending）：M1 + M2 + M3 + M4 + M5（~7.5 日 + 2 週觀察）~~（**SUPERSEDED 2026-07-05**：現行任務清單見 `docs/auto-capture-v0.5/task.md`）
 >
 > change log：
 > - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
@@ -279,6 +279,8 @@
 ---
 
 # Phase C — v0.4 自動採集（pending）
+
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：本 Phase C v0.4 task list 已由 `docs/auto-capture-v0.5/{spec,plan,task}.md` 取代；以下內容僅供歷史溯源，不重寫內文。
 
 > 完整設計見 `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Rollout Plan + §Success Criteria。
 > 每個 Milestone 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
