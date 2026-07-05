@@ -1,6 +1,6 @@
 # Personal-Hub Spec（CC-memory 升格跨工具個人記憶+待辦中樞）
 
-> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）✅ 已實作（reminder schema + `reminder_log` + `getDueReminders`/set/snooze/clear service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）。Phase 2（read-only mode）✅ 已實作（`CC_READ_ONLY` / `CC_TOOL_ALLOWLIST` 經 ListTools + handler central guard 雙層 enforce + `CC_SEARCH_FEEDBACK` telemetry 開關）。**Phase 3（v0.4 翻案：獨立 personal DB）** + 跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節；A2.7 e2e 驗收前不打 `[x]`）。
+> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 安全核心 ✅ 已交付（commit `01dd5e4`，306 tests 綠）。Phase 1（reliable reminders）✅ 已實作（reminder schema + `reminder_log` + `getDueReminders`/set/snooze/clear service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）。Phase 2（read-only mode）✅ 已實作（`CC_READ_ONLY` / `CC_TOOL_ALLOWLIST` 經 ListTools + handler central guard 雙層 enforce + `CC_SEARCH_FEEDBACK` telemetry 開關）。**Phase 3（v0.4 翻案：獨立 personal DB）✅ 已交付（2026-06-10 prod cutover；現 Coolify，2026-07-01 遷移）**；跨 repo 階段為 roadmap-level（憑證/授權未到位前不展開 task 細節）。
 >
 > **與既有 `docs/{spec,plan,task}.md` 的關係**：既有三件套是 CC-memory v0.3/v0.4（memory + auto-capture）的歷史 SSOT，**不被本 initiative 污染**。Personal-Hub 是不同 concern（個人記憶中樞 + 隱私邊界 + 可靠提醒），獨立 track。v0.4 Phase C auto-capture 已在 `docs/spec.md` 頂部標 deferred 並指向本目錄。
 >
@@ -213,7 +213,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 | reminder schema + `getDueReminders()` | Personal-Hub Phase 1 | **完整 SDD** | `tasks` 加 4 欄 + `reminder_log` 表 + 併發/去重/recurrence/snooze 語意 |
 | personal Gemini embedding | Personal-Hub Phase 1+ | 完整（決策已拍板） | personal instance 傳 `GEMINI_API_KEY`；embedding 存 `project_memories.embedding`（`__personal__` 列），`search_feedback` 僅 telemetry |
 | read-only mode | Personal-Hub Phase 2 | **完整 SDD** | `CC_READ_ONLY` + `CC_TOOL_ALLOWLIST`，ListTools + handler 雙層 |
-| 獨立 personal DB（`DATABASE_URL_PERSONAL`）+ preflight 三 mode + maintenance window 遷移 | Personal-Hub Phase 3（v0.4 翻案） | roadmap | 需 Zeabur 開新 PG service；終極硬隔離；取代原 RLS 方案（見 ADR-001） |
+| 獨立 personal DB（`DATABASE_URL_PERSONAL`）+ preflight 三 mode + maintenance window 遷移 | Personal-Hub Phase 3（v0.4 翻案） | ✅ 已交付 2026-06-10 | PG service 已開（當時 Zeabur、現 Coolify）；終極硬隔離；取代原 RLS 方案（見 ADR-001） |
 | Todoist 整合（live REST 工具，Option E） | 跨 repo（已實作 client + 5 工具） | additive 工具 | `cc_todoist_*` 直打 Todoist API v1；token∧forced-personal（__personal__）gated；雙系統並存、無自動 sync |
 | hermes / `/hi` 整合、reminder channel | 跨 repo 階段 | roadmap | 介面草案層級，憑證/授權未到位 |
 
@@ -305,7 +305,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 | handler enforce | 直接呼叫被隱藏的寫入 tool → handler 拒絕（403/INVALID） |
 | allowlist 涵蓋 read | `CC_TOOL_ALLOWLIST` 指定子集 → 集合外 tool（**含 read**）ListTools 不露 + 直呼經 `assertAllowed` 被拒（兩層） |
 
-### Personal-Hub Phase 3 指標（prod，roadmap；v0.4 翻案：獨立 personal DB）
+### Personal-Hub Phase 3 指標（prod，✅ 已交付 2026-06-10；v0.4 翻案：獨立 personal DB）
 
 | 指標 | 目標 |
 |---|---|
@@ -348,7 +348,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 - [x] allowlist 排除某 **read** tool（如 `cc_memory_get`）→ ListTools 不露 + 直呼經 `assertAllowed` 被拒（驗證 allowlist 不只擋寫入）
 - [x] `CC_SEARCH_FEEDBACK=off` → search 不寫 `search_feedback` telemetry
 
-### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
+### Personal-Hub Phase 3（prod，✅ 已交付 2026-06-10；v0.4 翻案：獨立 personal DB）
 
 > ✅ 2026-06-10 prod cutover 完成（A2.1 + A2.6 全程 + A2.7 smoke）；rollback rehearsal 以本地全管線 e2e（tests/scripts/e2e-migration-pipeline.test.ts）替代執行。
 

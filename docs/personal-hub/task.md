@@ -1,6 +1,6 @@
 # Personal-Hub Task Breakdown
 
-> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）✅ 全 Gate 綠（tool-policy 雙層 enforce + telemetry 開關；24 unit + 8 mcp tests）· **Phase 3（v0.4 翻案：獨立 personal DB）** + 跨 repo = roadmap。翻案脈絡見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。
+> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 全 Gate 綠 ✅（commit `01dd5e4`，306 tests）· Phase 1（reminder）✅ 全 Gate 綠（reminder schema + service + MCP tools + CLI；19 service + 14 schema + 8 mcp tests）· Phase 2（read-only）✅ 全 Gate 綠（tool-policy 雙層 enforce + telemetry 開關；24 unit + 8 mcp tests）· **Phase 3（v0.4 翻案：獨立 personal DB）✅ 已交付（2026-06-10 prod cutover；現 Coolify）** · 跨 repo = roadmap。翻案脈絡見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。
 >
 > **Phase 命名**：本檔的 `Personal-Hub Phase 0/1/2/3` 是 **personal-hub initiative 的 phase**，與既有 `docs/task.md` 的 Phase A/B/C（v0.3/v0.4 memory+auto-capture）是**不同 track**，勿混。
 >
@@ -145,7 +145,7 @@
 
 ## 3a — config + db client + migration 0007（離線可做；2026-06-09 session 已交付）
 
-- [ ] A2.1 開 PG service `cc-memory-personal`（當時 Zeabur、現 Coolify，與 project DB 同主機）；取 `DATABASE_URL_PERSONAL`  ← **僅此項待 user**
+- [x] A2.1 開 PG service `cc-memory-personal`（已執行——當時 Zeabur、現 Coolify，與 project DB 同主機）；取 `DATABASE_URL_PERSONAL`（2026-06-10 prod cutover 完成，見下方 Phase 3 驗收 ✅ 註）
 - [x] A2.2 `resolveDatabaseUrl()` + fail-fast 矩陣（`src/db/resolve-url.ts`，config.ts 重接；TDD 綠）
   - forced-mode personal 缺 `DATABASE_URL_PERSONAL` → exit ✅
   - forced-mode personal 兩 URL 同物理 DB → exit ✅
@@ -250,7 +250,7 @@
 - [x] `CC_TOOL_ALLOWLIST` 子集兩層生效；排除的 read tool 直呼也被拒
 - [x] `CC_SEARCH_FEEDBACK=off` → 不寫 telemetry
 
-### Personal-Hub Phase 3（prod，roadmap；v0.4 翻案：獨立 personal DB）
+### Personal-Hub Phase 3（prod，✅ 已交付 2026-06-10；v0.4 翻案：獨立 personal DB）
 
 > ✅ 2026-06-10 prod cutover 完成（A2.1 + A2.6 全程 + A2.7 smoke）；rollback rehearsal 以本地全管線 e2e（tests/scripts/e2e-migration-pipeline.test.ts）替代執行。
 

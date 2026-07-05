@@ -429,6 +429,8 @@
 
 ### Phase C（v0.4 本期必過）
 
+> ⚠️ **SUPERSEDED（已被取代）2026-07-05**：v0.5 端對端驗收清單見 `docs/auto-capture-v0.5/task.md`；以下為 v0.4 歷史版。
+
 **Capture**
 - [ ] A 機器跑一輪對話 → Stop hook → B 機器 `cc_memory_search` 查得到該 session summary，`writer_host`=A
 - [ ] 長 session 跑 N 輪 → 只有一筆 active row，`summarize_count=N`（或更少）

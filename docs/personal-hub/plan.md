@@ -1,8 +1,8 @@
 # Personal-Hub Implementation Plan
 
-> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）✅ 已實作（`tool-policy.ts` + ListTools/handler 雙層 enforce + `CC_SEARCH_FEEDBACK` 開關，測試綠）· **Phase 3（v0.4 翻案：獨立 personal DB）** + 跨 repo = roadmap。
+> **當前狀態（2026-06-09）**：Personal-Hub Phase 0 ✅ 已交付（commit `01dd5e4`，306 tests 綠）· Phase 1（reminder）✅ 已實作（schema + `reminders.ts` service + `cc_task_set_reminder`/`cc_task_snooze` MCP tools + `scripts/run-reminders.ts` CLI，測試綠）· Phase 2（read-only）✅ 已實作（`tool-policy.ts` + ListTools/handler 雙層 enforce + `CC_SEARCH_FEEDBACK` 開關，測試綠）· **Phase 3（v0.4 翻案：獨立 personal DB）✅ 已交付（2026-06-10；現 Coolify）** · 跨 repo = roadmap。
 >
-> 本 plan 對應 `spec.md`。Phase 0 回填已實作行為；Phase 1/2 寫到可直接 TDD 的細節；Phase 3 + 跨 repo 停在 roadmap-level（介面草案 / Gate / open questions）。
+> 本 plan 對應 `spec.md`。Phase 0 回填已實作行為；Phase 1/2 寫到可直接 TDD 的細節；跨 repo 停在 roadmap-level（介面草案 / Gate / open questions）；Phase 3 章節為交付前規劃原文（✅ 已執行，現況見 `prod-runbook.md`）。
 >
 > **執行紀律**：每個 Phase 開工前讀 `~/.claude/rules/sdd-workflow.md` 的 `## 每個 Phase 執行紀律`（brainstorm → context7 → TDD → simplify → review → codex-review）。
 >
