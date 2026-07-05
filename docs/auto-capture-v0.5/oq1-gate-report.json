@@ -1,0 +1,58 @@
+{
+  "gate": "OQ1: PostToolUse payload / transcript offset stability",
+  "spec_ref": "docs/auto-capture-v0.5/spec.md §Open Questions #1",
+  "verdict": "PASS",
+  "fallback_needed": false,
+  "unblocks": "M2a",
+  "tested_at": "2026-07-06",
+  "environment": {
+    "claude_code_version": "2.1.201",
+    "platform": "WSL2 (Linux 6.6.87.2-microsoft-standard-WSL2)",
+    "method": "isolated scratchpad mini-repo with project-level .claude/settings.json PostToolUse/Stop dump hooks + headless `claude -p --model haiku` child sessions; live-transcript sha256 prefix checks on the supervising session; structural analysis of historical transcripts for /clear and compact"
+  },
+  "findings": {
+    "hook_stdin_shape": {
+      "status": "CONFIRMED",
+      "detail": "stdin is a single JSON object per event. PostToolUse top-level keys: cwd, duration_ms, hook_event_name, permission_mode, prompt_id, session_id, tool_input, tool_name, tool_response, tool_use_id, transcript_path. Stop top-level keys: background_tasks, cwd, hook_event_name, last_assistant_message, permission_mode, prompt_id, session_crons, session_id, stop_hook_active, transcript_path.",
+      "evidence": "3 PostToolUse payloads (Read/Edit/Bash) + 2 Stop payloads captured; shape identical across tools"
+    },
+    "tool_name_field": {
+      "status": "CONFIRMED",
+      "detail": "top-level `tool_name` field, values observed: Read / Edit / Bash. Full tool_input and tool_response objects included.",
+      "evidence": "e.g. Read: tool_input={file_path}, tool_response={type:'text', file:{filePath, content, numLines, startLine, totalLines}}"
+    },
+    "transcript_path_source": {
+      "status": "CONFIRMED",
+      "detail": "top-level `transcript_path` (absolute path to session .jsonl under ~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl) present in both PostToolUse and Stop payloads; session_id also top-level.",
+      "evidence": "path resolved to probe repo's sanitized project dir and matched actual file on disk"
+    },
+    "offset_byte_stability": {
+      "status": "CONFIRMED",
+      "detail": "transcript .jsonl is append-only. sha256 of the byte prefix unchanged across subsequent Read/Write/Edit/Bash tool calls (2 rounds on live supervising session: prefix 631770B then 670409B), and unchanged across a `claude -p --resume` continuation of the probe session (90643B -> 110237B, prefix sha stable, same file — resume does NOT create a new jsonl).",
+      "evidence": "sha256 prefix comparisons; scratchpad oq1-baseline.txt / oq1-round2.txt"
+    },
+    "stop_sentinel_offset_reread": {
+      "status": "CONFIRMED",
+      "detail": "Stop payload carries transcript_path; a byte offset recorded at Stop remains valid for later re-reads because the file is append-only and resume continues the same file. Stop also carries last_assistant_message and stop_hook_active (loop guard).",
+      "evidence": "resume test above; Stop payloads captured in probe"
+    }
+  },
+  "criteria": {
+    "three_tools_read_edit_bash": "PASS — all three captured with identical payload shape",
+    "clear_offset_reproducible": "PASS (structural evidence) — historical /clear instance sits at line 10 of a 938-line jsonl: /clear logs a command entry and the SAME file keeps appending; no rewrite. All timestamp backsteps in that file <= 3s (parallel-write jitter only).",
+    "compact_offset_reproducible": "PASS (structural evidence) — historical auto-compact instance at line 585/2306: compact appends a system entry subtype=compact_boundary (with compactMetadata) + a user entry isCompactSummary=true to the SAME file; pre-compact entries remain in place; file keeps appending after."
+  },
+  "deviations": [
+    "/clear and compact were validated via structural analysis of historical transcripts (this project + recycling-recognition-tender) rather than actively triggered in the probe session — headless -p cannot issue /clear, and forcing an auto-compact is costly. Combined with the direct append-only byte proofs, the evidence chain is judged sufficient.",
+    "timestamp monotonicity is NOT a valid write-order signal and must not be used by the worker: attachment entries carry creation-time (observed up to 62min behind), isMeta entries carry backfilled times, parallel tool writes jitter <= 3s. Byte offset is the only reliable cursor."
+  ],
+  "design_implications_for_m2a": [
+    "tool_name is available top-level — no transcript parsing needed to route on tool type",
+    "transcript_path + session_id available in every PostToolUse and Stop payload — hook can persist {transcript_path, byte_offset} as spool cursor without any guessing",
+    "byte offset cursor is safe across tool calls, /clear, auto-compact, and --resume (same file, append-only)",
+    "worker must tolerate compact_boundary/isCompactSummary/isMeta/attachment entry types when parsing the window",
+    "do not order or dedupe by timestamp; use file order (byte offset) only",
+    "stop_hook_active flag available for Stop-hook loop protection"
+  ],
+  "raw_evidence_note": "full payload dumps kept in session scratchpad (oq1-hookprobe/hook-dump.jsonl); representative shapes inlined above"
+}

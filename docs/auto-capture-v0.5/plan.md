@@ -436,8 +436,8 @@ v0.5 規則：
 
 | 依賴 | 解除時機 |
 |---|---|
-| PostToolUse payload/offset 實測 | M2a 前 |
-| 0011-0013 migrations applied to prod project/personal | M2b 前 |
+| PostToolUse payload/offset 實測 | M2a 前 ✅ **已解除 2026-07-06**（gate PASS，見 `oq1-gate-report.json` 與 spec OQ1 RESOLVED 註記） |
+| 0011-0013 migrations applied to prod project/personal | M2b 前 ✅ **已解除 2026-07-06**（雙側套用 + catalog verify 全綠，紀錄見 `docs/personal-hub/prod-runbook.md` Migration 套用紀錄節） |
 | hermes cron draft review | M2b 部署前 |
 | Search contract design | M3 前 |
 | CJK token estimate acceptance | M4 前 |
