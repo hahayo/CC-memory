@@ -1,3 +1,5 @@
+> **[HISTORICAL（歷史文件）2026-07-05]** v0.3 Phase A 完工前的 Codex review loop 紀錄（round 24 收斂）。Phase A 已交付（tag `v0.3-phase-a`），本檔僅供溯源；現況入口見 `docs/INDEX.md`。
+
 # Codex Review Loop 紀錄（v0.3 Phase A Stage 3）
 
 > Scope：`git diff 399018f..HEAD` — 本期 Phase 2（schema 補完 + service layer）+ Phase 5-A（retrieval eval 被動記錄）。

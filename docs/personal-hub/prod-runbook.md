@@ -1,18 +1,20 @@
 # Personal-Hub Prod Runbook
 
-> Phase 3 v0.4（ADR-001 獨立 personal DB）上線後的維運手冊。cutover 完成於 2026-06-10。
+> Phase 3 v0.4（ADR-001 獨立 personal DB）上線後的維運手冊。personal DB cutover 完成於 2026-06-10。
+> **拓樸更新 2026-07-05**：反映 2026-07-01 project DB Zeabur → Coolify cutover（Plan B fresh schema，見 `docs/migrations/2026-06-29-cc-memory-project-cutover/addendum-2026-06-30-plan-b.md`）。兩顆 DB 現皆在 Coolify 同一 Postgres cluster（叢集），本機經 SSH tunnel（通道）`127.0.0.1:15432` 連入。
 
 ## 拓樸速覽
 
 | 角色 | 說明 |
 |---|---|
-| **project DB** | Zeabur project `CC-memory`、service `postgresql` — schema migration 0000-0006 + 0008（反向 CHECK：拒 `__personal__` 寫入）+ 0010（todoist_id 欄，恆 NULL；shared Drizzle schema 需要，2026-06-10 套用）。連線字串：`~/.ccm-prod-url`（mode 600） |
-| **personal DB** | 同 Zeabur project、service `cc-memory-personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009 + 0010（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue personal-only；0010 todoist sync。皆 2026-06-10 套用）。連線字串：`~/.ccm-personal-url`（mode 600） |
+| **project DB** | **Coolify** Postgres cluster、DB `cc_memory_project`、user `cc_memory` — fresh schema（drizzle-kit push 自 `src/db/schema.ts`，等同最新 full schema）+ 0008 手動套用（反向 CHECK：拒 `__personal__` 寫入），pgvector 0.8.3，catalog verify 全綠（2026-07-01）。連線字串：`~/.ccm-project-url`（mode 600），經 SSH tunnel `127.0.0.1:15432` |
+| **personal DB** | **Coolify** 同 cluster、DB `cc_memory_personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009 + 0010（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue personal-only；0010 todoist sync）。連線字串：`~/.ccm-personal-url`（mode 600），同一 tunnel |
+| **舊 Zeabur project DB** | service 仍 running 但 idle（client 已全部切走）；admin 連線字串 `~/.ccm-prod-url`（mode 600）。**Step F 退役待做**（觀察穩定 1-2 週後停用） |
 | **forced personal launcher** | `/home/haha/run-cc-memory-personal.sh`（只持 DATABASE_URL_PERSONAL；Claude Code `cc-memory-personal` / Codex / hermes 共用） |
 | **read-only launcher** | `/home/haha/run-cc-memory-personal-ro.sh`（+CC_READ_ONLY=1 +CC_SEARCH_FEEDBACK=off；Claude Code `cc-memory-hi`，/hi 注入用） |
 | **hermes reminder cron** | job `cc-memory-reminders`（id 8cca281df423，*/5min）→ `~/.hermes/scripts/cc-reminders.sh` → `scripts/hermes-reminder-poll.ts`（poller v2：at-least-once durable queue + 直送 Telegram；⚠️ cron 直接跑本 repo working tree——commit 即上線，**新 migration 必須先套 personal DB 再切換 working tree**，否則 poller 每 tick 報 relation does not exist） |
 | **hermes todoist-sync cron** | job `todoist-sync`（id b340b1a62e3a，*/15min，`--no-agent --deliver telegram`）→ `~/.hermes/scripts/cc-todoist-sync.sh` → `scripts/todoist-sync-poll.ts`（Todoist /sync 增量拉取 → upsert tasks；同樣跑 working tree） |
-| **project-mode instance** | Claude Code `cc-memory`（~/.claude.json 持 project DB URL，不變） |
+| **project-mode instance** | Claude Code `cc-memory` — 2026-07-01 起改 wrapper（包裝腳本）啟動：`/home/haha/run-cc-memory-project.sh`（讀 `~/.ccm-project-url`，`~/.claude.json` 不再直持 DB URL） |
 
 ---
 
@@ -22,15 +24,16 @@
 
 ```bash
 # personal DB
-docker run --rm postgres:18 pg_dump "$(cat ~/.ccm-personal-url)" -Fc \
+docker run --rm --network host postgres:18 pg_dump "$(cat ~/.ccm-personal-url)" -Fc \
   > ~/backups/cc-memory/personal-$(date +%Y%m%d).dump
 
-# project DB
-docker run --rm postgres:18 pg_dump "$(cat ~/.ccm-prod-url)" -Fc \
+# project DB（2026-07-01 起改用 ~/.ccm-project-url；~/.ccm-prod-url 是舊 Zeabur，勿再當備份來源）
+docker run --rm --network host postgres:18 pg_dump "$(cat ~/.ccm-project-url)" -Fc \
   > ~/backups/cc-memory/project-$(date +%Y%m%d).dump
 ```
 
 > ⚠️ 本機 `pg_dump` 是 PG16、prod 是 PG18——**必須走 `docker postgres:18`**（本機 image 已存在）。
+> ⚠️ 兩個 URL 現在都指 SSH tunnel 的 `127.0.0.1:15432`，container（容器）內的 127.0.0.1 不是宿主機，**必須加 `--network host`** 才連得到 tunnel（2026-07-05 拓樸更新時補上，第一次跑新備份時實測確認）。
 
 既有基準備份：`~/backups/cc-memory/cc-memory-prod-20260610.dump`（cutover 前 project DB full dump）
 
@@ -48,13 +51,13 @@ systemctl --user stop hermes-gateway.service # 1b. hermes 對話端（Telegram �
 psql "$(cat ~/.ccm-personal-url)" -tAc \
   "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid();"
 
-# Step 2：還原 dump
-docker run --rm -i postgres:18 pg_restore \
+# Step 2：還原 dump（--network host 理由同 Backup 節）
+docker run --rm -i --network host postgres:18 pg_restore \
   -d "$(cat ~/.ccm-personal-url)" --clean --if-exists \
   < ~/backups/cc-memory/personal-<YYYYMMDD>.dump
 
 # Step 3：驗證 schema + 隔離健康（P6 schema 比對 + P2 0007 方向檢查最關鍵）
-DATABASE_URL=$(cat ~/.ccm-prod-url) \
+DATABASE_URL=$(cat ~/.ccm-project-url) \
 DATABASE_URL_PERSONAL=$(cat ~/.ccm-personal-url) \
   npx tsx scripts/preflight.ts --mode pre-migration
 
@@ -144,7 +147,7 @@ claude mcp list
 project DB 內 `__personal__` 列應為 0：
 
 ```bash
-psql "$(cat ~/.ccm-prod-url)" -c \
+psql "$(cat ~/.ccm-project-url)" -c \
   "SELECT COUNT(*) AS personal_rows_in_project_db
    FROM project_memories
    WHERE project_id = '__personal__';"

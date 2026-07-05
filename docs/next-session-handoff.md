@@ -1,3 +1,5 @@
+> **[SUPERSEDED（已被取代）2026-07-05]** 本交接清單已過時：它指派的「Phase C plan」早於 2026-04-23 寫出（`docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md`），其後主線轉往 personal-hub（已交付 2026-06-10）與 project DB cutover（已執行 2026-07-01），Phase C 至今未動工。僅供歷史參考；現況入口見 `docs/INDEX.md`。
+
 # 下 session 接手清單（v0.4 Phase C 規劃完成 → pending implementation）
 
 > 本 session（2026-04-23）完成 v0.4 設計 + 三檔同步。下 session（可能換電腦）從乾淨狀態接手 Phase C 實作。

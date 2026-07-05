@@ -1,3 +1,5 @@
+> **[PARTIALLY STALE（部分過時）2026-07-05]** 本指南以 Zeabur 時代為背景。prod 已於 2026-07-01 全面搬到 Coolify（SSH tunnel 連線，見 `README.md` Coolify 章節與 `docs/personal-hub/prod-runbook.md`）。環境變數全表見 repo 根目錄 `CLAUDE.md`；現況入口見 `docs/INDEX.md`。
+
 # CC-memory 設定指南
 
 ## 前置需求

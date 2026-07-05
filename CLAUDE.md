@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CC-memory 是一個 Claude Code 專案記憶同步系統，透過 MCP (Model Context Protocol) 協議提供跨裝置的專案記憶管理功能。系統使用 Drizzle ORM 連接 PostgreSQL（Zeabur 部署），支援關鍵字搜尋和專案隔離。
+CC-memory 是一個 Claude Code 專案記憶同步系統，透過 MCP (Model Context Protocol) 協議提供跨裝置的專案記憶管理功能。系統使用 Drizzle ORM 連接 PostgreSQL（Coolify 部署，本機經 SSH tunnel 連線；2026-07-01 自 Zeabur 遷移完成），支援關鍵字／語義／混合搜尋和專案隔離。文件導覽入口：`docs/INDEX.md`。
 
 ## Build Commands
 

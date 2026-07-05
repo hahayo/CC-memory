@@ -1,3 +1,5 @@
+> **[PARTIALLY STALE（部分過時）2026-07-05]** 本指南只涵蓋 v0.1 手動流程（/save-memory、/load-memory）。未涵蓋：forced-mode（鎖定模式）、read-only mode、task/reminder/Todoist 工具、Coolify 部署。全面更新待排；工具全貌見 repo 根目錄 `CLAUDE.md`，現況入口見 `docs/INDEX.md`。
+
 # CC-memory 使用指南
 
 ## 基本使用
