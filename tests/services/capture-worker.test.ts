@@ -440,6 +440,74 @@ describe('capture worker DB-backed RED contracts', () => {
     expect(rows[0]).toEqual({ total: 1, distinctHashes: 1 });
   });
 
+  it('keeps rollup metadata counters idempotent when the same spool window is replayed', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'metadata replay window' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:05:00.000Z',
+    });
+    const response = rawExtraction({
+      summary: 'metadata replay summary',
+      observations: [observation('metadata replay', 'metadata replay narrative')],
+    });
+    const llm = mockLlm([response, response]);
+
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({ processed: 1 });
+    writeFileSync(hwmPath(harness), '0', { mode: 0o600 });
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({ processed: 1 });
+
+    const rollupRows = await rollups(sql, harness.projectId, harness.sessionId);
+    expect(rollupRows).toHaveLength(1);
+    const capture = rollupRows[0].metadata.capture;
+    expect(capture?.summarize_count).toBe(1);
+    expect(capture?.spool_offsets).toHaveLength(1);
+  });
+
+  it('continues processing remaining sessions when one spool file is corrupt', async () => {
+    const badHarness = makeHarness({ projectId: `capture-worker-${randomUUID()}-bad` });
+    await appendWindow(badHarness, {
+      transcriptStart: 0,
+      transcriptEnd: 1,
+      timestamp: '2026-07-06T10:06:00.000Z',
+    });
+    const badSpoolPath = resolveCaptureSpoolPath(badHarness.projectId, badHarness.sessionId, {
+      env: badHarness.env,
+    });
+    appendFileSync(badSpoolPath, 'this is not json\n');
+
+    const goodHarness = makeHarness({ projectId: `capture-worker-${randomUUID()}-good` });
+    // 兩個 harness 共用同一 spool root，讓單次 worker run 同時掃到壞與好 session
+    goodHarness.env = badHarness.env;
+    const goodTranscriptEnd = appendTranscriptEntries(goodHarness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'good session window' },
+    ]);
+    await appendWindow(goodHarness, {
+      transcriptStart: 0,
+      transcriptEnd: goodTranscriptEnd,
+      timestamp: '2026-07-06T10:07:00.000Z',
+    });
+
+    const llm = mockLlm([
+      rawExtraction({
+        summary: 'good session summary',
+        observations: [observation('good session', 'good session narrative')],
+      }),
+    ]);
+
+    await expect(runWorker(badHarness, { db, llm })).resolves.toMatchObject({
+      processed: 1,
+      failed: 1,
+    });
+    expect(await countRows(sql, goodHarness.projectId, goodHarness.sessionId)).toMatchObject({
+      observations: 1,
+      rollups: 1,
+    });
+  });
+
   it('keeps one active rollup for two harvest windows in the same session', async () => {
     const harness = makeHarness();
     const firstTranscriptEnd = appendTranscriptEntries(harness.transcriptPath, [

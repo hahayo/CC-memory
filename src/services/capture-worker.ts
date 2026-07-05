@@ -597,16 +597,21 @@ async function writeCaptureWindow(
 
   const existing = await selectRollup(tx, window.projectId, idempotencyKey);
   const previousCapture = existingCaptureMetadata(existing?.metadata);
+  // at-least-once 重放守衛：transaction commit 後 HWM 寫入若失敗，同 window 會重跑；
+  // 已見過的 spool offset 區間不重複 append、summarize_count 不重複遞增。
+  const previousOffsets = previousCapture?.spool_offsets ?? [];
+  const isReplayedWindow = previousOffsets.some(
+    (offset) => offset.start === window.spoolOffsetStart && offset.end === window.spoolOffsetEnd
+  );
   const baseCapture: CaptureMetadata = {
     version: '0.5',
     session_id: window.sessionId,
     observation_ids: previousCapture?.observation_ids ?? [],
     model: rawResponse.model,
-    spool_offsets: [
-      ...(previousCapture?.spool_offsets ?? []),
-      { start: window.spoolOffsetStart, end: window.spoolOffsetEnd },
-    ],
-    summarize_count: (previousCapture?.summarize_count ?? 0) + 1,
+    spool_offsets: isReplayedWindow
+      ? previousOffsets
+      : [...previousOffsets, { start: window.spoolOffsetStart, end: window.spoolOffsetEnd }],
+    summarize_count: (previousCapture?.summarize_count ?? 0) + (isReplayedWindow ? 0 : 1),
     discovery_tokens: discoveryTokens,
   };
 
@@ -853,6 +858,10 @@ export async function runCaptureWorkerOnce(
       } catch {
         result.failed += 1;
       }
+    } catch {
+      // 框架層失敗（stat/readHwm/readWindow/spool parse/HWM 寫入）：單一壞 spool
+      // 不得中止整輪 worker——記 failed 後續處理下一個 session。
+      result.failed += 1;
     } finally {
       await release();
     }
