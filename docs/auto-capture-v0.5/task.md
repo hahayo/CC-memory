@@ -190,7 +190,7 @@
 - [ ] `searchObservationIndexes(db, input)` 回輕索引：id/type/title/subtitle/project/session/discovery_tokens
 - [ ] `timeline(db, anchorId, depthBefore, depthAfter)` 只回同 project 且同 session 前後 observations
 - [ ] anchor 是 rollup 時，timeline 先找 linked observations，再依 `observed_at` 回前後文
-  - ⚠️ **PENDING（OQ1 連帶影響，2026-07-06 Codex 對審 P2）**：transcript entry timestamp 不可當寫入順序信號（見 spec OQ1 RESOLVED 註記）。`observed_at` 排序要可靠，M2b worker 賦值時必須保證 session 內單調（依 byte offset 順序衍生，不得直接抄 transcript entry timestamp）；若做不到則 M2b 需 additive 加 offset cursor 欄位供 timeline 排序。M2b 開工時定案，M3 timeline 實作前必須已解。
+  - ✅ **RESOLVED（2026-07-06 M2b 開工定案）**：採「worker 賦值單調紀律」，**不加 offset 欄位**。`observed_at` = harvest window 處理時間 + 窗口內 LLM 輸出序號毫秒微增量（tie-break）；跨窗口天然單調（後處理窗口時間更晚）；**禁止直接抄 transcript entry timestamp**。否定 additive offset 欄位案的理由：observation 級 byte offset 無可靠來源（LLM 抽取時看不到 offset，worker 只知 window 級），window 級 offset 與窗口處理時間等價，加欄位徒增 schema。M2b worker 2b-3 實作此紀律並附測試。
 - [ ] `getObservations(db, ids[])` 批次回全文
 - [ ] archived observation 不回
 - [ ] ScopePolicy 必須套 project guard
