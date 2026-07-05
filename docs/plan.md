@@ -32,7 +32,7 @@ Phase A 雖然不實作 HTTP / bot，但以下 4 項資料面支援在 Phase A �
 
 ```
            ┌──────────────────────────────────────────┐
-           │    PostgreSQL (Zeabur, 既有)               │
+           │    PostgreSQL (Coolify, 原 Zeabur)         │
            │    project_memories  (v0.1 + v1.3 補欄位)  │
            │    tasks             (v0.2 Phase 1)        │
            │    search_feedback   (v0.2 Phase 1)        │
@@ -295,7 +295,7 @@ export function resolveWriterHost(): string {
 
 | Env | 用途 | 必要性 |
 |---|---|---|
-| `DATABASE_URL` | PostgreSQL 連線（Zeabur） | 必填 |
+| `DATABASE_URL` | PostgreSQL 連線（Coolify，2026-07-01 自 Zeabur 遷移） | 必填 |
 | `GEMINI_API_KEY` | Gemini embedding API | 必填 |
 | `CC_MEMORY_PROJECT_ID` | 明示覆蓋 project_id | 可選 override |
 | `CC_MEMORY_WRITER` | writer_host 來源；預設 `os.hostname()` | 可選 |
@@ -546,7 +546,7 @@ env `TELEGRAM_ALLOWED_USER_IDS=123,456`；非白名單訊息直接 ignore + log�
 
 ---
 
-## ~~Deployment（Phase B）~~ ❌ 已取消（Phase C 無新服務部署，沿用 Phase A 的 MCP + Zeabur DB；以下歷史）
+## ~~Deployment（Phase B）~~ ❌ 已取消（沿用 Phase A 的 MCP + 雲端 PG——現 Coolify、原 Zeabur；以下歷史）
 
 ### Zeabur 服務拓撲
 
@@ -749,7 +749,7 @@ AND 全達 → 產出 `docs/claude-mem-switchoff-decision.md`、停用 claude-me
 | 風險 | 影響 | 緩解 |
 |---|---|---|
 | `pgvector` HNSW index rebuild 卡住 | 大表上 long lock | partial unique index（WHERE IS NOT NULL）；現有資料 idempotency_key 全 NULL → rebuild 零代價 |
-| `writer_host` 在容器環境值不穩 | Zeabur container hostname 可能變動 | 明確用 `CC_MEMORY_WRITER` env 覆蓋 |
+| `writer_host` 在容器環境值不穩 | 雲端容器（現 Coolify，原 Zeabur）hostname 可能變動 | 明確用 `CC_MEMORY_WRITER` env 覆蓋 |
 | idempotency retention 政策未定 | key UNIQUE 永久存留 | 未來定；MVP 不做 GC |
 | Service layer 抽出破向後相容 | MCP client 語意漂移 | 既有 6 tool I/O 鎖死 + regression |
 

@@ -256,7 +256,7 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 ## Constraints
 
 ### Phase A 原 Constraints（v0.4 保留）
-- **技術**：沿用現有 Drizzle ORM + PostgreSQL (Zeabur)；不得引入新 DB 或 ORM
+- **技術**：沿用現有 Drizzle ORM + PostgreSQL（~~Zeabur~~ **Coolify**，2026-07-01 遷移，本機經 SSH tunnel 連線）；不得引入新 DB 或 ORM
 - **預算**：單人開發；不接 Sentry / Datadog，log 夠用
 - **相容性**：現有 6 個 memory MCP tool 輸入輸出格式不得變更（向後相容）
 - **安全**：SQL 一律 parameterized（Drizzle ORM 保證）；shell call 用 `execFileSync`；API key 用環境變數

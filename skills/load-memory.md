@@ -72,7 +72,7 @@ cc_memory_list({
 
 【近期決策】
 - 選擇 Drizzle 作為 ORM（輕量、適合 MCP）
-- 使用 Zeabur 部署 PostgreSQL
+- PostgreSQL 部署於 Coolify（2026-07-01 自 Zeabur 遷移）
 ```
 
 ---
