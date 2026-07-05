@@ -77,6 +77,62 @@ export const projectMemories = pgTable(
   ]
 );
 
+// ---------------------------------------------------------------------------
+// observations（v0.5 M1）— auto-capture 細粒度 observation
+// ---------------------------------------------------------------------------
+//
+// 0012/0013 的 project/personal routing CHECK 是 per-DB 不變量，
+// 不放共用 Drizzle schema；原因同 0007/0008 migration 檔頭。
+
+export const observations = pgTable(
+  'observations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: text('project_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    rollupMemoryId: uuid('rollup_memory_id').references(() => projectMemories.id),
+
+    type: text('type').notNull(),
+    title: text('title').notNull(),
+    subtitle: text('subtitle'),
+    facts: text('facts').array().notNull().default(sql`'{}'::text[]`),
+    concepts: text('concepts').array().notNull().default(sql`'{}'::text[]`),
+    files: text('files').array().notNull().default(sql`'{}'::text[]`),
+    narrative: text('narrative').notNull(),
+
+    embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
+    discoveryTokens: integer('discovery_tokens').notNull(),
+    sourceHook: text('source_hook').notNull(),
+    contentHash: text('content_hash').notNull(),
+    writerHost: text('writer_host').notNull(),
+    status: text('status').notNull().default('active'),
+    metadata: jsonb('metadata').notNull().default({}),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'observations_type_check',
+      sql`${table.type} IN ('decision','bugfix','feature','refactor','discovery','change')`
+    ),
+    check('observations_status_check', sql`${table.status} IN ('active','archived')`),
+    check('observations_discovery_tokens_check', sql`${table.discoveryTokens} > 0`),
+    uniqueIndex('observations_content_uniq')
+      .on(table.projectId, table.sessionId, table.contentHash)
+      .where(sql`${table.status} = 'active'`),
+    index('observations_project_active_idx')
+      .on(table.projectId, table.observedAt.desc())
+      .where(sql`${table.status} = 'active'`),
+    index('observations_session_idx').on(table.projectId, table.sessionId, table.observedAt),
+    index('observations_status_idx').on(table.status),
+    index('observations_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+  ]
+);
+
+export type Observation = typeof observations.$inferSelect;
+export type NewObservation = typeof observations.$inferInsert;
+
 // TypeScript 型別
 export type Memory = typeof projectMemories.$inferSelect;
 export type NewMemory = typeof projectMemories.$inferInsert;

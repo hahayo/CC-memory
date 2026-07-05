@@ -4,12 +4,13 @@
 // （Codex B6/A10：不靠 docker init script——它只在 fresh volume 跑一次，
 //   既有 volume 不會重建）。
 //
-//   cc_memory_test           project 側：migrations 0000-0006（不含 0007/0008）
-//   cc_memory_test_personal  personal 側：migrations 0000-0007
+//   cc_memory_test           project 側：0000-0006 + 0009-0012（不含 0007/0008/0013）
+//   cc_memory_test_personal  personal 側：0000-0007 + 0009-0011 + 0013（不含 0008/0012）
 //
 // 0008 不在此套用：e2e 測試內依 runbook 順序（delete 之後）套用＋清除；
 // 本 script 每次跑會把 project 測試庫殘留的 0008 constraint 清掉（自癒，
 // 防 e2e 中斷後殘留的反向 CHECK 弄壞一般 suite 的 __personal__ seed）。
+// 0012/0013 是 observations 新空表的分側 routing CHECK，M1 一般 setup 直接套用。
 //
 // 既有 cc_memory_test 若是 drizzle-kit push 建的（有表但無 _test_migrations 紀錄）
 // → DROP SCHEMA public 重建，統一走 migration 鏈（與 prod 同管道；migration 鏈與
@@ -141,20 +142,30 @@ async function main() {
     await admin.end({ timeout: 5 });
   }
 
-  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009 + 0010
+  // project 側：0000-0006（'0007' 之前）；personal 側：0000-0007（skip 0008 project-only）+ 0009-0011/0013
   await applyMigrations(projectUrl, migrationFiles('0007'));
   const personalMigrations = [
     ...migrationFiles('0008'),                          // 0000-0007
     '0009_add_reminder_delivery_queue.sql',             // personal-only
     '0010_add_todoist_sync.sql',                        // 兩側都套（見 migration 檔頭：shared schema 欄位）
+    '0011_add_observations.sql',                        // 兩側都套：observations shared schema
+    '0013_observations_personal_only_check.sql',         // personal-only：只准 __personal__
   ];
   await applyMigrations(personalUrl, personalMigrations);
   // 0009 也套 project test DB：service tests 用 project DB 跑，需要 reminder_delivery_queue table
   // 0010 也套 project test DB：todoist_id 在共用 tasks schema，Drizzle select 展開全欄位
-  await applyMigrations(projectUrl, ['0009_add_reminder_delivery_queue.sql', '0010_add_todoist_sync.sql']);
+  await applyMigrations(projectUrl, [
+    '0009_add_reminder_delivery_queue.sql',
+    '0010_add_todoist_sync.sql',
+    '0011_add_observations.sql',
+    '0012_observations_no_personal_check.sql',
+  ]);
   await dropProjectNoPersonalChecks(projectUrl);
 
-  console.error(`done：${dbNameOf(projectUrl)}（0000-0006+0009+0010）/ ${dbNameOf(personalUrl)}（0000-0007+0009+0010）`);
+  console.error(
+    `done：${dbNameOf(projectUrl)}（0000-0006+0009+0010+0011+0012）/ ` +
+      `${dbNameOf(personalUrl)}（0000-0007+0009+0010+0011+0013）`
+  );
 }
 
 main().catch((err) => {
