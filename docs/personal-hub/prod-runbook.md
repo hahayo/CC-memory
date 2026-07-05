@@ -7,8 +7,8 @@
 
 | 角色 | 說明 |
 |---|---|
-| **project DB** | **Coolify** Postgres cluster、DB `cc_memory_project`、user `cc_memory` — fresh schema（drizzle-kit push 自 `src/db/schema.ts`，等同最新 full schema）+ 0008 手動套用（反向 CHECK：拒 `__personal__` 寫入），pgvector 0.8.3，catalog verify 全綠（2026-07-01）。連線字串：`~/.ccm-project-url`（mode 600），經 SSH tunnel `127.0.0.1:15432` |
-| **personal DB** | **Coolify** 同 cluster、DB `cc_memory_personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009 + 0010（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue personal-only；0010 todoist sync）。連線字串：`~/.ccm-personal-url`（mode 600），同一 tunnel |
+| **project DB** | **Coolify** Postgres cluster、DB `cc_memory_project`、user `cc_memory` — fresh schema（drizzle-kit push 自 `src/db/schema.ts`，等同最新 full schema）+ 0008 手動套用（反向 CHECK：拒 `__personal__` 寫入）+ **0011/0012（v0.5 observations + 反向 CHECK，2026-07-06）**，pgvector 0.8.3，catalog verify 全綠（2026-07-01、2026-07-06）。連線字串：`~/.ccm-project-url`（mode 600），經 SSH tunnel `127.0.0.1:15432` |
+| **personal DB** | **Coolify** 同 cluster、DB `cc_memory_personal`（pgvector/pgvector:pg18）— schema 0000-0007 + 0009 + 0010 + **0011/0013（v0.5 observations + personal-only CHECK，2026-07-06）**（0007 CHECK：只准 `__personal__`；0009 reminder_delivery_queue personal-only；0010 todoist sync）。連線字串：`~/.ccm-personal-url`（mode 600），同一 tunnel |
 | **舊 Zeabur project DB** | service 仍 running 但 idle（client 已全部切走）；admin 連線字串 `~/.ccm-prod-url`（mode 600）。**Step F 退役待做**（觀察穩定 1-2 週後停用） |
 | **forced personal launcher** | `/home/haha/run-cc-memory-personal.sh`（只持 DATABASE_URL_PERSONAL；Claude Code `cc-memory-personal` / Codex / hermes 共用） |
 | **read-only launcher** | `/home/haha/run-cc-memory-personal-ro.sh`（+CC_READ_ONLY=1 +CC_SEARCH_FEEDBACK=off；Claude Code `cc-memory-hi`，/hi 注入用） |
@@ -18,22 +18,32 @@
 
 ---
 
+## Migration 套用紀錄（cutover 後手動套用者；cutover 前歷史見各 migration docs）
+
+| 日期 | migration | 側 | operator | 驗證 |
+|---|---|---|---|---|
+| 2026-07-06 | 0011（observations 共用 schema） | project（`cc_memory_project`）+ personal（`cc_memory_personal`）雙側 | haha（Claude Code 維護窗口，先備份 `*-20260706.dump`） | catalog verify：欄位/index 兩側 diff 一致 |
+| 2026-07-06 | 0012（no_personal CHECK） | 只套 project | 同上 | `observations_no_personal_check` 存在且僅 project 側 |
+| 2026-07-06 | 0013（personal_only CHECK） | 只套 personal | 同上 | `observations_personal_only_check` 存在且僅 personal 側 |
+
+---
+
 ## Backup
 
 **政策**：personal DB 每週一次 + 任何 schema 變更前；保留 4 份滾動；存放 `~/backups/cc-memory/`；異地備份由 user 手動。
 
 ```bash
 # personal DB
-docker run --rm --network host postgres:18 pg_dump "$(cat ~/.ccm-personal-url)" -Fc \
+pg_dump "$(cat ~/.ccm-personal-url)" -Fc \
   > ~/backups/cc-memory/personal-$(date +%Y%m%d).dump
 
 # project DB（2026-07-01 起改用 ~/.ccm-project-url；~/.ccm-prod-url 是舊 Zeabur，勿再當備份來源）
-docker run --rm --network host postgres:18 pg_dump "$(cat ~/.ccm-project-url)" -Fc \
+pg_dump "$(cat ~/.ccm-project-url)" -Fc \
   > ~/backups/cc-memory/project-$(date +%Y%m%d).dump
 ```
 
-> ⚠️ 本機 `pg_dump` 是 PG16、prod 是 PG18——**必須走 `docker postgres:18`**（本機 image 已存在）。
-> ⚠️ 兩個 URL 現在都指 SSH tunnel 的 `127.0.0.1:15432`，container（容器）內的 127.0.0.1 不是宿主機，**必須加 `--network host`** 才連得到 tunnel（2026-07-05 拓樸更新時補上，第一次跑新備份時實測確認）。
+> ✅ **2026-07-06 更新**：本機已裝 PGDG `postgresql-client-18`（pg_dump 18.4 = prod server 18.4），直接本機跑即可。
+> ⚠️ **docker 方案已失效勿用**：舊版寫「走 `docker postgres:18 --network host`」——實測 Docker Desktop（WSL2 backend）的 host network 是 Docker VM 的 namespace（命名空間），不是本 distro，容器內看不到 tunnel 的 `127.0.0.1:15432`（connection refused）。2026-07-05 的「實測確認」註記有誤，2026-07-06 維護窗口實測推翻。
 
 既有基準備份：`~/backups/cc-memory/cc-memory-prod-20260610.dump`（cutover 前 project DB full dump）
 
