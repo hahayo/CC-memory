@@ -101,7 +101,7 @@ DATABASE_URL=postgres://localhost/cc_memory \
 DATABASE_URL=postgres://test:test@localhost:5433/cc_memory_test \
   npx tsx scripts/eval-retrieval.ts
 
-# CI / Zeabur Postgres
+# CI / prod Postgres（現 Coolify，經 SSH tunnel；原 Zeabur）
 DATABASE_URL=$PROD_DB_URL \
   npx tsx scripts/eval-retrieval.ts
 ```

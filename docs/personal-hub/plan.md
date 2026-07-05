@@ -234,7 +234,7 @@ applyScopePolicy(rawId, { config: loadScopeConfig(env), surface }) → finalScop
 
 | Env | 用途 | 階段 | 預設 / 必要性 |
 |---|---|---|---|
-| `DATABASE_URL` | PostgreSQL 連線（Zeabur，project DB） | 既有 | 必填 |
+| `DATABASE_URL` | PostgreSQL 連線（現 Coolify project DB，SSH tunnel；原 Zeabur） | 既有 | 必填 |
 | `DATABASE_URL_PERSONAL` | 獨立 personal DB 連線（Phase 3 v0.4 翻案；見 [ADR-001](decisions/ADR-001-phase3-separate-db.md)） | Phase 3 | forced-mode personal **必填**；project-mode **禁配**（偵測到 warn + 拒絕載入該 URL，不 exit） |
 | `CC_FORCE_PROJECT_ID` | **forced-mode**：鎖定單一 namespace（如 `__personal__`），硬性 scope | Phase 0 ✅ | 可選；設了即 forced-mode |
 | `CC_MEMORY_PROJECT_ID` | `resolveProjectId` 的 fallback layer | 既有 | 可選；**與 `CC_FORCE_PROJECT_ID` 互斥**（同設 fail） |
@@ -384,7 +384,7 @@ append (row, slot) to result
 
 ### Phase 0~2：instance 設定（無新服務部署）
 
-各裝置本地起 MCP server 連既有 Zeabur PG，靠 env 區分 instance：
+各裝置本地起 MCP server 連既有雲端 PG（現 Coolify；原 Zeabur），靠 env 區分 instance：
 
 | 消費端 | 啟動 env | 說明 |
 |---|---|---|
@@ -395,11 +395,11 @@ append (row, slot) to result
 - **`.mcp.json` 設定樣板**：各 repo 的 `.mcp.json` 為 cc-memory entry 帶對應 env。
 - **Phase -1 前置（跨 repo，v0.4 翻案後降為 strongly recommended）**：AI_Copilot 的 `.mcp.json` 目前掛了 raw postgres MCP。原本是 hard blocker（理由：持 `DATABASE_URL` 可繞過 forced-mode）；Phase 3 v0.4 後個人資料不在 project DB，raw postgres 拿 `DATABASE_URL` 只連 project DB、看不到個人資料。新 Gate：該環境 raw postgres **不持** `DATABASE_URL_PERSONAL` 且無寫入個人 DB 通道（仍建議清理，但已非 hard blocker）。
 
-### Phase 3：prod 獨立 personal DB（roadmap；v0.4 翻案，原 RLS 方案見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)）
+### Phase 3：prod 獨立 personal DB（✅ 已交付 2026-06-10，現 Coolify——2026-07-01 遷移；v0.4 翻案，原 RLS 方案見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)）
 
 > 翻案脈絡簡述：原方案 RLS（`personal_rw` / `project_rw_non_personal` / `admin` role + row policy）對 table owner / `BYPASSRLS` role / superuser 預設失效，`USING` / `WITH CHECK` 漏寫即靜默故障，攻擊面寬。改為獨立 personal DB——靠 secret 配發 + 物理切分回應 threat model（任何持 `DATABASE_URL` 的 process）。
 
-- **Zeabur infra**：開新 PG service `cc-memory-personal`（與既有 project DB 同 region 降延遲）；連線字串 = `DATABASE_URL_PERSONAL`。
+- **infra（已執行；當時 Zeabur、現 Coolify）**：開新 PG service `cc-memory-personal`（與既有 project DB 同主機/region 降延遲）；連線字串 = `DATABASE_URL_PERSONAL`。
 - **Deployment topology（見上方 instance 拓樸表）**：project-mode **只**配 `DATABASE_URL`；forced-mode personal **只**配 `DATABASE_URL_PERSONAL`；admin/migration 才同時持兩個。
 - **`resolveDatabaseUrl()` + fail-fast 矩陣**（`src/db/resolve-url.ts`，config.ts 重接）：依 forced-mode flag 選 URL；forced personal 缺 personal URL → throw；forced personal 兩 URL 同物理 DB → throw；非 forced personal 偵測到 personal URL → warn + 拒絕載入該 URL（不 exit）；forced 非 personal 不 throw。
 - **`src/db/client.ts` 單 process 鎖一 DB**：啟動連線一個 DB，無 request-level 切換。
@@ -502,11 +502,11 @@ docs/spec.md   # 頂部加 v0.4 Phase C deferred status note + pointer 指向本
 | 2a | `tool-policy.ts`（isWriteTool / assertWritable / assertAllowed / loadToolPolicy） + TDD | 寫入 tool 判定 + read-only/allowlist 單測綠 | ✅ 24 tests |
 | 2b | `src/index.ts` ListTools 過濾 + handler 雙層 enforce | `CC_READ_ONLY=1` ListTools 無寫入 tool；直呼被拒；`CC_TOOL_ALLOWLIST` 子集兩層生效（含 read）；telemetry 開關；原 tests 不回歸 | ✅ 8 tests |
 
-### Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur 開新 PG service；v0.4 翻案：獨立 personal DB）
+### Personal-Hub Phase 3 — Prod Hardening（✅ 已交付 2026-06-10——當時 Zeabur、2026-07-01 雙 DB 遷至 Coolify，現況見 prod-runbook.md；v0.4 翻案：獨立 personal DB）
 
 | Step | 交付 | Gate |
 |---|---|---|
-| 3a | A2.1 Zeabur 開 `cc-memory-personal` PG service；A2.2 `src/db/resolve-url.ts`（config.ts 重接）+ `src/db/client.ts` + tests；migration 0007 personal-only CHECK + 0008 project-only 反向 CHECK | 既有 npm test 不回歸；fail-fast 矩陣四案皆綠（forced 缺 personal URL exit、非 forced 偵測到 personal URL warn + 拒載入該 URL 不 exit、`CC_FORCE_PROJECT_ID` 與 `CC_MEMORY_PROJECT_ID` 同設 exit——檢查在 `src/services/scope-policy.ts`、forced 非 personal namespace 不 throw） |
+| 3a | A2.1 開 `cc-memory-personal` PG service（當時 Zeabur、現 Coolify）；A2.2 `src/db/resolve-url.ts`（config.ts 重接）+ `src/db/client.ts` + tests；migration 0007 personal-only CHECK + 0008 project-only 反向 CHECK | 既有 npm test 不回歸；fail-fast 矩陣四案皆綠（forced 缺 personal URL exit、非 forced 偵測到 personal URL warn + 拒載入該 URL 不 exit、`CC_FORCE_PROJECT_ID` 與 `CC_MEMORY_PROJECT_ID` 同設 exit——檢查在 `src/services/scope-policy.ts`、forced 非 personal namespace 不 throw） |
 | 3b | A2.3 `scripts/migrate-personal-data.ts` + A2.4 `scripts/preflight.ts` 三 mode（P1-P7/C1-C5/D1-D5）+ A2.5 `scripts/delete-personal-data.ts`（tx 內 DELETE→驗證→COMMIT） | preflight 三 mode 全 PASS；本地全管線 e2e 綠（`tests/scripts/e2e-migration-pipeline.test.ts`，staging 演練前移）；staging 再跑完整 Step 0-7 演練 |
 | 3c | A2.6 prod maintenance window 上線（backup → migrate → preflight → delete script → 0008 → post-delete → env 切換）| A2.7 端對端驗收 7 條全綠；rollback rehearsal 通過 |
 

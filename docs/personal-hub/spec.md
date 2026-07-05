@@ -153,7 +153,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 
 ---
 
-### Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur 開新 PG service；v0.4 翻案：獨立 personal DB）
+### Personal-Hub Phase 3 — Prod Hardening（✅ 已交付 2026-06-10——當時 Zeabur、2026-07-01 雙 DB 遷至 Coolify，現況見 prod-runbook.md；v0.4 翻案：獨立 personal DB）
 
 > **翻案脈絡**：原方案 = 共用 DB + RLS（`personal_rw` / `project_rw_non_personal` / `admin` role + row policy）。Codex 對審指出 RLS 對 table owner / `BYPASSRLS` role / superuser 預設失效，policy `USING` / `WITH CHECK` 漏寫即靜默故障，攻擊面寬。改為**獨立 personal DB**——靠 secret 分隔 + 物理切分回應 threat model（任何持 `DATABASE_URL` 的 process）。詳見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。
 
@@ -222,7 +222,7 @@ CC-memory 原本（v0.1~v0.3）只是 **Claude Code 專案記憶同步系統**�
 ## Constraints
 
 ### 技術
-- 沿用現有 Drizzle ORM + PostgreSQL（Zeabur）；不引入新 ORM / 排程框架。**Phase 3 v0.4 翻案後新增**一個獨立 personal PostgreSQL service（同 Drizzle / 同 PG major，schema 與 project DB 對齊；連線字串 `DATABASE_URL_PERSONAL`）；非「新引入 DB 技術棧」而是「複製同棧的另一個 instance」。詳見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)。
+- 沿用現有 Drizzle ORM + PostgreSQL（現 Coolify；原 Zeabur，2026-07-01 遷移）；不引入新 ORM / 排程框架。**Phase 3 v0.4 翻案後新增**一個獨立 personal PostgreSQL service（同 Drizzle / 同 PG major，schema 與 project DB 對齊；連線字串 `DATABASE_URL_PERSONAL`）；非「新引入 DB 技術棧」而是「複製同棧的另一個 instance」。詳見 [decisions/ADR-001](decisions/ADR-001-phase3-separate-db.md)。
 - reminder schema 變更一律 **additive**（`ALTER TABLE ADD COLUMN` nullable + 新表），回滾 = 不寫入即可，不破既有資料。
 - 對齊 `src/db/schema.ts` 慣例：partial unique index、`check()`、`timestamp(..., { withTimezone: true })`、`<table>_<purpose>_check` 命名。
 - SQL 一律 parameterized（Drizzle 保證）；不字串拼接。

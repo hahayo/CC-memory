@@ -139,13 +139,13 @@
 
 ---
 
-# Personal-Hub Phase 3 — Prod Hardening（roadmap，需 Zeabur 開新 PG service；v0.4 翻案：獨立 personal DB）
+# Personal-Hub Phase 3 — Prod Hardening（✅ 已交付 2026-06-10——當時 Zeabur、2026-07-01 雙 DB 遷至 Coolify，現況見 prod-runbook.md；v0.4 翻案：獨立 personal DB）
 
 > 終極硬隔離：個人資料搬到獨立 personal PostgreSQL service（`DATABASE_URL_PERSONAL`），靠 secret 配發 + 物理切分。原 RLS 方案 v0.4 翻案（owner / superuser 預設失效、policy 漏寫即靜默故障），見 [decisions/ADR-001-phase3-separate-db.md](decisions/ADR-001-phase3-separate-db.md)。**風險集中在跨 DB 遷移；maintenance window + preflight 三 mode 全 PASS 才繼續。**
 
 ## 3a — config + db client + migration 0007（離線可做；2026-06-09 session 已交付）
 
-- [ ] A2.1 Zeabur 開 PG service `cc-memory-personal`（與 project DB 同 region）；取 `DATABASE_URL_PERSONAL`  ← **僅此項待 user**
+- [ ] A2.1 開 PG service `cc-memory-personal`（當時 Zeabur、現 Coolify，與 project DB 同主機）；取 `DATABASE_URL_PERSONAL`  ← **僅此項待 user**
 - [x] A2.2 `resolveDatabaseUrl()` + fail-fast 矩陣（`src/db/resolve-url.ts`，config.ts 重接；TDD 綠）
   - forced-mode personal 缺 `DATABASE_URL_PERSONAL` → exit ✅
   - forced-mode personal 兩 URL 同物理 DB → exit ✅

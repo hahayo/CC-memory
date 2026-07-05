@@ -5,6 +5,8 @@
 > 改動規模：Personal-Hub Phase 3 整段重寫；spec.md Non-goals「個人資料用獨立資料庫」條目翻案（翻轉為 Goals）；plan.md / task.md Phase 3 章節重寫。
 >
 > Cascade：本 ADR 為 SSOT；spec.md / plan.md / task.md 引用本檔。
+>
+> **2026-07-05 後記（provider 遷移，決策不變）**：本 ADR 的決策（獨立 personal DB、secret partitioning）不受影響；hosting provider（代管供應商）已於 2026-07-01 隨 Track 3 自 Zeabur 遷至 **Coolify**（雙 DB 同主機、本機經 SSH tunnel 連線），現況拓樸見 `../prod-runbook.md`。內文 Zeabur 字樣為決策當時事實，依 ADR 慣例保留不改。
 
 ---
 
