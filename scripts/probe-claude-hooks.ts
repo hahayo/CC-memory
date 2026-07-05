@@ -75,9 +75,13 @@ function parsePayloads(raw: string): PayloadRecord[] {
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (Array.isArray(parsed)) {
-      return parsed
-        .map((entry, index) => ({ line: index + 1, payload: normalizePayload(entry) }))
-        .filter((entry): entry is PayloadRecord => entry.payload !== null);
+      return parsed.map((entry, index) => {
+        const payload = normalizePayload(entry);
+        if (payload === null) {
+          throw new Error(`entry ${index + 1} is not a JSON object`);
+        }
+        return { line: index + 1, payload };
+      });
     }
     const payload = normalizePayload(parsed);
     if (payload !== null) return [{ line: 1, payload }];

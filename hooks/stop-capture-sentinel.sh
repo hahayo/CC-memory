@@ -6,7 +6,7 @@ payload="$(cat 2>/dev/null)"
 
 json_get_string() {
   local key="$1"
-  local regex="\"${key}\"[[:space:]]*:[[:space:]]*\"([^\"\\\\]*)\""
+  local regex="\"${key}\"[[:space:]]*:[[:space:]]*\"((\\\\.|[^\"\\\\])*)\""
   if [[ "$payload" =~ $regex ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
   fi
@@ -55,7 +55,10 @@ main() {
   project_id="$(sanitize_segment "$project_base")"
   session_id="$(sanitize_segment "$session_id")"
 
-  spool_root="${CC_MEMORY_SPOOL_DIR:-${HOME:-/tmp}/.cache/cc-memory/spool}"
+  if [[ -z "${CC_MEMORY_SPOOL_DIR:-}" && -z "${HOME:-}" ]]; then
+    return 0
+  fi
+  spool_root="${CC_MEMORY_SPOOL_DIR:-${HOME}/.cache/cc-memory/spool}"
   project_dir="${spool_root}/${project_id}"
   spool_file="${project_dir}/${session_id}.jsonl"
 
