@@ -25,6 +25,9 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
 const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
+// 注入污染防線 marker：SessionStart 注入內容帶 `source=cc-memory-inject`，
+// 其字串子集為此常數；transcript 內含此字串的行整行排除，不送 LLM 抽取。
+const INJECTION_MARKER = 'cc-memory-inject';
 const RAW_LLM_OUTPUT_LIMIT = 2048;
 const ROTATE_SIZE_BYTES = 10 * 1024 * 1024;
 const ROTATE_IDLE_MS = 24 * 60 * 60 * 1000;
@@ -279,6 +282,21 @@ function maxNumber(records: SpoolRecord[], key: keyof SpoolRecord, fallback: num
   return values.length > 0 ? Math.max(...values) : fallback;
 }
 
+// 注入污染防線：transcript 是 JSONL，逐行過濾——整行含 INJECTION_MARKER 即丟棄，
+// 避免 SessionStart 注入的 Recent Activity 索引被 LLM 再抽成 observation
+// （見 docs/auto-capture-v0.5/plan.md §Injection Pollution Defense）。
+// 只影響送 LLM 的文字；HWM/spool offset 語義不變（offset 仍以原始 window 邊界計算，
+// 全行被濾成空窗口時走既有空窗口 skip 路徑）。無 marker 時原字串原樣回傳（不擾動位元組邊界）。
+function stripInjectionMarkerLines(transcript: string): string {
+  if (transcript.length === 0 || !transcript.includes(INJECTION_MARKER)) {
+    return transcript;
+  }
+  return transcript
+    .split('\n')
+    .filter((line) => !line.includes(INJECTION_MARKER))
+    .join('\n');
+}
+
 async function readTranscriptSlice(path: string | null, start: number, end: number): Promise<string> {
   if (!path) return '';
   try {
@@ -305,7 +323,10 @@ async function readWindow(spool: SpoolSession, start: number, end: number, now: 
   const transcriptPath = firstString(records, 'transcript_path');
   const hwmOffsetStart = minNumber(records, 'transcript_offset', 0);
   const hwmOffsetEnd = maxNumber(records, 'hwm_offset', hwmOffsetStart);
-  const transcript = await readTranscriptSlice(transcriptPath, hwmOffsetStart, hwmOffsetEnd);
+  // 過濾放在分塊之前：先剔除注入 marker 行，再交由後續空窗口 skip / chunking 處理。
+  const transcript = stripInjectionMarkerLines(
+    await readTranscriptSlice(transcriptPath, hwmOffsetStart, hwmOffsetEnd)
+  );
 
   return {
     spool,

@@ -448,6 +448,60 @@ describe('capture worker failure contracts without DB', () => {
     expect(existsSync(deadDir(harness))).toBe(false);
     expect(existsSync(hwmPath(harness))).toBe(false);
   });
+
+  it('excludes injected cc-memory-inject lines from the transcript sent to the LLM', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'genuine user turn worth capturing' },
+      {
+        timestamp: '2026-01-01T00:00:01.000Z',
+        message: 'source=cc-memory-inject recent activity index',
+      },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:09:00.000Z',
+    });
+    const llm = mockLlm([rawExtraction({ summary: 'genuine capture', observations: [] })]);
+
+    // db {} 讓寫入路徑失敗，但過濾發生在送 LLM 之前——只驗 llm.calls[0].transcript。
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].transcript).toContain('genuine user turn worth capturing');
+    expect(llm.calls[0].transcript).not.toContain('cc-memory-inject');
+  });
+
+  it('skips the window without calling the LLM when every line is a cc-memory-inject marker', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: 'source=cc-memory-inject index line one',
+      },
+      {
+        timestamp: '2026-01-01T00:00:01.000Z',
+        message: 'source=cc-memory-inject index line two',
+      },
+    ]);
+    const spoolEnd = await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:09:30.000Z',
+    });
+    const llm = mockLlm([]);
+
+    // 全行被濾成空窗口 → 走既有空窗口 skip 路徑（寫 HWM、不呼叫 LLM、不 dead-letter）。
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      skipped: 1,
+      deadLettered: 0,
+    });
+    expect(llm.calls).toHaveLength(0);
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+  });
 });
 
 describe('capture worker DB-backed RED contracts', () => {
