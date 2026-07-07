@@ -9,7 +9,10 @@ import { describe, expect, it } from 'vitest';
 import {
   INJECT_SOURCE_MARKER,
   buildSessionStartOutput,
+  projectIdFromCwd,
   renderRecentActivityContext,
+  resolveInjectTokenBudget,
+  sanitizeSegmentBashMirror,
 } from '../../src/services/session-start-inject.js';
 import type {
   RecentActivityResult,
@@ -84,5 +87,54 @@ describe('buildSessionStartOutput', () => {
     expect(parsed.hookSpecificOutput?.hookEventName).toBe('SessionStart');
     expect(typeof parsed.hookSpecificOutput?.additionalContext).toBe('string');
     expect(parsed.hookSpecificOutput?.additionalContext).toContain('source=cc-memory-inject');
+  });
+});
+
+describe('sanitizeSegmentBashMirror（bash sanitize_segment 逐字元 mirror，對審 P2）', () => {
+  it('連續不安全字各自換底線，不塌縮（bash ${v//[^...]/_} 語義）', () => {
+    expect(sanitizeSegmentBashMirror('我的專案')).toBe('____');
+    expect(sanitizeSegmentBashMirror('my  project')).toBe('my__project');
+    expect(sanitizeSegmentBashMirror('foo!!bar')).toBe('foo__bar');
+  });
+
+  it('安全字元原樣保留', () => {
+    expect(sanitizeSegmentBashMirror('CC-memory')).toBe('CC-memory');
+    expect(sanitizeSegmentBashMirror('a_b.c-d')).toBe('a_b.c-d');
+  });
+
+  it('前導點：全數剝除後補單一底線（bash while 迴圈語義）', () => {
+    expect(sanitizeSegmentBashMirror('.hidden')).toBe('_hidden');
+    expect(sanitizeSegmentBashMirror('..config')).toBe('_config');
+    expect(sanitizeSegmentBashMirror('..')).toBe('_');
+  });
+
+  it('空字串 → unknown', () => {
+    expect(sanitizeSegmentBashMirror('')).toBe('unknown');
+  });
+});
+
+describe('projectIdFromCwd（cwd 處理逐步 mirror bash）', () => {
+  it('取 basename 並 sanitize；只去單一尾斜線', () => {
+    expect(projectIdFromCwd('/home/user/CC-memory')).toBe('CC-memory');
+    expect(projectIdFromCwd('/home/user/我的專案')).toBe('____');
+    expect(projectIdFromCwd('/home/user/proj/')).toBe('proj');
+  });
+});
+
+describe('resolveInjectTokenBudget（CC_MEMORY_INJECT_TOKEN_BUDGET，對審 P2）', () => {
+  it('未設/空 → undefined（builder 用預設）', () => {
+    expect(resolveInjectTokenBudget({})).toBeUndefined();
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: '  ' })).toBeUndefined();
+  });
+
+  it('正整數字串 → 數值；小數取 floor', () => {
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: '800' })).toBe(800);
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: '99.7' })).toBe(99);
+  });
+
+  it('parse 失敗/非正數 → undefined（plan.md env 表：失敗用預設）', () => {
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: 'abc' })).toBeUndefined();
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: '-5' })).toBeUndefined();
+    expect(resolveInjectTokenBudget({ CC_MEMORY_INJECT_TOKEN_BUDGET: '0' })).toBeUndefined();
   });
 });

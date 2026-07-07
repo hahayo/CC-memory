@@ -212,6 +212,33 @@ describe('buildRecentActivity (integration, real PG)', () => {
     expect(result.rows.map((r) => r.observationCount)).toEqual(full.rows.map((r) => r.observationCount));
   });
 
+  it('budget 第二步：清 ids 仍超時 excerpt 壓 60、不丟 row（對審 P3 補案）', async () => {
+    const projectId = `${TEST_PREFIX}-budget-shrink`;
+    // 長 summary（遠超 60）讓第二步縮排量可觀；少量 ids 讓第一步縮排量不足。
+    const longSummary = (tag: string) => `${tag} ${'長摘要內容 very long summary text '.repeat(8)}`;
+    await seedRollup(sql, { projectId, summary: longSummary('r1'), discoveryTokens: 1, observationIds: [randomUUID()] });
+    await seedRollup(sql, { projectId, summary: longSummary('r2'), discoveryTokens: 2, observationIds: [randomUUID()] });
+    await seedRollup(sql, { projectId, summary: longSummary('r3'), discoveryTokens: 3, observationIds: [randomUUID()] });
+
+    const full = await buildRecentActivity(db, { projectId, tokenBudget: 10_000_000 });
+    const clearedRows = full.rows.map((r) => ({ ...r, observationIds: [] as string[] }));
+    const clearedTokens = estimateDiscoveryTokens(JSON.stringify(clearedRows));
+    const shrunkRows = clearedRows.map((r) => ({
+      ...r,
+      summaryExcerpt: `${r.summaryExcerpt.slice(0, 60)}…`,
+    }));
+    const shrunkTokens = estimateDiscoveryTokens(JSON.stringify(shrunkRows));
+    expect(shrunkTokens).toBeLessThan(clearedTokens); // 前提：excerpt 縮短確實省 token
+
+    // budget 落在「清 ids 後仍超、excerpt 壓 60 後可過」的區間 → 恰好停在第二步。
+    const budget = Math.floor((shrunkTokens + clearedTokens) / 2);
+    const result = await buildRecentActivity(db, { projectId, tokenBudget: budget });
+
+    expect(result.rows.length).toBe(full.rows.length); // 不丟 row（未進第三步）
+    expect(result.rows.every((r) => r.observationIds.length === 0)).toBe(true); // 第一步已套用
+    expect(result.rows.every((r) => r.summaryExcerpt.length <= 61)).toBe(true); // 60 + '…'
+  });
+
   it('budget 第三步：更小 budget 從最舊 row 開始丟', async () => {
     const projectId = `${TEST_PREFIX}-budget-drop`;
     const base = Date.parse('2026-07-01T00:00:00.000Z');

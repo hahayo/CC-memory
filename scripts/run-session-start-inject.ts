@@ -9,9 +9,12 @@
 // flag on 且 JSON parse 成功後，避免關閉／壞 payload 路徑觸發 DATABASE_URL 解析。
 
 import path from 'node:path';
-import { sanitizeSpoolSegment } from '../src/services/capture-spool.js';
 import { buildRecentActivity } from '../src/services/recent-activity.js';
-import { buildSessionStartOutput } from '../src/services/session-start-inject.js';
+import {
+  buildSessionStartOutput,
+  projectIdFromCwd,
+  resolveInjectTokenBudget,
+} from '../src/services/session-start-inject.js';
 
 function injectRecentEnabled(env: Record<string, string | undefined>): boolean {
   return (env.CC_MEMORY_INJECT_RECENT ?? '').trim().toLowerCase() === 'on';
@@ -37,15 +40,6 @@ function parseCwd(payload: string): string | null {
   return null;
 }
 
-// cwd basename → projectId（對齊 stop-capture-sentinel.sh 的 sanitize_segment：
-// 取路徑最後一段、非白名單字元換 _）。sanitizeSpoolSegment 是同一套邏輯的 TS 鏡像，
-// 且 resolveCaptureSpoolPath 已用它產生 hook 寫入的 spool 目錄名，故與 DB projectId 對齊。
-function projectIdFromCwd(cwd: string): string {
-  const trimmed = cwd.replace(/\/+$/, '');
-  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
-  return sanitizeSpoolSegment(base);
-}
-
 export async function runSessionStartInject(): Promise<void> {
   // 遞迴 capture 斷路器：抽取子程序（帶 CC_MEMORY_CAPTURE_CHILD）不得觸發注入。
   if (process.env.CC_MEMORY_CAPTURE_CHILD) {
@@ -68,10 +62,19 @@ export async function runSessionStartInject(): Promise<void> {
   const postgres = (await import('postgres')).default;
   const { drizzle } = await import('drizzle-orm/postgres-js');
 
-  const client = postgres(config.databaseUrl, { max: 1, connect_timeout: 2, idle_timeout: 2 });
+  const client = postgres(config.databaseUrl, {
+    max: 1,
+    connect_timeout: 2,
+    idle_timeout: 2,
+    // 已連上但查詢卡住時 fail-fast（session-start 阻塞只剩外層 hook timeout 兜底）
+    connection: { statement_timeout: 3000 },
+  });
   try {
     const db = drizzle(client);
-    const result = await buildRecentActivity(db, { projectId });
+    const result = await buildRecentActivity(db, {
+      projectId,
+      tokenBudget: resolveInjectTokenBudget(process.env),
+    });
     const output = buildSessionStartOutput(result);
     if (output) {
       process.stdout.write(`${output}\n`);
