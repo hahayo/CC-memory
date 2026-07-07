@@ -36,6 +36,7 @@ import {
   deleteMemory,
   getProjectStats,
 } from './services/memories.js';
+import { refineDelete } from './services/refine.js';
 import { timeline, getObservations } from './services/observations.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
 import { setReminder, snoozeReminder, getDueReminders } from './services/reminders.js';
@@ -516,6 +517,26 @@ export const BASE_TOOLS: Tool[] = [
         project_path: projectPathProp,
       },
       required: ['id'],
+    },
+  },
+  {
+    name: 'cc_memory_refine_delete',
+    description:
+      "v0.5 refine governance 刪除工具：軟刪 observation 或 rollup memory（status='archived' + audit metadata）。project_id 與 project_path 擇一必填（scope 保護）。",
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['id', 'project_id'] }, { required: ['id', 'project_path'] }],
+      properties: {
+        id: { type: 'string', description: 'Observation 或 rollup memory ID' },
+        target: {
+          type: 'string',
+          enum: ['observation', 'memory'],
+          description: '刪除目標：observation 或 memory',
+        },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+      },
+      required: ['id', 'target'],
     },
   },
 
@@ -1106,6 +1127,23 @@ export async function handleToolCall(
           throw new NotFoundError(`找不到記憶 (ID: ${id})`, { id });
         }
         return { content: [{ type: 'text', text: `✓ 記憶已刪除 (ID: ${id})` }] };
+      }
+
+      case 'cc_memory_refine_delete': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const result = await refineDelete(database, {
+          projectId,
+          target: args.target as 'observation' | 'memory',
+          id: args.id as string,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `✓ refine delete 已封存 ${result.target} (ID: ${result.id})`,
+            },
+          ],
+        };
       }
 
       // ---------------- Task ----------------

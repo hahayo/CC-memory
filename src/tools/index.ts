@@ -16,6 +16,7 @@ export type { ListInput } from './list.js';
 
 export { getMemory } from './get.js';
 export { deleteMemory } from './delete.js';
+export { refineDelete } from './refine-delete.js';
 
 export { getProjectStats } from './stats.js';
 export type { ProjectStats } from './stats.js';

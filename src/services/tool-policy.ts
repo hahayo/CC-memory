@@ -20,8 +20,8 @@ export interface ToolPolicy {
 }
 
 /**
- * 寫入類 tool 集合（save/delete/task_create/task_update/set_reminder/snooze/reminders_due
- * + todoist_add/todoist_complete）。
+ * 寫入類 tool 集合（save/delete/refine_delete/task_create/task_update/set_reminder/
+ * snooze/reminders_due + todoist_add/todoist_complete）。
  * cc_reminders_due 雖名為「撈」，但會「認領」到期提醒（寫 reminder_log + 推進 tasks），
  * 屬寫入——read-only 消費端不可呼叫，只有 poller（hermes 寫入端）能用。
  * Todoist：add/complete 改外部帳號狀態屬寫入；projects/list/completed 為唯讀。
@@ -29,6 +29,7 @@ export interface ToolPolicy {
 const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'cc_memory_save',
   'cc_memory_delete',
+  'cc_memory_refine_delete',
   'cc_task_create',
   'cc_task_update',
   'cc_task_set_reminder',
