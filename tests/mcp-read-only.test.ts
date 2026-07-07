@@ -127,6 +127,24 @@ describe('Phase 2b read-only / allowlist enforce', () => {
     expect(res.isError).not.toBe(true);
   });
 
+  it('allowlist excludes cc_memory_refine_delete → ListTools hides + direct call FORBIDDEN', async () => {
+    const allowlist = new Set(['cc_memory_search', 'cc_task_list']);
+    const policy = { ...OPEN, allowlist };
+    // ListTools 不露（M5 Gate：allowlist 排除時雙層都擋）
+    expect(names(buildToolsForMode(PROJECT_MODE, policy))).not.toContain(
+      'cc_memory_refine_delete'
+    );
+    // 直呼仍被 assertAllowed 擋
+    const res = await handleToolCall(
+      'cc_memory_refine_delete',
+      { project_id: tp, target: 'observation', id: randomUUID() },
+      testDb,
+      PROJECT_MODE,
+      policy
+    );
+    expect(errCode(res)).toBe('FORBIDDEN');
+  });
+
   it('allowlist excludes a read tool (cc_memory_get) → ListTools hides + direct call FORBIDDEN', async () => {
     const allowlist = new Set(['cc_memory_search', 'cc_task_list']);
     const policy = { ...OPEN, allowlist };
