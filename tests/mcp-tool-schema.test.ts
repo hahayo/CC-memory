@@ -21,6 +21,8 @@ const SCOPE_TOOLS = [
   'cc_memory_save',
   'cc_memory_list',
   'cc_memory_get',
+  'cc_memory_timeline',
+  'cc_memory_get_observations',
   'cc_memory_stats',
   'cc_memory_delete',
   'cc_task_create',

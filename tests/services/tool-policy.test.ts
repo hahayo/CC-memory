@@ -34,6 +34,8 @@ describe('tool-policy: isWriteTool', () => {
     'cc_memory_search',
     'cc_memory_list',
     'cc_memory_get',
+    'cc_memory_timeline',
+    'cc_memory_get_observations',
     'cc_memory_stats',
     'cc_task_list',
     'cc_task_stats',
