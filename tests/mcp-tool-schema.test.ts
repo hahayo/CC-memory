@@ -25,6 +25,7 @@ const SCOPE_TOOLS = [
   'cc_memory_get_observations',
   'cc_memory_stats',
   'cc_memory_delete',
+  'cc_memory_refine_delete',
   'cc_task_create',
   'cc_task_list',
   'cc_task_update',

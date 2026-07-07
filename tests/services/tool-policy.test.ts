@@ -22,6 +22,7 @@ describe('tool-policy: isWriteTool', () => {
   const writeTools = [
     'cc_memory_save',
     'cc_memory_delete',
+    'cc_memory_refine_delete',
     'cc_task_create',
     'cc_task_update',
     'cc_task_set_reminder',
@@ -99,6 +100,12 @@ describe('tool-policy: assertWritable (read-only 只管寫入)', () => {
     expect(() => assertWritable('cc_memory_save', { ...OPEN_POLICY, readOnly: true })).toThrow(
       ForbiddenError
     );
+  });
+
+  it('read-only + refine_delete → throws ForbiddenError', () => {
+    expect(() =>
+      assertWritable('cc_memory_refine_delete', { ...OPEN_POLICY, readOnly: true })
+    ).toThrow(ForbiddenError);
   });
 
   it('read-only + read tool → ok', () => {

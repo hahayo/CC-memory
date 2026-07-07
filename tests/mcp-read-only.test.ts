@@ -23,6 +23,7 @@ const OPEN: ToolPolicy = { readOnly: false, allowlist: null, searchFeedback: tru
 const WRITE_TOOLS = [
   'cc_memory_save',
   'cc_memory_delete',
+  'cc_memory_refine_delete',
   'cc_task_create',
   'cc_task_update',
   'cc_task_set_reminder',
@@ -64,6 +65,11 @@ describe('Phase 2b read-only / allowlist enforce', () => {
 
   // ---------- ListTools 過濾 ----------
 
+  it('open ListTools exposes cc_memory_refine_delete', () => {
+    const tools = buildToolsForMode(PROJECT_MODE, OPEN);
+    expect(names(tools)).toContain('cc_memory_refine_delete');
+  });
+
   it('read-only ListTools omits all write tools, keeps read tools', () => {
     const tools = buildToolsForMode(PROJECT_MODE, { ...OPEN, readOnly: true });
     const ns = names(tools);
@@ -73,6 +79,11 @@ describe('Phase 2b read-only / allowlist enforce', () => {
     expect(ns).toContain('cc_memory_get_observations');
     expect(ns).toContain('cc_task_list');
     expect(ns).toContain('cc_task_stats');
+  });
+
+  it('read-only ListTools omits cc_memory_refine_delete', () => {
+    const tools = buildToolsForMode(PROJECT_MODE, { ...OPEN, readOnly: true });
+    expect(names(tools)).not.toContain('cc_memory_refine_delete');
   });
 
   it('allowlist ListTools exposes only allowlisted tools (incl. read filtering)', () => {
@@ -94,6 +105,17 @@ describe('Phase 2b read-only / allowlist enforce', () => {
     expect(errCode(res)).toBe('FORBIDDEN');
   });
 
+  it('read-only direct call to cc_memory_refine_delete → FORBIDDEN', async () => {
+    const res = await handleToolCall(
+      'cc_memory_refine_delete',
+      { project_id: tp, target: 'observation', id: randomUUID() },
+      testDb,
+      PROJECT_MODE,
+      { ...OPEN, readOnly: true }
+    );
+    expect(errCode(res)).toBe('FORBIDDEN');
+  });
+
   it('read-only still allows read tools', async () => {
     const res = await handleToolCall(
       'cc_task_list',
@@ -103,6 +125,24 @@ describe('Phase 2b read-only / allowlist enforce', () => {
       { ...OPEN, readOnly: true }
     );
     expect(res.isError).not.toBe(true);
+  });
+
+  it('allowlist excludes cc_memory_refine_delete → ListTools hides + direct call FORBIDDEN', async () => {
+    const allowlist = new Set(['cc_memory_search', 'cc_task_list']);
+    const policy = { ...OPEN, allowlist };
+    // ListTools 不露（M5 Gate：allowlist 排除時雙層都擋）
+    expect(names(buildToolsForMode(PROJECT_MODE, policy))).not.toContain(
+      'cc_memory_refine_delete'
+    );
+    // 直呼仍被 assertAllowed 擋
+    const res = await handleToolCall(
+      'cc_memory_refine_delete',
+      { project_id: tp, target: 'observation', id: randomUUID() },
+      testDb,
+      PROJECT_MODE,
+      policy
+    );
+    expect(errCode(res)).toBe('FORBIDDEN');
   });
 
   it('allowlist excludes a read tool (cc_memory_get) → ListTools hides + direct call FORBIDDEN', async () => {
