@@ -177,6 +177,8 @@ claude-mem plugin   # 併用期保留
 | atomic append | `open(O_APPEND)` + 單行 JSON + newline；失敗吞掉 | concurrent append 100 次無破行 |
 | file lock | worker processing（處理）時鎖 session spool；hook append 不等待長鎖 | worker/hook race 測試 |
 | HWM commit | DB transaction（交易）成功後才更新 `.hwm`；LLM 失敗不前進 | crash recovery 測試 |
+| empty transcript window | transcript slice 空字串或 `trim()` 後為空時視為 skip：不呼叫 LLM、不寫 dead-letter，直接 HWM commit | empty window 測試 |
+| max window chunking | transcript window 超過 `CC_CAPTURE_MAX_WINDOW_BYTES` 時依 UTF-8 字元邊界切成多個 chunk；各 chunk 共用 canonical rollup，`observed_at` 微增序號跨 chunk 延續；單一 chunk LLM 失敗只 dead-letter 該 chunk、其餘 chunk 照常處理，整體 HWM 仍沿用「任一 LLM 失敗不前進」語義 | chunk / UTF-8 / partial failure 測試 |
 | idempotency | content hash + DB unique index 擋重複 | 重跑同 spool 不重複 insert |
 | rotation | 單檔 >10MB 或 session 結束 24h 後 rotate `.sealed` | rotation 測試 |
 | size cap | 全 spool >500MB 時停止 capture 並 stdout 告警 | flood（洪水）測試 |
@@ -244,6 +246,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 | `CC_MEMORY_SKIP_TOOLS` | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | hook wrapper | 設定後整個覆蓋預設；空字串代表不 skip |
 | `CC_MEMORY_SPOOL_DIR` | `~/.cache/cc-memory/spool` | hook / worker | 缺值用預設；無法建立時 hook 吞錯、worker 告警 |
 | `CC_MEMORY_SPOOL_MAX_MB` | `500` | worker | 超過上限停止 capture 並 stdout 告警 |
+| `CC_CAPTURE_MAX_WINDOW_BYTES` | `262144` | capture worker | parse 失敗或小於 4 bytes 用預設；超過上限的 transcript window 依 UTF-8 邊界分塊 |
 | `CC_MEMORY_INCLUDE_OBSERVATIONS` | `on` | search service | `off` 時 search 只回 manual/rollup |
 | `CC_MEMORY_INJECT_RECENT` | `off` | SessionStart injector | off 時 stdout 空 |
 | `CC_MEMORY_INJECT_TOKEN_BUDGET` | `1200` | SessionStart injector | 超過先截 observation ids，再截 summary text |

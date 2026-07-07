@@ -272,7 +272,7 @@ worker 對 LLM output 採 all-or-nothing（全有或全無）策略：
 1. 必須是單一 JSON object（物件）。
 2. 必須含 `session_summary` 與 `observations`。
 3. `session_summary.summary` 不可空白，且要能映射到 `project_memories.summary`。
-4. `observations` 每筆必須通過 type/concepts/facts/files/narrative/discovery_tokens 驗證。
+4. `observations` 每筆必須通過 type/concepts/facts/files/narrative 驗證。`discovery_tokens` 由 worker 寫入時以 estimator 計算，不採信 LLM 輸出（2026-07-07 真 tick 實證：haiku 常給 0/null，整批炸 schema——對齊上方欄位契約「寫入時計算」）。
 5. 任一筆 observation 壞掉，整包進 dead-letter，不半吞。
 6. dead-letter metadata 必須可追查 session id、hwm offset、模型名、錯誤碼、content hash。
 7. dead-letter 不把 transcript 全文或 LLM 原文落 DB。

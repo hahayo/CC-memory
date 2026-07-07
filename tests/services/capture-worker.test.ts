@@ -44,6 +44,8 @@ interface MockCaptureLlm extends CaptureLlmAdapter {
   calls: CaptureLlmRequest[];
 }
 
+type MockLlmStep = CaptureLlmRawResponse | Error;
+
 interface TestHarness {
   root: string;
   spoolDir: string;
@@ -160,14 +162,20 @@ function deadDir(harness: TestHarness): string {
 }
 
 function readOnlyDeadLetter(harness: TestHarness): Record<string, unknown> {
+  const letters = readDeadLetters(harness);
+  expect(letters).toHaveLength(1);
+  return letters[0];
+}
+
+function readDeadLetters(harness: TestHarness): Array<Record<string, unknown>> {
   expect(existsSync(deadDir(harness))).toBe(true);
   const files = existsSync(deadDir(harness))
     ? readdirSync(deadDir(harness)).filter((file) => file.endsWith('.json'))
     : [];
-  expect(files).toHaveLength(1);
-  const file = files[0] ?? '';
-  expect(file).toMatch(/^[a-f0-9]{64}\.json$/);
-  return JSON.parse(readFileSync(join(deadDir(harness), file), 'utf8')) as Record<string, unknown>;
+  return files.sort().map((file) => {
+    expect(file).toMatch(/^[a-f0-9]{64}\.json$/);
+    return JSON.parse(readFileSync(join(deadDir(harness), file), 'utf8')) as Record<string, unknown>;
+  });
 }
 
 function observation(
@@ -183,7 +191,6 @@ function observation(
     concepts: ['capture-worker'],
     files: ['tests/services/capture-worker.test.ts'],
     narrative,
-    discovery_tokens: 17,
     ...overrides,
   };
 }
@@ -207,21 +214,37 @@ function rawExtraction(input: {
   };
 }
 
-function mockLlm(responses: CaptureLlmRawResponse[]): MockCaptureLlm {
-  const pending = [...responses];
+function mockLlm(steps: MockLlmStep[]): MockCaptureLlm {
+  const pending = [...steps];
   const calls: CaptureLlmRequest[] = [];
   return {
     model: TEST_MODEL,
     calls,
     async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
       calls.push(request);
-      const response = pending.shift();
-      if (!response) {
+      const step = pending.shift();
+      if (!step) {
         throw new Error('unexpected capture LLM call');
       }
-      return response;
+      if (step instanceof Error) throw step;
+      return step;
     },
   };
+}
+
+function makeChunkedTranscript(
+  harness: TestHarness,
+  input: { lineCount: number; messageBytes: number }
+): { transcriptEnd: number; lines: string[]; cap: number } {
+  const entries = Array.from({ length: input.lineCount }, (_, index) => ({
+    timestamp: `2026-01-01T00:00:0${index}.000Z`,
+    message: `chunk-${index + 1}:${'x'.repeat(input.messageBytes)}`,
+  }));
+  const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, entries);
+  const lines = readFileSync(harness.transcriptPath, 'utf8').match(/[^\n]*\n/g) ?? [];
+  expect(lines).toHaveLength(input.lineCount);
+  const cap = Math.max(...lines.map((line) => Buffer.byteLength(line)));
+  return { transcriptEnd, lines, cap };
 }
 
 async function runWorker(
@@ -287,6 +310,27 @@ async function observations(sql: Sql, projectId: string, sessionId: string): Pro
 }
 
 describe('capture worker failure contracts without DB', () => {
+  it('skips empty transcript windows without calling LLM, dead-lettering, or blocking HWM', async () => {
+    const harness = makeHarness();
+    const spoolEnd = await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    const llm = mockLlm([]);
+
+    await expect(
+      runWorker(harness, {
+        db: {},
+        llm,
+      })
+    ).resolves.toMatchObject({ processed: 0, skipped: 1, deadLettered: 0 });
+
+    expect(llm.calls).toHaveLength(0);
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+  });
+
   it('does not call LLM when the injectable DB health check fails', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
@@ -307,6 +351,67 @@ describe('capture worker failure contracts without DB', () => {
       })
     ).resolves.toMatchObject({ processed: 0, deadLettered: 0 });
     expect(llm.calls).toHaveLength(0);
+  });
+
+  it('retries malformed JSON before attempting the DB write path', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'retry before fake DB write' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:05.000Z',
+    });
+    const llm = mockLlm([
+      { model: TEST_MODEL, text: 'not json on first attempt' },
+      rawExtraction({
+        summary: 'retry reached DB path',
+        observations: [observation('retry reached DB path', 'retry reached DB path narrative')],
+      }),
+    ]);
+
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      failed: 1,
+      deadLettered: 0,
+      llmRetries: 1,
+    });
+
+    expect(llm.calls).toHaveLength(2);
+    expect(
+      (llm.calls[1] as CaptureLlmRequest & { retryPromptPrefix?: string }).retryPromptPrefix
+    ).toContain('first character must be `{`');
+    expect(existsSync(deadDir(harness))).toBe(false);
+  });
+
+  it('dead-letters only after the malformed JSON retry also fails', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: SECRET_TRANSCRIPT_TEXT },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:10.000Z',
+    });
+    const firstMalformedOutput = 'first malformed output';
+    const retryMalformedOutput = 'retry malformed output';
+    const llm = mockLlm([
+      { model: TEST_MODEL, text: firstMalformedOutput },
+      { model: TEST_MODEL, text: retryMalformedOutput },
+    ]);
+
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      deadLettered: 1,
+      llmRetries: 1,
+    });
+
+    expect(llm.calls).toHaveLength(2);
+    const deadLetter = readOnlyDeadLetter(harness);
+    expect(deadLetter.llm_raw_output).toBe(retryMalformedOutput);
+    expect(JSON.stringify(deadLetter)).not.toContain(SECRET_TRANSCRIPT_TEXT);
   });
 
   it('treats runtime LLM disabled errors as a skip without dead-lettering', async () => {
@@ -368,7 +473,47 @@ describe('capture worker DB-backed RED contracts', () => {
     await sql`DELETE FROM project_memories WHERE project_id LIKE 'capture-worker-%'`;
   });
 
-  it('dead-letters malformed LLM JSON without storing transcript text or DB rows', async () => {
+  it('retries malformed LLM JSON once and writes the second successful response without dead-lettering', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: 'first malformed response should be retried',
+      },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:45.000Z',
+    });
+    const llm = mockLlm([
+      { model: TEST_MODEL, text: 'not json on first attempt' },
+      rawExtraction({
+        summary: 'retry recovered',
+        observations: [observation('retry recovered', 'retry recovered narrative')],
+      }),
+    ]);
+
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
+      processed: 1,
+      deadLettered: 0,
+      llmRetries: 1,
+      observationsWritten: 1,
+    });
+
+    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls[0]).not.toHaveProperty('retryPromptPrefix');
+    expect(
+      (llm.calls[1] as CaptureLlmRequest & { retryPromptPrefix?: string }).retryPromptPrefix
+    ).toContain('first character must be `{`');
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
+      observations: 1,
+      rollups: 1,
+    });
+  });
+
+  it('dead-letters the retry malformed LLM JSON with truncated raw output and without transcript text or DB rows', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       {
@@ -381,13 +526,23 @@ describe('capture worker DB-backed RED contracts', () => {
       transcriptEnd,
       timestamp: '2026-07-06T10:01:00.000Z',
     });
-    const llm = mockLlm([{ model: TEST_MODEL, text: '{"session_summary":' }]);
+    const firstMalformedOutput = 'first attempt was not json';
+    const retryMalformedOutput = `retry-not-json:${'x'.repeat(3000)}`;
+    const llm = mockLlm([
+      { model: TEST_MODEL, text: firstMalformedOutput },
+      { model: TEST_MODEL, text: retryMalformedOutput },
+    ]);
 
     await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
       processed: 0,
       deadLettered: 1,
+      llmRetries: 1,
     });
 
+    expect(llm.calls).toHaveLength(2);
+    expect(
+      (llm.calls[1] as CaptureLlmRequest & { retryPromptPrefix?: string }).retryPromptPrefix
+    ).toContain('first character must be `{`');
     const deadLetter = readOnlyDeadLetter(harness);
     const metadata = deadLetter.metadata as Record<string, unknown>;
     expect(metadata).toMatchObject({
@@ -400,11 +555,183 @@ describe('capture worker DB-backed RED contracts', () => {
     expect(JSON.stringify(deadLetter)).not.toContain(SECRET_TRANSCRIPT_TEXT);
     expect(deadLetter).not.toHaveProperty('transcript');
     expect(deadLetter).not.toHaveProperty('transcript_text');
+    expect(deadLetter.llm_raw_output).toBe(retryMalformedOutput.slice(0, 2048));
 
     expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
       observations: 0,
       rollups: 0,
     });
+  });
+
+  it('splits large transcript windows into chunks that write observations under one rollup with monotonic observed_at', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 3,
+      messageBytes: 80,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:30.000Z',
+    });
+    const processingTime = new Date('2026-07-06T10:01:40.000Z');
+    const llm = mockLlm([
+      rawExtraction({
+        summary: 'chunk one summary',
+        observations: [observation('chunk one', 'chunk one narrative')],
+      }),
+      rawExtraction({
+        summary: 'chunk two summary',
+        observations: [observation('chunk two', 'chunk two narrative')],
+      }),
+      rawExtraction({
+        summary: 'chunk three summary',
+        observations: [observation('chunk three', 'chunk three narrative')],
+      }),
+    ]);
+
+    await expect(runWorker(harness, { db, llm, now: processingTime })).resolves.toMatchObject({
+      deadLettered: 0,
+      observationsWritten: 3,
+    });
+
+    expect(llm.calls).toHaveLength(3);
+    expect(llm.calls.map((call) => call.transcript)).toEqual(lines);
+    for (const call of llm.calls) {
+      expect(Buffer.byteLength(call.transcript)).toBeLessThanOrEqual(cap);
+    }
+
+    const rollupRows = await rollups(sql, harness.projectId, harness.sessionId);
+    expect(rollupRows).toHaveLength(1);
+    const observationRows = await observations(sql, harness.projectId, harness.sessionId);
+    expect(observationRows).toHaveLength(3);
+    expect(observationRows.map((row) => row.rollupMemoryId)).toEqual([
+      rollupRows[0].id,
+      rollupRows[0].id,
+      rollupRows[0].id,
+    ]);
+    expect(observationRows.map((row) => row.observedAt.toISOString())).toEqual([
+      processingTime.toISOString(),
+      new Date(processingTime.getTime() + 1).toISOString(),
+      new Date(processingTime.getTime() + 2).toISOString(),
+    ]);
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(
+      String(statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env })).size)
+    );
+  });
+
+  it('continues remaining chunks after one chunk fails but preserves existing no-HWM-advance failure semantics', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 3,
+      messageBytes: 80,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:45.000Z',
+    });
+    writeFileSync(hwmPath(harness), '0', { mode: 0o600 });
+    const chunkTwoRaw = 'chunk two is not json';
+    const chunkTwoRetryRaw = 'chunk two retry is still not json';
+    const llm = mockLlm([
+      rawExtraction({
+        summary: 'partial chunk one summary',
+        observations: [observation('partial chunk one', 'partial chunk one narrative')],
+      }),
+      { model: TEST_MODEL, text: chunkTwoRaw },
+      { model: TEST_MODEL, text: chunkTwoRetryRaw },
+      rawExtraction({
+        summary: 'partial chunk three summary',
+        observations: [observation('partial chunk three', 'partial chunk three narrative')],
+      }),
+    ]);
+
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
+      deadLettered: 1,
+      llmRetries: 1,
+      observationsWritten: 2,
+    });
+
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      lines[0],
+      lines[1],
+      lines[1],
+      lines[2],
+    ]);
+    expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
+      observations: 2,
+      rollups: 1,
+    });
+    const deadLetter = readOnlyDeadLetter(harness);
+    expect(deadLetter.llm_raw_output).toBe(chunkTwoRetryRaw);
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe('0');
+  });
+
+  it('does not split UTF-8 characters when chunking cuts through a multibyte boundary', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: `utf8 boundary ${'你'.repeat(40)}`,
+      },
+    ]);
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '37';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:55.000Z',
+    });
+    const llm = mockLlm(
+      Array.from({ length: 20 }, (_, index) =>
+        rawExtraction({ summary: `utf8 chunk ${index}`, observations: [] })
+      )
+    );
+
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
+      deadLettered: 0,
+    });
+
+    expect(llm.calls.length).toBeGreaterThan(1);
+    expect(llm.calls.map((call) => call.transcript).join('')).toBe(originalTranscript);
+    for (const call of llm.calls) {
+      expect(call.transcript).not.toContain('\uFFFD');
+      expect(Buffer.byteLength(call.transcript)).toBeLessThanOrEqual(37);
+    }
+  });
+
+  it('falls back to the default max window bytes when CC_CAPTURE_MAX_WINDOW_BYTES is not parseable', async () => {
+    const harness = makeHarness();
+    const defaultMaxWindowBytes = 262_144;
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: 'a'.repeat(defaultMaxWindowBytes + 8192),
+      },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = 'not-a-number';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:58.000Z',
+    });
+    const llm = mockLlm(
+      Array.from({ length: 4 }, (_, index) =>
+        rawExtraction({ summary: `fallback chunk ${index}`, observations: [] })
+      )
+    );
+
+    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
+      deadLettered: 0,
+    });
+
+    expect(llm.calls.length).toBeGreaterThan(1);
+    for (const call of llm.calls) {
+      expect(Buffer.byteLength(call.transcript)).toBeLessThanOrEqual(defaultMaxWindowBytes);
+    }
   });
 
   it('does not advance HWM when the DB transaction fails', async () => {
