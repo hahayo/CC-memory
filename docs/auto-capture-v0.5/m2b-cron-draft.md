@@ -19,7 +19,9 @@ set -euo pipefail
 cd /home/haha/CC_project/CC-memory
 
 # Project DB only. Keep personal DB out of this worker.
-export DATABASE_URL="$(cat ~/.ccm-prod-url)"
+# ⚠️ ~/.ccm-project-url = Coolify project DB（SSH tunnel 127.0.0.1:15432）。
+# ~/.ccm-prod-url 是舊 Zeabur 庫（待退役）勿用 — 見 docs/personal-hub/prod-runbook.md。
+export DATABASE_URL="$(cat ~/.ccm-project-url)"
 export CC_MEMORY_SPOOL_DIR="${CC_MEMORY_SPOOL_DIR:-$HOME/.cache/cc-memory/spool}"
 export CC_CAPTURE_LLM="${CC_CAPTURE_LLM:-claude-cli}"
 export CC_CAPTURE_CLAUDE_MODEL="${CC_CAPTURE_CLAUDE_MODEL:-haiku}"
