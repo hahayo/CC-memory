@@ -26,16 +26,17 @@ import { db } from './db/client.js';
 // alias 避免遮蔽 handleToolCall / buildToolsForMode 的 `config: ScopeConfig` 參數
 // （否則 config.todoistApiToken 取到 ScopeConfig 上不存在的欄位 → Todoist 永遠不啟用）。
 import { config as appConfig } from './config.js';
-import type { Memory, Task } from './db/schema.js';
+import type { Memory, Observation, Task } from './db/schema.js';
 
 import {
   saveMemory,
-  searchMemories,
+  searchMemoryIndexes,
   listMemories,
   getMemory,
   deleteMemory,
   getProjectStats,
 } from './services/memories.js';
+import { timeline, getObservations } from './services/observations.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
 import { setReminder, snoozeReminder, getDueReminders } from './services/reminders.js';
 import * as todoist from './services/todoist.js';
@@ -61,6 +62,7 @@ import {
   ForbiddenError,
 } from './services/errors.js';
 import type { McpError, TaskStatus, TodoistPriority, TodoistTask } from './services/types.js';
+import type { MemoryIndexResult } from './services/types.js';
 
 // ---------------------------------------------------------------------------
 // 輔助：cwd / projectId 解析（所有 tool 用同一組 dispatch）
@@ -278,6 +280,53 @@ function formatMemory(memory: Memory, index?: number): string {
   return result;
 }
 
+function formatIndexDate(d: Date): string {
+  return new Date(d).toISOString();
+}
+
+function formatMemoryIndexResult(result: MemoryIndexResult, index?: number): string {
+  const prefix = index !== undefined ? `${index + 1}. ` : '';
+  const lines = [
+    `${prefix}[${result.kind}/${result.type}] ${result.title}`,
+    `   id: ${result.id}`,
+    `   project: ${result.projectId}`,
+    `   occurred_at: ${formatIndexDate(result.occurredAt)}`,
+  ];
+  if (result.subtitle) lines.push(`   subtitle: ${result.subtitle}`);
+  if (result.sessionId) lines.push(`   session: ${result.sessionId}`);
+  if (result.discoveryTokens !== null) {
+    lines.push(`   discovery_tokens: ${result.discoveryTokens}`);
+  }
+  return lines.join('\n');
+}
+
+function observationIndexJson(observation: Observation): Record<string, unknown> {
+  return {
+    id: observation.id,
+    project_id: observation.projectId,
+    kind: 'observation',
+    type: observation.type,
+    title: observation.title,
+    subtitle: observation.subtitle,
+    session_id: observation.sessionId,
+    rollup_memory_id: observation.rollupMemoryId,
+    discovery_tokens: observation.discoveryTokens,
+    observed_at: observation.observedAt.toISOString(),
+  };
+}
+
+function observationFullJson(observation: Observation): Record<string, unknown> {
+  return {
+    ...observationIndexJson(observation),
+    facts: observation.facts,
+    concepts: observation.concepts,
+    files: observation.files,
+    narrative: observation.narrative,
+    source_hook: observation.sourceHook,
+    metadata: observation.metadata,
+  };
+}
+
 /**
  * 格式化 dueDate 為可讀字串：
  *   - UTC 午夜（date-only 語意，例如 YYYY-MM-DD 被 new Date 存為 00:00Z）→ 只顯示 YYYY-MM-DD
@@ -372,6 +421,42 @@ export const BASE_TOOLS: Tool[] = [
         limit: { type: 'number', description: '結果數量限制（預設 10）' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'cc_memory_timeline',
+    description:
+      '依 observation 或 capture rollup ID 取得同一專案、同一 session 的前後文索引。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
+      properties: {
+        anchor_id: { type: 'string', description: 'observation ID 或 capture rollup memory ID' },
+        depth_before: { type: 'number', description: 'anchor 前方 observation 數量（預設 3）' },
+        depth_after: { type: 'number', description: 'anchor 後方 observation 數量（預設 3）' },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+      },
+      required: ['anchor_id'],
+    },
+  },
+  {
+    name: 'cc_memory_get_observations',
+    description:
+      '批次取得 observation 全文（含 narrative/facts/concepts/files）。project_id 與 project_path 擇一必填。',
+    inputSchema: {
+      type: 'object',
+      anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
+      properties: {
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Observation ID 陣列（一次最多 50 筆）',
+        },
+        project_id: { type: 'string', description: '專案 ID（與 project_path 擇一必填）' },
+        project_path: projectPathProp,
+      },
+      required: ['ids'],
     },
   },
   {
@@ -890,7 +975,7 @@ export async function handleToolCall(
         //   - project-mode → deny 顯式/解析到的保留 namespace；undefined = 全專案
         //     （service 層另排除保留 namespace，見 searchMemories）
         projectId = applyScopePolicy(projectId, { config, surface: 'search' });
-        const envelope = await searchMemories(database, {
+        const envelope = await searchMemoryIndexes(database, {
           query: args.query as string,
           projectId,
           type: args.type as 'session' | 'decision' | undefined,
@@ -911,15 +996,45 @@ export async function handleToolCall(
         if (envelope.results.length === 0) {
           return { content: [{ type: 'text', text: '沒有找到相關記憶' }] };
         }
-        const formatted = envelope.results.map((r, i) => formatMemory(r, i)).join('\n\n');
+        const formatted = envelope.results.map((r, i) => formatMemoryIndexResult(r, i)).join('\n\n');
         return {
           content: [
             {
               type: 'text',
-              text: `找到 ${envelope.results.length} 筆相關記憶 (${envelope.effectiveMode} 模式):\n\n${formatted}`,
+              text:
+                `找到 ${envelope.results.length} 筆相關記憶索引 (${envelope.effectiveMode} 模式):\n\n` +
+                formatted,
             },
           ],
         };
+      }
+
+      case 'cc_memory_timeline': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const result = await timeline(
+          database,
+          args.anchor_id as string,
+          (args.depth_before as number | undefined) ?? 3,
+          (args.depth_after as number | undefined) ?? 3,
+          projectId
+        );
+        return jsonResult({
+          anchor_id: result.anchorId,
+          depth_before: result.depthBefore,
+          depth_after: result.depthAfter,
+          count: result.observations.length,
+          ...(result.truncated ? { truncated: true } : {}),
+          observations: result.observations.map(observationIndexJson),
+        });
+      }
+
+      case 'cc_memory_get_observations': {
+        const { projectId } = resolveCwdAndProjectId(args, config);
+        const rows = await getObservations(database, args.ids as string[], projectId);
+        return jsonResult({
+          count: rows.length,
+          observations: rows.map(observationFullJson),
+        });
       }
 
       case 'cc_memory_list': {

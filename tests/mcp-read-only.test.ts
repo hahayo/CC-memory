@@ -69,6 +69,8 @@ describe('Phase 2b read-only / allowlist enforce', () => {
     const ns = names(tools);
     for (const w of WRITE_TOOLS) expect(ns).not.toContain(w);
     expect(ns).toContain('cc_memory_search');
+    expect(ns).toContain('cc_memory_timeline');
+    expect(ns).toContain('cc_memory_get_observations');
     expect(ns).toContain('cc_task_list');
     expect(ns).toContain('cc_task_stats');
   });

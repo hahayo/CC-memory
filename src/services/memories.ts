@@ -26,12 +26,18 @@ import {
 
 import { projectMemories, type Memory, type NewMemory } from '../db/schema.js';
 import { reservedExclusionCondition } from './scope-policy.js';
+import {
+  keywordObservationIndexCandidates,
+  semanticObservationIndexCandidates,
+  type IndexSearchCandidate,
+} from './observations.js';
 import type {
   DbClient,
   SaveMemoryInput,
   SaveMemoryResult,
   SearchMemoriesInput,
   SearchResultEnvelope,
+  MemoryIndexResult,
   SearchMode,
   RankingMeta,
   SearchQueryContext,
@@ -519,6 +525,321 @@ export async function searchMemories(
     effectiveMode,
     rankingMeta,
     queryContext,
+  };
+}
+
+interface SourceWeights {
+  manual: number;
+  rollup: number;
+  observationDecision: number;
+  observationAuto: number;
+}
+
+interface WeightedIndexCandidate extends IndexSearchCandidate {
+  weightedScore: number;
+}
+
+const DEFAULT_SOURCE_WEIGHTS: SourceWeights = {
+  manual: 1,
+  rollup: 0.85,
+  observationDecision: 0.8,
+  observationAuto: 0.65,
+};
+
+const INDEX_TITLE_MAX_CHARS = 180;
+
+function validateSearchIndexInput(input: SearchMemoriesInput): {
+  requestedMode: SearchMode;
+  limit: number;
+  querySurface: SearchQueryContext['querySurface'];
+} {
+  if (typeof input.query !== 'string' || input.query.trim().length === 0) {
+    throw new InvalidArgumentError('search query 必須為非空字串', {
+      query: typeof input.query,
+    });
+  }
+  if (input.mode !== undefined && !VALID_SEARCH_MODES.includes(input.mode)) {
+    throw new InvalidArgumentError('search mode 必須為 keyword | semantic | hybrid', {
+      mode: input.mode,
+    });
+  }
+  validateOptionalMemoryType(input.type);
+  const limit = input.limit ?? 10;
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new InvalidArgumentError('searchMemoryIndexes: limit 必須為非負整數', { limit });
+  }
+  return {
+    requestedMode: input.mode ?? 'hybrid',
+    limit,
+    querySurface: input.querySurface ?? 'mcp',
+  };
+}
+
+function parseWeightEnv(name: string, fallback: number): number {
+  const parsed = Number.parseFloat(process.env[name] ?? '');
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function readSourceWeights(): SourceWeights {
+  return {
+    manual: parseWeightEnv('CC_MEMORY_WEIGHT_MANUAL', DEFAULT_SOURCE_WEIGHTS.manual),
+    rollup: parseWeightEnv('CC_MEMORY_WEIGHT_ROLLUP', DEFAULT_SOURCE_WEIGHTS.rollup),
+    observationDecision: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_OBSERVATION_DECISION',
+      DEFAULT_SOURCE_WEIGHTS.observationDecision
+    ),
+    observationAuto: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_OBSERVATION_AUTO',
+      DEFAULT_SOURCE_WEIGHTS.observationAuto
+    ),
+  };
+}
+
+function shouldIncludeObservations(): boolean {
+  return (process.env.CC_MEMORY_INCLUDE_OBSERVATIONS ?? 'on').trim().toLowerCase() !== 'off';
+}
+
+function metadataCapture(memory: Memory): Record<string, unknown> | null {
+  const metadata = memory.metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const capture = (metadata as { capture?: unknown }).capture;
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return null;
+  return capture as Record<string, unknown>;
+}
+
+function captureString(capture: Record<string, unknown> | null, key: string): string | null {
+  const value = capture?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function captureNumber(capture: Record<string, unknown> | null, key: string): number | null {
+  const value = capture?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function truncateIndexTitle(summary: string): string {
+  if (summary.length <= INDEX_TITLE_MAX_CHARS) return summary;
+  return `${summary.slice(0, INDEX_TITLE_MAX_CHARS - 3)}...`;
+}
+
+function memoryOccurredAt(memory: Memory): Date {
+  if (memory.createdAt instanceof Date) return memory.createdAt;
+  return new Date(memory.createdAt ?? 0);
+}
+
+function memoryIndexResult(memory: Memory): MemoryIndexResult {
+  const capture = metadataCapture(memory);
+  const kind = capture ? 'rollup' : 'manual';
+  return {
+    id: memory.id,
+    projectId: memory.projectId,
+    kind,
+    type: memory.type,
+    title: truncateIndexTitle(memory.summary),
+    subtitle:
+      Array.isArray(memory.keywords) && memory.keywords.length > 0
+        ? memory.keywords.slice(0, 6).join(', ')
+        : null,
+    sessionId: kind === 'rollup' ? captureString(capture, 'session_id') : null,
+    discoveryTokens: kind === 'rollup' ? captureNumber(capture, 'discovery_tokens') : null,
+    occurredAt: memoryOccurredAt(memory),
+  };
+}
+
+function memorySourceOrder(memory: Memory): number {
+  return metadataCapture(memory) ? 1 : 0;
+}
+
+async function keywordMemoryIndexCandidates(
+  db: DbClient,
+  input: SearchMemoriesInput,
+  limit: number,
+  excludeReserved: boolean
+): Promise<IndexSearchCandidate[]> {
+  if (limit === 0) return [];
+  const rows = await keywordSearchRows(
+    db,
+    input.query,
+    input.projectId,
+    input.type,
+    limit,
+    excludeReserved
+  );
+  return rows.map((row) => ({
+    result: memoryIndexResult(row),
+    baseScore: 1,
+    semanticScore: null,
+    sourceOrder: memorySourceOrder(row),
+  }));
+}
+
+async function semanticMemoryIndexCandidates(
+  db: DbClient,
+  input: SearchMemoriesInput,
+  queryEmbedding: number[],
+  limit: number,
+  excludeReserved: boolean
+): Promise<IndexSearchCandidate[]> {
+  if (limit === 0) return [];
+  const items = await semanticSearchScoredWithEmbedding(
+    db,
+    queryEmbedding,
+    input.projectId,
+    input.type,
+    limit,
+    excludeReserved
+  );
+  return items.map((item) => ({
+    result: memoryIndexResult(item.row),
+    baseScore: item.score,
+    semanticScore: item.score,
+    sourceOrder: memorySourceOrder(item.row),
+  }));
+}
+
+function combineIndexHybridCandidates(
+  keywordCandidates: IndexSearchCandidate[],
+  semanticCandidates: IndexSearchCandidate[]
+): IndexSearchCandidate[] {
+  const k = 60;
+  const combined = new Map<string, IndexSearchCandidate>();
+
+  keywordCandidates.forEach((candidate, rank) => {
+    combined.set(candidate.result.id, {
+      ...candidate,
+      baseScore: 1 / (k + rank + 1),
+      semanticScore: null,
+    });
+  });
+
+  semanticCandidates.forEach((candidate, rank) => {
+    const rrf = 1 / (k + rank + 1);
+    const existing = combined.get(candidate.result.id);
+    if (existing) {
+      existing.baseScore += rrf;
+    } else {
+      combined.set(candidate.result.id, {
+        ...candidate,
+        baseScore: rrf,
+        semanticScore: null,
+      });
+    }
+  });
+
+  return Array.from(combined.values());
+}
+
+function sourceWeight(candidate: IndexSearchCandidate, weights: SourceWeights): number {
+  const result = candidate.result;
+  if (result.kind === 'manual') return weights.manual;
+  if (result.kind === 'rollup') return weights.rollup;
+  return result.type === 'decision' ? weights.observationDecision : weights.observationAuto;
+}
+
+function sortWeightedIndexCandidates(
+  candidates: IndexSearchCandidate[],
+  weights: SourceWeights
+): WeightedIndexCandidate[] {
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      weightedScore: candidate.baseScore * sourceWeight(candidate, weights),
+    }))
+    .sort((a, b) => {
+      if (b.weightedScore !== a.weightedScore) return b.weightedScore - a.weightedScore;
+      if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
+      if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
+      return b.result.occurredAt.getTime() - a.result.occurredAt.getTime();
+    });
+}
+
+export async function searchMemoryIndexes(
+  db: DbClient,
+  input: SearchMemoriesInput
+): Promise<SearchResultEnvelope<MemoryIndexResult>> {
+  const { requestedMode, limit, querySurface } = validateSearchIndexInput(input);
+  const needsEmbedding = requestedMode !== 'keyword';
+  let queryEmbedding: number[] | null = null;
+  if (needsEmbedding && isEmbeddingEnabled()) {
+    queryEmbedding = await generateQueryEmbedding(input.query);
+  }
+  const effectiveMode: SearchMode =
+    needsEmbedding && queryEmbedding === null ? 'keyword' : requestedMode;
+
+  const isScoped = typeof input.projectId === 'string' && input.projectId.trim().length > 0;
+  const excludeReserved = !isScoped && !input.includeReserved;
+  const includeObservations = shouldIncludeObservations();
+
+  let candidates: IndexSearchCandidate[];
+  if (effectiveMode === 'keyword') {
+    const [memoryCandidates, observationCandidates] = await Promise.all([
+      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
+      includeObservations
+        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        : Promise.resolve([]),
+    ]);
+    candidates = [...memoryCandidates, ...observationCandidates];
+  } else if (effectiveMode === 'semantic') {
+    const [memoryCandidates, observationCandidates] = await Promise.all([
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      includeObservations
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        : Promise.resolve([]),
+    ]);
+    candidates = [...memoryCandidates, ...observationCandidates];
+  } else {
+    const [
+      keywordMemoryCandidates,
+      semanticMemoryCandidates,
+      keywordObservationCandidates,
+      semanticObservationCandidates,
+    ] = await Promise.all([
+      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      includeObservations
+        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        : Promise.resolve([]),
+      includeObservations
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        : Promise.resolve([]),
+    ]);
+    candidates = combineIndexHybridCandidates(
+      [...keywordMemoryCandidates, ...keywordObservationCandidates],
+      [...semanticMemoryCandidates, ...semanticObservationCandidates]
+    );
+  }
+
+  const weights = readSourceWeights();
+  const sorted = sortWeightedIndexCandidates(candidates, weights).slice(0, limit);
+  const results = sorted.map((candidate) => candidate.result);
+  const scores =
+    effectiveMode === 'semantic'
+      ? sorted.map((candidate) => candidate.semanticScore ?? candidate.baseScore)
+      : null;
+  const rankingMeta: RankingMeta = {
+    rankPositions: results.map((_, index) => index + 1),
+    scores,
+  };
+
+  if (scores !== null && scores.length !== results.length) {
+    throw new Error(
+      `searchMemoryIndexes envelope invariant broken: scores.length=${scores.length} !== results.length=${results.length}`
+    );
+  }
+
+  return {
+    results,
+    effectiveMode,
+    rankingMeta,
+    queryContext: {
+      query: input.query,
+      requestedMode,
+      effectiveMode,
+      limit,
+      projectId: input.projectId ?? null,
+      querySurface,
+      filterType: input.type ?? null,
+    },
   };
 }
 

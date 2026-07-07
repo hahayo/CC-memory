@@ -63,16 +63,16 @@ describe('resolveTodoistEnabled (real derivation — 雙條件：token ∧ force
 });
 
 describe('ListTools gating + 數量（Verification #1）', () => {
-  it('project-mode / no todoist：13 工具，無 cc_todoist_*', () => {
+  it('project-mode / no todoist：15 工具，無 cc_todoist_*', () => {
     const t = buildToolsForMode(PROJECT_MODE, OPEN, { todoistEnabled: false });
     expect(names(t).filter((n) => n.startsWith('cc_todoist_'))).toEqual([]);
-    expect(t.length).toBe(13);
+    expect(t.length).toBe(15);
   });
 
-  it('forced + todoist enabled：18 工具含 5 個 cc_todoist_*', () => {
+  it('forced + todoist enabled：20 工具含 5 個 cc_todoist_*', () => {
     const t = buildToolsForMode(FORCED, OPEN, { todoistEnabled: true });
     for (const n of TODOIST_NAMES) expect(names(t)).toContain(n);
-    expect(t.length).toBe(18);
+    expect(t.length).toBe(20);
   });
 
   it('default derivation (無 opts)：forced + 測試環境無 token → 0 個 todoist 工具', () => {
@@ -80,7 +80,7 @@ describe('ListTools gating + 數量（Verification #1）', () => {
     // （其餘 count 測試都注入 todoistEnabled，會繞過此 ?? 路徑）。
     const ns = names(buildToolsForMode(FORCED, OPEN));
     expect(ns.filter((n) => n.startsWith('cc_todoist_'))).toEqual([]);
-    expect(ns.length).toBe(13);
+    expect(ns.length).toBe(15);
   });
 
   it('forced + todoist + read-only：砍 add/complete，保留 projects/list/completed', () => {
