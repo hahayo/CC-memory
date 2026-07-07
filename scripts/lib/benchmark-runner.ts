@@ -365,11 +365,24 @@ export function renderBenchmarkReport(input: BenchmarkReportInput): string {
       summaryRows
     ),
     '',
-    '## 三硬指標（本輪不計算）',
+    '## 標註指引',
     '',
-    '- 10 組中幾組 Top-5 交集 >= 3',
-    '- 平均 first-relevant rank 對比',
-    '- 錯抓率',
+    '- **Top-5 交集**：兩邊 Top-5 中指向同一工作事件／主題的結果算交集 1（跨系統 id 不同，以內容對應為準）',
+    '- **first-relevant rank**：該側 Top-5 中第一個命中 expected_intent（真實 query 則以 query 語意）的 rank；全未命中記 `-`',
+    '- **錯抓**：該側 Top-5 中與 query 明顯無關的結果數；錯抓率 = 全部組的錯抓數合計 ÷ 全部組的結果數合計',
+    '',
+    '## 三硬指標匯總（人工標註後填寫）',
+    '',
+    table(
+      ['指標', '門檻', '值【人工】', '判定【人工】'],
+      [
+        ['Top-5 交集 ≥3 的組數 / 總組數', '≥7/10', '', ''],
+        ['平均 first-relevant rank（CC vs claude-mem）', 'CC ≤ claude-mem', '', ''],
+        ['錯抓率', '<10%', '', ''],
+      ]
+    ),
+    '',
+    '本輪只建 harness；正式評測與 Go/No-Go 判定需併用 ≥14 天且 ≥30 筆 auto rollup/observation（~2026-07-21 後）',
     '',
   ].join('\n');
 }

@@ -192,8 +192,19 @@ describe('renderBenchmarkReport', () => {
     expect(report).toContain('不複製其原始碼／prompt／schema');
     expect(report).toContain('| query | Top-5 交集數【人工】 | CC first-relevant rank【人工】 | claude-mem first-relevant rank【人工】 | 錯抓數【人工】 |');
     expect(report).toContain('| drizzle array 綁定 record 錯誤 |  |  |  |  |');
-    expect(report).toContain('10 組中幾組 Top-5 交集 >= 3');
-    expect(report).toContain('錯抓率');
+    expect(report).toContain('## 三硬指標匯總（人工標註後填寫）');
+    expect(report).toContain('| 指標 | 門檻 | 值【人工】 | 判定【人工】 |');
+    expect(report).toContain('| Top-5 交集 ≥3 的組數 / 總組數 | ≥7/10 |  |  |');
+    expect(report).toContain('| 平均 first-relevant rank（CC vs claude-mem） | CC ≤ claude-mem |  |  |');
+    expect(report).toContain('| 錯抓率 | <10% |  |  |');
+    expect(report).toContain('正式評測與 Go/No-Go 判定需併用 ≥14 天且 ≥30 筆 auto rollup/observation（~2026-07-21 後）');
+    expect(report).toContain('## 標註指引');
+    expect(report).toContain('**Top-5 交集**');
+    expect(report).toContain('同一工作事件／主題');
+    expect(report).toContain('**first-relevant rank**');
+    expect(report).toContain('expected_intent');
+    expect(report).toContain('**錯抓**');
+    expect(report).toContain('錯抓率 =');
   });
 });
 
