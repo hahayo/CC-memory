@@ -224,7 +224,8 @@
 - [ ] 新增 `tests/services/discovery-tokens.test.ts`
 - [ ] RED：CJK（中日韓文字）字元約 1 token
 - [ ] RED：ASCII word（英文字）約 1.3 token
-- [ ] RED：punctuation/line break（標點與換行）約 0.3 token
+- [ ] RED：ASCII punctuation/line break（標點與換行）約 0.3 token；非 ASCII 符號（全形標點/箭頭）約 1.0 token（M4 gate 校準）
+- [ ] RED：ASCII word 以 camelCase/snake/kebab 段為單位（M4 gate 校準：identifier 密集文本原低估 >30%）
 - [ ] RED：metadata buffer（中繼資料緩衝）固定加 12
 - [ ] RED：Recent Activity builder 不現算 rollup tokens，只讀 `metadata.capture.discovery_tokens`
 
