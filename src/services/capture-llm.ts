@@ -576,7 +576,9 @@ export function createCaptureLlmAdapter(
   }
 
   if (provider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER) {
-    return new UnsupportedCaptureLlmAdapter(provider, provider);
+    // unsupported provider 無 model 概念——model 欄位標 unknown，避免 dead-letter
+    // metadata 把 provider 名誤報成 model 名
+    return new UnsupportedCaptureLlmAdapter('unknown', provider);
   }
 
   const apiKey = env.GEMINI_API_KEY?.trim();
