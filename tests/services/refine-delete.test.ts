@@ -172,7 +172,7 @@ describe('refine_delete service (integration, real PG)', () => {
     expectIso8601(rows[0].deleted_at);
   });
 
-  it('archives an active rollup memory and merges audit metadata without overwriting existing keys', async () => {
+  it('archives an active rollup memory and keeps sibling top-level metadata keys', async () => {
     const projectId = `${TEST_PREFIX}-memory-delete`;
     const sessionId = `session-${randomUUID()}`;
     const id = await seedRollupMemory(sql, {
@@ -211,6 +211,47 @@ describe('refine_delete service (integration, real PG)', () => {
     expect(rows[0].status).toBe('archived');
     expectIso8601(rows[0].deleted_at);
     expect(rows[0].capture_session_id).toBe(sessionId);
+  });
+
+  it('writes audit metadata even when legacy memory metadata is SQL NULL (COALESCE guard)', async () => {
+    // project_memories.metadata 無 NOT NULL 約束：NULL || jsonb = NULL 會吞掉 audit marker
+    const projectId = `${TEST_PREFIX}-null-metadata`;
+    const id = await seedRollupMemory(sql, {
+      projectId,
+      sessionId: `session-${randomUUID()}`,
+    });
+    await sql`UPDATE project_memories SET metadata = NULL WHERE id = ${id}`;
+
+    const result = await refineDelete(db, { projectId, target: 'memory', id });
+
+    expectIso8601(result.archivedAt);
+    const rows = await sql<{ status: string; deleted_at: string | null }[]>`
+      SELECT status, metadata #>> '{refine,deleted,at}' AS deleted_at
+      FROM project_memories
+      WHERE id = ${id}
+    `;
+    expect(rows[0].status).toBe('archived');
+    expectIso8601(rows[0].deleted_at);
+  });
+
+  it('rejects an invalid target before touching the database', async () => {
+    await expect(
+      refineDelete(db, {
+        projectId: `${TEST_PREFIX}-bad-target`,
+        target: 'task' as never,
+        id: randomUUID(),
+      })
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+  });
+
+  it('rejects an empty-string id before touching the database', async () => {
+    await expect(
+      refineDelete(db, {
+        projectId: `${TEST_PREFIX}-empty-id`,
+        target: 'observation',
+        id: '',
+      })
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
   });
 
   it('does not leak existence across project boundaries', async () => {

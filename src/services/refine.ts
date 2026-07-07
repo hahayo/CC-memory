@@ -65,6 +65,8 @@ export async function refineDelete(
   const target = validateTarget(input.target);
   const id = validateUuid(input.id, 'id');
   const archivedAt = new Date().toISOString();
+  // top-level 淺 merge：整包替換 refine 鍵。M5 只有 delete 寫 metadata.refine 且
+  // archived row 無法二次 delete，無雙寫；未來 promote/merge 若也寫 refine.* 需改深合併。
   const auditPatch = JSON.stringify({ refine: { deleted: { at: archivedAt } } });
 
   const rows =
@@ -87,7 +89,9 @@ export async function refineDelete(
           .update(projectMemories)
           .set({
             status: 'archived',
-            metadata: sql`${projectMemories.metadata} || ${auditPatch}::jsonb`,
+            // project_memories.metadata 無 NOT NULL 約束，NULL || jsonb = NULL 會
+            // 靜默吞掉 audit marker——COALESCE 保證 legacy NULL row 也留審計紀錄
+            metadata: sql`COALESCE(${projectMemories.metadata}, '{}'::jsonb) || ${auditPatch}::jsonb`,
           })
           .where(
             and(
