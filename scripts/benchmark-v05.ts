@@ -15,6 +15,7 @@ import {
   assertNoPersonalProjectRefs,
   databaseHostPortLabel,
   fetchRecentRealQueries,
+  isClaudeMemFormatDriftError,
   parseClaudeMemSearchText,
   renderBenchmarkReport,
   type BenchmarkReportQuery,
@@ -26,7 +27,9 @@ import type { MemoryIndexResult } from '../src/services/types.js';
 
 const DEFAULT_CONN = 'postgres://test:test@localhost:5433/cc_memory_test';
 const CLAUDE_MEM_BASE_URL = 'http://127.0.0.1:37777';
-const SEARCH_FETCH_LIMIT = 20;
+// 50：搭配 type='session' 縮到 session 級語料後的餘裕——manual session 記憶仍會佔位，
+// 撈太少會讓第 5 個 rollup 進不了 envelope（對審 P2：兩側 Top-5 對等性）
+const SEARCH_FETCH_LIMIT = 50;
 const ROLLUP_LIMIT = 5;
 const SUPPORT_LIMIT = 3;
 
@@ -151,6 +154,8 @@ async function searchClaudeMem(input: {
       .map((row, index) => ({ rank: index + 1, id: row.id, title: row.title }));
     return { rows };
   } catch (err) {
+    // 格式漂移 = parser 與 claude-mem 輸出不再對齊，report 會系統性缺筆——fail 整支
+    if (isClaudeMemFormatDriftError(err)) throw err;
     return { unavailableReason: messageOf(err) };
   }
 }
@@ -174,10 +179,13 @@ async function runCcMemoryQuery(input: {
     projectId: input.projectId,
   });
 
+  // type='session'：CC 側限定 session 級語料（觀察索引整組排除），與 claude-mem 的
+  // type=sessions 對等——混合語料排名後過濾 rollup 會讓 rank 語義不對等且被 observation 擠位
   const envelope = await input.searchMemoryIndexes(input.db, {
     query: input.query,
     ...(input.projectId ? { projectId: input.projectId } : {}),
     limit: SEARCH_FETCH_LIMIT,
+    type: 'session',
     querySurface: 'mcp',
   });
 

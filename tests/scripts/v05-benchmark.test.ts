@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { parseBenchmarkFixtures } from '../../scripts/lib/benchmark-fixtures.js';
 import {
   fetchRecentRealQueries,
+  isClaudeMemFormatDriftError,
   parseClaudeMemSearchText,
   renderBenchmarkReport,
 } from '../../scripts/lib/benchmark-runner.js';
@@ -100,6 +101,19 @@ describe('parseBenchmarkFixtures', () => {
       VALIDATION_ERROR
     );
   });
+
+  it('preserves backslash sequences and only unescapes escaped pipes', () => {
+    const markdown = [
+      '| query | expected_intent | project_id | notes |',
+      '|---|---|---|---|',
+      '| C:\\tmp\\run.ps1 錯誤 | regex \\btoken\\b 修法 | CC-memory | 含跳脫管線 a\\|b |',
+    ].join('\n');
+
+    const [fixture] = parseBenchmarkFixtures(markdown);
+    expect(fixture.query).toBe('C:\\tmp\\run.ps1 錯誤');
+    expect(fixture.expectedIntent).toBe('regex \\btoken\\b 修法');
+    expect(fixture.notes).toBe('含跳脫管線 a|b');
+  });
 });
 
 describe('parseClaudeMemSearchText', () => {
@@ -131,6 +145,26 @@ describe('parseClaudeMemSearchText', () => {
     ].join('\n');
 
     expect(() => parseClaudeMemSearchText(text)).toThrow(/claude-mem search format drift/i);
+  });
+
+  it('throws on partial parse drift (expected sessions count exceeds parsed rows)', () => {
+    const text = [
+      'Found 2 result(s) matching "q" (0 obs, 2 sessions, 0 prompts)',
+      '',
+      '| ID | Time | T | Title | Read |',
+      '|---|---|---|---|---|',
+      '| #S1 | 1:00 AM | X | Only one row parsed | - |',
+    ].join('\n');
+
+    expect(() => parseClaudeMemSearchText(text)).toThrow(/format drift.*expected 2.*parsed 1/i);
+  });
+
+  it('classifies format drift errors for the CLI rethrow path', () => {
+    expect(
+      isClaudeMemFormatDriftError(new Error('claude-mem search format drift: expected 2'))
+    ).toBe(true);
+    expect(isClaudeMemFormatDriftError(new Error('HTTP 500'))).toBe(false);
+    expect(isClaudeMemFormatDriftError('not-an-error')).toBe(false);
   });
 
   it('keeps a title containing pipe characters when the row has extra columns', () => {

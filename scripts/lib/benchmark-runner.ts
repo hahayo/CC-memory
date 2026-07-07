@@ -84,7 +84,8 @@ function splitMarkdownRow(line: string): string[] {
 
   for (const char of body) {
     if (escaping) {
-      current += char;
+      // 只把 `\|` 視為跳脫的管線；其他 backslash 序列原樣保留（如 C:\tmp、\b）
+      current += char === '|' ? '|' : `\\${char}`;
       escaping = false;
       continue;
     }
@@ -126,6 +127,13 @@ function mergeExtraCells(
 export function parseClaudeMemSearchText(text: string): ClaudeMemSearchRow[] {
   const foundMatch = text.trimStart().match(/^Found\s+(\d+)\b/i);
   const foundCount = foundMatch ? Number(foundMatch[1]) : null;
+  // 回應含 "(x obs, y sessions, z prompts)" 明細時以 sessions 數為預期列數，
+  // 否則退回 Found N（type=sessions 下兩者一致）。嚴格匹配明細括號格式，
+  // 避免 query 文字本身含「N sessions」造成誤判
+  const sessionsMatch = text.match(
+    /\(\s*\d+\s+obs,\s*(\d+)\s+sessions?,\s*\d+\s+prompts?\s*\)/i
+  );
+  const expectedRows = sessionsMatch ? Number(sessionsMatch[1]) : foundCount;
   const rows: ClaudeMemSearchRow[] = [];
   let expectedColumns = 4;
   let titleIndex = 2;
@@ -153,12 +161,18 @@ export function parseClaudeMemSearchText(text: string): ClaudeMemSearchRow[] {
     rows.push({ id: idMatch[0], title });
   }
 
-  if (foundCount !== null && foundCount > 0 && rows.length === 0) {
+  // 部分解析（如 5 列只解出 3）同樣是格式漂移——靜默缺筆會讓三硬指標失真
+  if (expectedRows !== null && rows.length < expectedRows) {
     throw new Error(
-      `claude-mem search format drift: Found ${foundCount} rows but parsed 0 session rows`
+      `claude-mem search format drift: expected ${expectedRows} session rows but parsed ${rows.length}`
     );
   }
   return rows;
+}
+
+// 格式漂移 = harness 自身壞掉，呼叫端必須 fail 整支，不得吞成單組 query 的 unavailable
+export function isClaudeMemFormatDriftError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('claude-mem search format drift');
 }
 
 export function assertNoPersonalProjectRefs(input: {

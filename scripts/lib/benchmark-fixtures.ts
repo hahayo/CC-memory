@@ -27,7 +27,8 @@ function splitRowCells(line: string): string[] {
 
   for (const char of body) {
     if (escaping) {
-      current += char;
+      // 只把 `\|` 視為跳脫的管線；其他 backslash 序列原樣保留（如 C:\tmp、\b）
+      current += char === '|' ? '|' : `\\${char}`;
       escaping = false;
       continue;
     }
