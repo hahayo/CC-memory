@@ -32,6 +32,7 @@ import type {
   SaveMemoryResult,
   SearchMemoriesInput,
   SearchResultEnvelope,
+  MemoryIndexResult,
   SearchMode,
   RankingMeta,
   SearchQueryContext,
@@ -520,6 +521,13 @@ export async function searchMemories(
     rankingMeta,
     queryContext,
   };
+}
+
+export async function searchMemoryIndexes(
+  _db: DbClient,
+  _input: SearchMemoriesInput
+): Promise<SearchResultEnvelope<MemoryIndexResult>> {
+  throw new Error('searchMemoryIndexes: not implemented (M3 3b)');
 }
 
 // ---------------------------------------------------------------------------

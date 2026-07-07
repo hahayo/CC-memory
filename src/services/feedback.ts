@@ -24,7 +24,7 @@ import type { DbClient, SearchResultEnvelope } from './types.js';
  */
 export async function recordSearchQuery(
   db: DbClient,
-  envelope: SearchResultEnvelope
+  envelope: SearchResultEnvelope<{ id: string; projectId: string }>
 ): Promise<void> {
   const { results, effectiveMode, rankingMeta, queryContext } = envelope;
   const n = results.length;

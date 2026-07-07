@@ -30,15 +30,226 @@ import * as embedding from '../../src/utils/embedding.js';
 import {
   saveMemory,
   searchMemories,
+  searchMemoryIndexes,
   listMemories,
   getMemory,
   deleteMemory,
   getProjectStats,
   deleteByIdempotencyKey,
 } from '../../src/services/memories.js';
+import { recordSearchQuery } from '../../src/services/feedback.js';
 import { IdempotencyConflictError, InvalidArgumentError } from '../../src/services/errors.js';
+import type { MemoryIndexResult, SearchResultEnvelope } from '../../src/services/types.js';
 
 const TRACK_M_PREFIX = `track-m-${randomUUID().slice(0, 8)}`;
+const V05_SEARCH_PREFIX = `v05-search-${randomUUID().slice(0, 8)}`;
+
+const SEARCH_ENV_KEYS = [
+  'CC_MEMORY_INCLUDE_OBSERVATIONS',
+  'CC_MEMORY_WEIGHT_MANUAL',
+  'CC_MEMORY_WEIGHT_ROLLUP',
+  'CC_MEMORY_WEIGHT_OBSERVATION_DECISION',
+  'CC_MEMORY_WEIGHT_OBSERVATION_AUTO',
+] as const;
+
+type SearchEnvSnapshot = Record<(typeof SEARCH_ENV_KEYS)[number], string | undefined>;
+
+function snapshotSearchEnv(): SearchEnvSnapshot {
+  return Object.fromEntries(
+    SEARCH_ENV_KEYS.map((key) => [key, process.env[key]])
+  ) as SearchEnvSnapshot;
+}
+
+function restoreSearchEnv(snapshot: SearchEnvSnapshot): void {
+  for (const key of SEARCH_ENV_KEYS) {
+    const value = snapshot[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function makeMemoryIndexResult(
+  projectId: string,
+  overrides: Partial<MemoryIndexResult> = {}
+): MemoryIndexResult {
+  return {
+    id: randomUUID(),
+    projectId,
+    kind: 'manual',
+    type: 'session',
+    title: 'Manual search result',
+    subtitle: null,
+    sessionId: null,
+    discoveryTokens: null,
+    occurredAt: new Date('2026-07-07T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function makeMemoryIndexEnvelope(projectId: string): SearchResultEnvelope<MemoryIndexResult> {
+  return {
+    results: [
+      makeMemoryIndexResult(projectId, {
+        kind: 'manual',
+        title: 'Manual result',
+      }),
+      makeMemoryIndexResult(projectId, {
+        kind: 'observation',
+        type: 'decision',
+        title: 'Observation result',
+        sessionId: 'session-feedback',
+        discoveryTokens: 12,
+        occurredAt: new Date('2026-07-07T00:01:00.000Z'),
+      }),
+    ],
+    effectiveMode: 'semantic',
+    rankingMeta: {
+      rankPositions: [1, 2],
+      scores: [0.91, 0.82],
+    },
+    queryContext: {
+      query: 'v0.5 feedback envelope',
+      requestedMode: 'semantic',
+      effectiveMode: 'semantic',
+      limit: 2,
+      projectId,
+      querySurface: 'mcp',
+      filterType: null,
+    },
+  };
+}
+
+function resultOrderLabels(results: MemoryIndexResult[]): string[] {
+  return results.map((result) =>
+    result.kind === 'observation' ? `observation:${result.type}` : result.kind
+  );
+}
+
+async function seedObservationIndex(
+  sql: Sql,
+  input: {
+    projectId: string;
+    sessionId: string;
+    rollupMemoryId?: string;
+    type: 'decision' | 'bugfix' | 'feature' | 'refactor' | 'discovery' | 'change';
+    keyword: string;
+    title: string;
+    observedAt: Date;
+  }
+): Promise<string> {
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO observations (
+      project_id,
+      session_id,
+      rollup_memory_id,
+      type,
+      title,
+      subtitle,
+      facts,
+      concepts,
+      files,
+      narrative,
+      discovery_tokens,
+      source_hook,
+      content_hash,
+      writer_host,
+      metadata,
+      observed_at
+    )
+    VALUES (
+      ${input.projectId},
+      ${input.sessionId},
+      ${input.rollupMemoryId ?? null},
+      ${input.type},
+      ${input.title},
+      ${`${input.type} observation`},
+      ${[input.keyword, input.title]}::text[],
+      ${[input.keyword, input.type]}::text[],
+      ${['tests/services/memories.test.ts']}::text[],
+      ${`${input.keyword} ${input.title} narrative`},
+      9,
+      'test-search-contract',
+      ${`v05-search-${randomUUID()}`},
+      'vitest',
+      ${JSON.stringify({ test: 'v05-search-contract' })}::jsonb,
+      ${input.observedAt.toISOString()}::timestamptz
+    )
+    RETURNING id
+  `;
+  return rows[0].id;
+}
+
+async function seedMixedSearchCorpus(
+  db: any,
+  sql: Sql,
+  input: { projectId: string; keyword: string }
+): Promise<{
+  manualId: string;
+  rollupId: string;
+  decisionObservationId: string;
+  featureObservationId: string;
+}> {
+  const sessionId = `session-${randomUUID()}`;
+  const manual = await saveMemory(db, {
+    projectId: input.projectId,
+    type: 'session',
+    summary: `${input.keyword} manual memory`,
+    keywords: [input.keyword],
+    writerHost: 'v05-search-test',
+  });
+  const rollup = await saveMemory(db, {
+    projectId: input.projectId,
+    type: 'session',
+    summary: `${input.keyword} canonical rollup`,
+    keywords: [input.keyword],
+    metadata: {
+      capture: {
+        version: '0.5',
+        session_id: sessionId,
+        observation_ids: [],
+        model: 'test',
+        spool_offsets: [],
+        summarize_count: 1,
+        discovery_tokens: 18,
+      },
+    },
+    idempotencyKey: `capture:v05:${input.projectId}:${sessionId}`,
+    writerHost: 'v05-search-test',
+  });
+  const decisionObservationId = await seedObservationIndex(sql, {
+    projectId: input.projectId,
+    sessionId,
+    rollupMemoryId: rollup.id,
+    type: 'decision',
+    keyword: input.keyword,
+    title: `${input.keyword} decision observation`,
+    observedAt: new Date('2026-07-07T00:02:00.000Z'),
+  });
+  const featureObservationId = await seedObservationIndex(sql, {
+    projectId: input.projectId,
+    sessionId,
+    rollupMemoryId: rollup.id,
+    type: 'feature',
+    keyword: input.keyword,
+    title: `${input.keyword} feature observation`,
+    observedAt: new Date('2026-07-07T00:03:00.000Z'),
+  });
+  return {
+    manualId: manual.id,
+    rollupId: rollup.id,
+    decisionObservationId,
+    featureObservationId,
+  };
+}
+
+async function cleanupV05SearchRows(sql: Sql): Promise<void> {
+  await sql`DELETE FROM search_feedback WHERE query_project_id LIKE ${V05_SEARCH_PREFIX + '%'}`;
+  await sql`DELETE FROM observations WHERE project_id LIKE ${V05_SEARCH_PREFIX + '%'}`;
+  await sql`DELETE FROM project_memories WHERE project_id LIKE ${V05_SEARCH_PREFIX + '%'}`;
+}
 
 // ---------------------------------------------------------------------------
 // Integration — 連真 PG
@@ -538,6 +749,209 @@ describe('services/memories.ts integration (real PG)', () => {
       expect(stats.sessionCount).toBe(2);
       expect(stats.decisionCount).toBe(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchMemoryIndexes v0.5 search contract — integration（真 PG）
+// ---------------------------------------------------------------------------
+
+describe('searchMemoryIndexes v0.5 search contract (integration, real PG)', () => {
+  let sql: Sql;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let db: any;
+  let envSnapshot: SearchEnvSnapshot | null = null;
+
+  beforeAll(async () => {
+    sql = await connectTestDb();
+    db = drizzle(
+      postgres(
+        process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test',
+        { max: 1 }
+      )
+    );
+  });
+
+  beforeEach(async () => {
+    envSnapshot = snapshotSearchEnv();
+    for (const key of SEARCH_ENV_KEYS) {
+      delete process.env[key];
+    }
+    vi.clearAllMocks();
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(false);
+    vi.mocked(embedding.generateEmbedding).mockResolvedValue(null);
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(null);
+    await cleanupV05SearchRows(sql);
+  });
+
+  afterEach(async () => {
+    await cleanupV05SearchRows(sql);
+    if (envSnapshot) restoreSearchEnv(envSnapshot);
+    envSnapshot = null;
+  });
+
+  afterAll(async () => {
+    if (sql) await sql.end();
+  });
+
+  it('returns 1-based rankPositions with one entry per index result', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-rank`;
+    const keyword = `rank-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+
+    expect(envelope.rankingMeta.rankPositions).toHaveLength(envelope.results.length);
+    expect(envelope.rankingMeta.rankPositions).toEqual(
+      envelope.results.map((_, index) => index + 1)
+    );
+  });
+
+  it('keeps semantic scores aligned with index results when scores are present', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-scores`;
+    const keyword = `scores-${randomUUID()}`;
+    const vector = new Array(1536).fill(0.2);
+    vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+    vi.mocked(embedding.generateEmbedding).mockResolvedValue(vector);
+    vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(vector);
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'semantic',
+      limit: 10,
+    });
+
+    expect(envelope.effectiveMode).toBe('semantic');
+    expect(envelope.rankingMeta.scores).not.toBeNull();
+    expect(envelope.rankingMeta.scores).toHaveLength(envelope.results.length);
+  });
+
+  it('recordSearchQuery accepts a v0.5 MemoryIndexResult envelope and writes existing feedback columns', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-feedback`;
+    const envelope = makeMemoryIndexEnvelope(projectId);
+
+    await recordSearchQuery(db, envelope);
+
+    const rows = await sql<
+      {
+        query: string;
+        query_surface: string;
+        query_project_id: string | null;
+        mode: string;
+        limit: number;
+        result_ids: string[];
+        result_project_ids: string[];
+        rank_positions: number[];
+        scores: number[] | null;
+        filter_type: string | null;
+      }[]
+    >`
+      SELECT query, query_surface, query_project_id, mode, "limit",
+             result_ids, result_project_ids, rank_positions, scores, filter_type
+      FROM search_feedback
+      WHERE query_project_id = ${projectId}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row.query).toBe(envelope.queryContext.query);
+    expect(row.query_surface).toBe('mcp');
+    expect(row.query_project_id).toBe(projectId);
+    expect(row.mode).toBe('semantic');
+    expect(row.limit).toBe(2);
+    expect(row.result_ids).toEqual(envelope.results.map((result) => result.id));
+    expect(row.result_project_ids).toEqual(envelope.results.map((result) => result.projectId));
+    expect(row.rank_positions).toEqual([1, 2]);
+    expect(row.scores).toHaveLength(2);
+    expect(row.filter_type).toBeNull();
+  });
+
+  it('CC_MEMORY_INCLUDE_OBSERVATIONS=off returns only manual and rollup project memories', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-include-off`;
+    const keyword = `include-off-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    process.env.CC_MEMORY_INCLUDE_OBSERVATIONS = 'off';
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+
+    expect(resultOrderLabels(envelope.results)).toEqual(['manual', 'rollup']);
+  });
+
+  it('orders equally strong mixed corpus matches by default weights', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-default-weights`;
+    const keyword = `weights-default-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+
+    expect(resultOrderLabels(envelope.results)).toEqual([
+      'manual',
+      'rollup',
+      'observation:decision',
+      'observation:feature',
+    ]);
+    expect(envelope.rankingMeta.scores).toBeNull();
+  });
+
+  it('allows CC_MEMORY_WEIGHT_MANUAL override to change mixed corpus ordering', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-manual-low`;
+    const keyword = `weights-override-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    process.env.CC_MEMORY_WEIGHT_MANUAL = '0.1';
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+
+    expect(resultOrderLabels(envelope.results)).toEqual([
+      'rollup',
+      'observation:decision',
+      'observation:feature',
+      'manual',
+    ]);
+  });
+
+  it('falls back to default manual weight when CC_MEMORY_WEIGHT_MANUAL is not parseable', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-manual-bad`;
+    const keyword = `weights-bad-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    process.env.CC_MEMORY_WEIGHT_MANUAL = 'abc';
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+
+    expect(resultOrderLabels(envelope.results)).toEqual([
+      'manual',
+      'rollup',
+      'observation:decision',
+      'observation:feature',
+    ]);
   });
 });
 

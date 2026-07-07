@@ -62,6 +62,22 @@ export interface SearchResultEnvelope<T = Memory> {
   queryContext: SearchQueryContext;
 }
 
+export type SearchResultKind = 'manual' | 'rollup' | 'observation';
+
+export interface MemoryIndexResult {
+  id: string;
+  projectId: string;
+  kind: SearchResultKind;
+  /** manual/rollup: memory type（session/decision）；observation: observation type */
+  type: string;
+  title: string;
+  subtitle: string | null;
+  sessionId: string | null;
+  discoveryTokens: number | null;
+  /** manual/rollup 用 createdAt；observation 用 observedAt */
+  occurredAt: Date;
+}
+
 // ============================================================================
 // Save / Search / List / Get / Delete 輸入
 // ============================================================================
