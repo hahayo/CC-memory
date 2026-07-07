@@ -19,7 +19,7 @@
 
 ```bash
 # Clone 專案
-git clone https://github.com/yourusername/CC-memory.git
+git clone https://github.com/hahayo/CC-memory.git
 cd CC-memory
 
 # 安裝依賴
