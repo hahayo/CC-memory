@@ -18,6 +18,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(dirname "$script_dir")"
 
 # 原樣把 stdin pipe 給 Node（本殼不 cat stdin，交由 Node 讀 payload）；
-# Node 失敗照樣 exit 0（|| true），不擋 session start。執行方式對齊 run-auto-capture 慣例。
-( cd "$repo_root" && npx tsx scripts/run-session-start-inject.ts ) || true
+# Node 失敗照樣 exit 0（|| true），不擋 session start。5s 總上限涵蓋 npx/loader
+# 卡住情境；Node 內部 connect/statement timeout 只涵蓋 DB 階段。
+( cd "$repo_root" && timeout 5 npx tsx scripts/run-session-start-inject.ts ) || true
 exit 0

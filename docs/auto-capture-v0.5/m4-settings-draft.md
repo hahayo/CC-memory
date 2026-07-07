@@ -55,7 +55,7 @@ export CC_MEMORY_INJECT_RECENT=on
 ## Risks & Rollback
 
 - **Context pollution loop** — mitigated by the `source=cc-memory-inject` marker + capture worker line-level exclusion. If you see injected indexes reappearing as captured observations, confirm the worker filter is present (`INJECTION_MARKER` in `src/services/capture-worker.ts`).
-- **Session start latency** — the injector uses a 2s DB connect timeout and fails open (empty stdout). If session start feels slow, unset `CC_MEMORY_INJECT_RECENT` to disable.
+- **Session start latency** — the injector uses a 2s DB connect timeout, plus the hook wrapper applies `timeout 5` as an overall cap for `npx` / loader stalls; every failure path fails open (empty stdout). If session start feels slow, unset `CC_MEMORY_INJECT_RECENT` to disable.
 - **Privacy** — `buildRecentActivity` refuses the reserved `__personal__` namespace; a project whose sanitized cwd basename resolves to `__personal__` yields empty output.
 
 **Rollback:** remove the `SessionStart` entry above from `~/.claude/settings.json`, or simply `unset CC_MEMORY_INJECT_RECENT` to disable injection while leaving the hook wired.

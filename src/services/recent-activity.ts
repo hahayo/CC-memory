@@ -2,12 +2,13 @@
 //
 // v0.5 M4 4b — Recent Activity builder。
 // SessionStart injector 的資料來源：只讀「最近 rollup memories」的輕索引，
-// 不查 observations 表、不查全文、不現算 discovery_tokens。
+// observations 只查 active 連結 id / rollup_memory_id / observed_at 三欄，不查全文；
+// discovery_tokens 仍只讀 metadata，不現算。
 // 產出帶 source='cc-memory-inject' marker，capture worker 看到會排除（注入污染防線，
 // 見 docs/auto-capture-v0.5/plan.md §Injection Pollution Defense）。
 
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { projectMemories, type Memory } from '../db/schema.js';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { observations, projectMemories, type Memory } from '../db/schema.js';
 import { estimateDiscoveryTokens } from './capture-llm.js';
 import { ForbiddenError, InvalidArgumentError } from './errors.js';
 import type { DbClient } from './types.js';
@@ -23,7 +24,7 @@ export interface RecentActivityRow {
   id: string;
   updatedAt: string; // ISO 8601
   summaryExcerpt: string;
-  /** 讀 metadata.capture.observation_ids；drill-down 用，缺值 → [] */
+  /** 讀 observations active 連結；drill-down 用，無 active observation → [] */
   observationIds: string[];
   observationCount: number;
   /** 讀 metadata.capture.discovery_tokens，不現算 */
@@ -68,14 +69,21 @@ export async function buildRecentActivity(
   }
 
   const memories = await queryRecentRollups(db, projectId, limit);
-  const rows = applyTokenBudget(memories.map(toRow), tokenBudget);
+  const observationIdsByRollup = await queryActiveObservationIdsByRollup(
+    db,
+    memories.map((memory) => memory.id)
+  );
+  const rows = applyTokenBudget(
+    memories.map((memory) => toRow(memory, observationIdsByRollup.get(memory.id) ?? [])),
+    tokenBudget
+  );
 
   return { source: 'cc-memory-inject', projectId, rows };
 }
 
 // ---------------------------------------------------------------------------
 // 查詢：最近 rollup（= metadata 有 capture key，M3 既有判別慣例），
-// status='active'、updated_at DESC、LIMIT。不查 observations 表、不查全文。
+// status='active'、updated_at DESC、LIMIT。不查 observations 全文。
 // ---------------------------------------------------------------------------
 
 async function queryRecentRollups(
@@ -100,12 +108,50 @@ async function queryRecentRollups(
 }
 
 // ---------------------------------------------------------------------------
-// Row 映射：全部欄位來自 memory 本體與 metadata.capture，不現算、不查子表。
+// 查詢：rollup 對應 active observations 輕索引。
+// 只選 id / rollup_memory_id / observed_at；refine_delete 封存 observation 後，
+// 注入索引會從讀取端即時反映 active 過濾，不回寫 metadata.capture.observation_ids。
 // ---------------------------------------------------------------------------
 
-function toRow(memory: Memory): RecentActivityRow {
+async function queryActiveObservationIdsByRollup(
+  db: DbClient,
+  rollupIds: string[]
+): Promise<Map<string, string[]>> {
+  if (rollupIds.length === 0) {
+    return new Map();
+  }
+
+  const rows = (await db
+    .select({
+      id: observations.id,
+      rollupMemoryId: observations.rollupMemoryId,
+      observedAt: observations.observedAt,
+    })
+    .from(observations)
+    .where(and(inArray(observations.rollupMemoryId, rollupIds), eq(observations.status, 'active')))
+    .orderBy(asc(observations.observedAt))) as Array<{
+    id: string;
+    rollupMemoryId: string | null;
+    observedAt: Date | string;
+  }>;
+
+  const idsByRollup = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!row.rollupMemoryId) continue;
+    const ids = idsByRollup.get(row.rollupMemoryId) ?? [];
+    ids.push(row.id);
+    idsByRollup.set(row.rollupMemoryId, ids);
+  }
+  return idsByRollup;
+}
+
+// ---------------------------------------------------------------------------
+// Row 映射：memory 本體 + metadata.capture.discovery_tokens + active observation ids。
+// observationIds/count 由讀取端 active 過濾產生，不再讀 stale metadata.capture.observation_ids。
+// ---------------------------------------------------------------------------
+
+function toRow(memory: Memory, observationIds: string[]): RecentActivityRow {
   const capture = readCapture(memory.metadata);
-  const observationIds = readObservationIds(capture);
   return {
     id: memory.id,
     updatedAt: toIso(memory.updatedAt),
@@ -121,12 +167,6 @@ function readCapture(metadata: unknown): Record<string, unknown> | null {
   const capture = (metadata as { capture?: unknown }).capture;
   if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return null;
   return capture as Record<string, unknown>;
-}
-
-function readObservationIds(capture: Record<string, unknown> | null): string[] {
-  const value = capture?.observation_ids;
-  if (!Array.isArray(value)) return [];
-  return value.filter((v): v is string => typeof v === 'string');
 }
 
 function readDiscoveryTokens(capture: Record<string, unknown> | null): number {

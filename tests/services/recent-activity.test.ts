@@ -13,6 +13,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { connectTestDb, type Sql } from '../helpers/db.js';
 import { estimateDiscoveryTokens } from '../../src/services/capture-llm.js';
 import { buildRecentActivity } from '../../src/services/recent-activity.js';
+import { refineDelete } from '../../src/services/refine.js';
 import { ForbiddenError, InvalidArgumentError } from '../../src/services/errors.js';
 
 const TEST_PREFIX = `ract-${randomUUID().slice(0, 8)}`;
@@ -21,6 +22,7 @@ interface SeedRollupInput {
   projectId: string;
   summary: string;
   discoveryTokens?: number; // 省略 = capture 不含 discovery_tokens key（測 fallback 0）
+  // legacy metadata 欄位：builder 不得再用它推 observationIds/count。
   observationIds?: string[];
   updatedAt?: Date;
   status?: string; // 預設 'active'
@@ -59,6 +61,80 @@ async function seedRollup(sql: Sql, input: SeedRollupInput): Promise<string> {
     RETURNING id
   `;
   return rows[0].id;
+}
+
+async function seedObservation(
+  sql: Sql,
+  input: {
+    projectId: string;
+    rollupMemoryId: string;
+    observedAt: Date;
+    sessionId?: string;
+    status?: 'active' | 'archived';
+    title?: string;
+  }
+): Promise<string> {
+  const sessionId = input.sessionId ?? `session-${randomUUID()}`;
+  const title = input.title ?? `recent activity observation ${input.observedAt.toISOString()}`;
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO observations (
+      project_id,
+      session_id,
+      rollup_memory_id,
+      type,
+      title,
+      subtitle,
+      narrative,
+      discovery_tokens,
+      source_hook,
+      content_hash,
+      writer_host,
+      status,
+      metadata,
+      observed_at
+    )
+    VALUES (
+      ${input.projectId},
+      ${sessionId},
+      ${input.rollupMemoryId},
+      'feature',
+      ${title},
+      ${`subtitle ${title}`},
+      ${`narrative ${title}`},
+      7,
+      'vitest',
+      ${`recent-activity-test-${randomUUID()}`},
+      'vitest',
+      ${input.status ?? 'active'},
+      ${JSON.stringify({ test: 'recent-activity-service' })}::jsonb,
+      ${input.observedAt.toISOString()}::timestamptz
+    )
+    RETURNING id
+  `;
+  return rows[0].id;
+}
+
+async function seedObservations(
+  sql: Sql,
+  input: {
+    projectId: string;
+    rollupMemoryId: string;
+    count: number;
+    startAt?: Date;
+  }
+): Promise<string[]> {
+  const startAt = input.startAt ?? new Date('2026-07-01T00:00:00.000Z');
+  const ids: string[] = [];
+  for (let i = 0; i < input.count; i += 1) {
+    ids.push(
+      await seedObservation(sql, {
+        projectId: input.projectId,
+        rollupMemoryId: input.rollupMemoryId,
+        observedAt: new Date(startAt.getTime() + i * 1000),
+      })
+    );
+  }
+  return ids;
 }
 
 /** 手動 memory：metadata 無 capture key，builder 應排除。 */
@@ -154,13 +230,32 @@ describe('buildRecentActivity (integration, real PG)', () => {
     const projectId = `${TEST_PREFIX}-fields`;
     const longSummary = 'A'.repeat(130); // 130 > 120 → 截斷加 '…'
     const updatedAt = new Date('2026-07-05T12:34:56.000Z');
-    const obsIds = [randomUUID(), randomUUID(), randomUUID()];
+    const legacyMetadataIds = [randomUUID(), randomUUID(), randomUUID()];
     const id = await seedRollup(sql, {
       projectId,
       summary: longSummary,
       discoveryTokens: 555,
-      observationIds: obsIds,
+      observationIds: legacyMetadataIds,
       updatedAt,
+    });
+    const lateObsId = await seedObservation(sql, {
+      projectId,
+      rollupMemoryId: id,
+      observedAt: new Date('2026-07-05T12:02:00.000Z'),
+      title: 'late active observation',
+    });
+    const earlyObsId = await seedObservation(sql, {
+      projectId,
+      rollupMemoryId: id,
+      observedAt: new Date('2026-07-05T12:00:00.000Z'),
+      title: 'early active observation',
+    });
+    await seedObservation(sql, {
+      projectId,
+      rollupMemoryId: id,
+      observedAt: new Date('2026-07-05T12:01:00.000Z'),
+      status: 'archived',
+      title: 'archived observation ignored',
     });
 
     const result = await buildRecentActivity(db, { projectId });
@@ -170,9 +265,37 @@ describe('buildRecentActivity (integration, real PG)', () => {
     expect(row?.updatedAt).toBe('2026-07-05T12:34:56.000Z');
     expect(row?.summaryExcerpt).toBe(`${'A'.repeat(120)}…`);
     expect(row?.summaryExcerpt.length).toBe(121);
-    expect(row?.observationIds).toEqual(obsIds);
-    expect(row?.observationCount).toBe(3);
+    expect(row?.observationIds).toEqual([earlyObsId, lateObsId]);
+    expect(row?.observationCount).toBe(2);
     expect(row?.discoveryTokens).toBe(555);
+  });
+
+  it('refine_delete 後 Recent Activity 只回 active observation ids（跨 PR 整合）', async () => {
+    const projectId = `${TEST_PREFIX}-refine-active`;
+    const rollupId = await seedRollup(sql, {
+      projectId,
+      summary: 'rollup with observations',
+      discoveryTokens: 11,
+    });
+    const deletedId = await seedObservation(sql, {
+      projectId,
+      rollupMemoryId: rollupId,
+      observedAt: new Date('2026-07-05T12:00:00.000Z'),
+      title: 'to be deleted',
+    });
+    const survivorId = await seedObservation(sql, {
+      projectId,
+      rollupMemoryId: rollupId,
+      observedAt: new Date('2026-07-05T12:01:00.000Z'),
+      title: 'survivor',
+    });
+
+    await refineDelete(db, { projectId, target: 'observation', id: deletedId });
+
+    const result = await buildRecentActivity(db, { projectId });
+
+    expect(result.rows.find((r) => r.id === rollupId)?.observationIds).toEqual([survivorId]);
+    expect(result.rows.find((r) => r.id === rollupId)?.observationCount).toBe(1);
   });
 
   it('短 summary 不截斷、且 metadata 缺 discovery_tokens 時 fallback 0', async () => {
@@ -190,11 +313,13 @@ describe('buildRecentActivity (integration, real PG)', () => {
 
   it('budget 第一步：超過時清空 observationIds、保留 observationCount、不丟 row', async () => {
     const projectId = `${TEST_PREFIX}-budget-ids`;
-    // 每筆塞很多 observation ids，讓「含 ids」明顯大於「清空 ids」。
-    const manyIds = () => Array.from({ length: 30 }, () => randomUUID());
-    await seedRollup(sql, { projectId, summary: 'r1', discoveryTokens: 1, observationIds: manyIds() });
-    await seedRollup(sql, { projectId, summary: 'r2', discoveryTokens: 2, observationIds: manyIds() });
-    await seedRollup(sql, { projectId, summary: 'r3', discoveryTokens: 3, observationIds: manyIds() });
+    // 每筆 seed 真 observation rows，讓「含 ids」明顯大於「清空 ids」。
+    const r1 = await seedRollup(sql, { projectId, summary: 'r1', discoveryTokens: 1 });
+    const r2 = await seedRollup(sql, { projectId, summary: 'r2', discoveryTokens: 2 });
+    const r3 = await seedRollup(sql, { projectId, summary: 'r3', discoveryTokens: 3 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r1, count: 12 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r2, count: 12 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r3, count: 12 });
 
     // 先用超大 budget 取「完整 rows」，據此算兩個門檻。
     const full = await buildRecentActivity(db, { projectId, tokenBudget: 10_000_000 });
@@ -214,11 +339,14 @@ describe('buildRecentActivity (integration, real PG)', () => {
 
   it('budget 第二步：清 ids 仍超時 excerpt 壓 60、不丟 row（對審 P3 補案）', async () => {
     const projectId = `${TEST_PREFIX}-budget-shrink`;
-    // 長 summary（遠超 60）讓第二步縮排量可觀；少量 ids 讓第一步縮排量不足。
+    // 長 summary（遠超 60）讓第二步縮排量可觀；observation ids 來自真 rows。
     const longSummary = (tag: string) => `${tag} ${'長摘要內容 very long summary text '.repeat(8)}`;
-    await seedRollup(sql, { projectId, summary: longSummary('r1'), discoveryTokens: 1, observationIds: [randomUUID()] });
-    await seedRollup(sql, { projectId, summary: longSummary('r2'), discoveryTokens: 2, observationIds: [randomUUID()] });
-    await seedRollup(sql, { projectId, summary: longSummary('r3'), discoveryTokens: 3, observationIds: [randomUUID()] });
+    const r1 = await seedRollup(sql, { projectId, summary: longSummary('r1'), discoveryTokens: 1 });
+    const r2 = await seedRollup(sql, { projectId, summary: longSummary('r2'), discoveryTokens: 2 });
+    const r3 = await seedRollup(sql, { projectId, summary: longSummary('r3'), discoveryTokens: 3 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r1, count: 10 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r2, count: 10 });
+    await seedObservations(sql, { projectId, rollupMemoryId: r3, count: 10 });
 
     const full = await buildRecentActivity(db, { projectId, tokenBudget: 10_000_000 });
     const clearedRows = full.rows.map((r) => ({ ...r, observationIds: [] as string[] }));
@@ -246,23 +374,23 @@ describe('buildRecentActivity (integration, real PG)', () => {
       projectId,
       summary: 'newest short',
       discoveryTokens: 3,
-      observationIds: [randomUUID()],
       updatedAt: new Date(base + 120_000),
     });
     const midId = await seedRollup(sql, {
       projectId,
       summary: 'middle short',
       discoveryTokens: 2,
-      observationIds: [randomUUID()],
       updatedAt: new Date(base + 60_000),
     });
-    await seedRollup(sql, {
+    const oldId = await seedRollup(sql, {
       projectId,
       summary: 'oldest short',
       discoveryTokens: 1,
-      observationIds: [randomUUID()],
       updatedAt: new Date(base),
     });
+    await seedObservations(sql, { projectId, rollupMemoryId: newId, count: 10 });
+    await seedObservations(sql, { projectId, rollupMemoryId: midId, count: 10 });
+    await seedObservations(sql, { projectId, rollupMemoryId: oldId, count: 10 });
 
     const full = await buildRecentActivity(db, { projectId, tokenBudget: 10_000_000 });
     // 短 summary（< 60）→ 第二步無效；ids 清空後即等同各步後樣貌。
