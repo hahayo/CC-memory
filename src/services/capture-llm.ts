@@ -2,9 +2,15 @@
 //
 // CC-memory v0.5 M2b capture LLM adapter + schema validation.
 
+import { spawn } from 'node:child_process';
+import { constants, accessSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 
-export const DEFAULT_CAPTURE_LLM_PROVIDER = 'gemini-flash';
+export const DEFAULT_CAPTURE_LLM_PROVIDER = 'claude-cli';
+export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
+export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
+export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
 
 export type CaptureObservationType =
@@ -64,19 +70,45 @@ export interface CaptureLlmRawResponse {
 
 export interface CaptureLlmAdapter {
   readonly model: string;
+  readonly provider?: string;
   readonly disabled?: boolean;
   readonly disabledReason?: string;
   extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse>;
 }
 
+export interface ClaudeCliRunRequest {
+  command: string;
+  args: string[];
+  stdin: string;
+  timeoutMs: number;
+  /** 附加到子程序的環境變數（merge 進 process.env）。 */
+  env?: Record<string, string>;
+}
+
+export interface ClaudeCliRunResult {
+  stdout: string;
+  stderr?: string;
+  exitCode: number | null;
+  signal?: string | null;
+  timedOut?: boolean;
+}
+
+export type ClaudeCliRunner = (request: ClaudeCliRunRequest) => Promise<ClaudeCliRunResult>;
+
 export interface CreateCaptureLlmAdapterOptions {
   env?: Record<string, string | undefined>;
   stdout?: { write(chunk: string): unknown };
+  runClaudeCli?: ClaudeCliRunner;
+  findClaudeCli?: (env: Record<string, string | undefined>) => string;
+  emitDisabledWarning?: boolean;
 }
 
 export type CaptureLlmErrorCode =
   | 'CAPTURE_LLM_DISABLED'
   | 'UNSUPPORTED_CAPTURE_LLM'
+  | 'CLAUDE_CLI_EXIT_NONZERO'
+  | 'CLAUDE_CLI_OUTPUT_INVALID'
+  | 'CLAUDE_CLI_TIMEOUT'
   | 'LLM_MALFORMED_JSON'
   | 'LLM_SCHEMA_INVALID'
   | 'LLM_EXTRACT_FAILED';
@@ -221,19 +253,20 @@ class DisabledCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly disabled = true;
   readonly disabledReason: string;
 
-  constructor(readonly model: string, reason: string) {
+  constructor(readonly model: string, reason: string, readonly provider?: string) {
     this.disabledReason = reason;
   }
 
   async extract(): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', this.disabledReason, {
       model: this.model,
+      provider: this.provider,
     });
   }
 }
 
 class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
-  constructor(readonly model: string, private readonly provider: string) {}
+  constructor(readonly model: string, readonly provider: string) {}
 
   async extract(): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError(
@@ -247,7 +280,230 @@ class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 }
 
+function parsePositiveIntegerEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return isRecord(error) && error.code === code;
+}
+
+function createEnoent(message: string): NodeJS.ErrnoException {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  return error;
+}
+
+function findExecutableOnPath(command: string, pathValue: string): string {
+  for (const directory of pathValue.split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching PATH.
+    }
+  }
+  throw createEnoent(`${command} executable not found on PATH`);
+}
+
+function defaultFindClaudeCli(env: Record<string, string | undefined>): string {
+  return findExecutableOnPath('claude', env.PATH ?? process.env.PATH ?? '');
+}
+
+export function formatCaptureLlmDisabledWarning(provider: string, reason: string): string {
+  return `[cc-memory] auto-capture disabled (${provider}): ${reason}\n`;
+}
+
+function ensureValidationErrorHasModel(
+  error: CaptureLlmValidationError,
+  model: string,
+  provider: string
+): CaptureLlmValidationError {
+  return new CaptureLlmValidationError(error.code, error.message, {
+    ...error.details,
+    model: typeof error.details.model === 'string' ? error.details.model : model,
+    provider,
+  });
+}
+
+function parseClaudeCliEnvelope(stdout: string, model: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripJsonFence(stdout));
+  } catch (error) {
+    throw new CaptureLlmValidationError(
+      'CLAUDE_CLI_OUTPUT_INVALID',
+      'claude-cli returned malformed JSON envelope',
+      {
+        model,
+        provider: DEFAULT_CAPTURE_LLM_PROVIDER,
+        cause: errorMessage(error),
+      }
+    );
+  }
+
+  if (!isRecord(parsed) || typeof parsed.result !== 'string') {
+    throw new CaptureLlmValidationError(
+      'CLAUDE_CLI_OUTPUT_INVALID',
+      'claude-cli JSON envelope must contain a string result field',
+      {
+        model,
+        provider: DEFAULT_CAPTURE_LLM_PROVIDER,
+      }
+    );
+  }
+
+  return parsed.result;
+}
+
+export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<ClaudeCliRunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(input.command, input.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...(input.env ?? {}) },
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+
+    const finish = (result: ClaudeCliRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      resolve(result);
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, 1_000);
+    }, input.timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(error);
+    });
+    child.on('close', (exitCode, signal) => {
+      finish({
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        timedOut,
+      });
+    });
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(input.stdin);
+  });
+}
+
+class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider = DEFAULT_CAPTURE_LLM_PROVIDER;
+
+  constructor(
+    readonly model: string,
+    private readonly command: string,
+    private readonly timeoutMs: number,
+    private readonly runClaudeCli: ClaudeCliRunner
+  ) {}
+
+  async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
+    let result: ClaudeCliRunResult;
+    try {
+      result = await this.runClaudeCli({
+        command: this.command,
+        // --strict-mcp-config：抽取子 session 不載使用者 MCP servers（啟動負擔 + 隔離）。
+        args: ['-p', '--model', this.model, '--output-format', 'json', '--strict-mcp-config'],
+        stdin: buildCapturePrompt(request),
+        timeoutMs: this.timeoutMs,
+        // 遞迴 capture 斷路器：capture hooks 看到此 marker 直接 exit 0，
+        // 抽取子 session 自身不得再被 capture（仿 claude-mem 的子程序隔離概念）。
+        env: { CC_MEMORY_CAPTURE_CHILD: '1' },
+      });
+    } catch (error) {
+      if (isErrnoCode(error, 'ENOENT')) {
+        throw new CaptureLlmValidationError(
+          'CAPTURE_LLM_DISABLED',
+          'claude CLI not found; install Claude Code CLI and ensure it is on PATH',
+          {
+            model: this.model,
+            provider: this.provider,
+          }
+        );
+      }
+      throw new CaptureLlmValidationError('LLM_EXTRACT_FAILED', 'claude-cli subprocess failed', {
+        model: this.model,
+        provider: this.provider,
+        cause: errorMessage(error),
+      });
+    }
+
+    if (result.timedOut) {
+      throw new CaptureLlmValidationError(
+        'CLAUDE_CLI_TIMEOUT',
+        `claude-cli timed out after ${this.timeoutMs}ms`,
+        {
+          model: this.model,
+          provider: this.provider,
+          timeoutMs: this.timeoutMs,
+        }
+      );
+    }
+
+    if (result.exitCode !== 0) {
+      throw new CaptureLlmValidationError(
+        'CLAUDE_CLI_EXIT_NONZERO',
+        `claude-cli exited with code ${result.exitCode ?? 'null'}`,
+        {
+          model: this.model,
+          provider: this.provider,
+          exitCode: result.exitCode,
+          signal: result.signal ?? null,
+        }
+      );
+    }
+
+    const text = parseClaudeCliEnvelope(result.stdout, this.model);
+    try {
+      parseCaptureLlmExtraction({ model: this.model, text });
+    } catch (error) {
+      if (error instanceof CaptureLlmValidationError) {
+        throw ensureValidationErrorHasModel(error, this.model, this.provider);
+      }
+      throw error;
+    }
+
+    return {
+      model: this.model,
+      text,
+    };
+  }
+}
+
 class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider = GEMINI_FLASH_CAPTURE_LLM_PROVIDER;
   private readonly ai: GoogleGenAI;
 
   constructor(readonly model: string, apiKey: string) {
@@ -291,17 +547,44 @@ export function createCaptureLlmAdapter(
 ): CaptureLlmAdapter {
   const env = options.env ?? process.env;
   const stdout = options.stdout ?? process.stdout;
+  const emitDisabledWarning = options.emitDisabledWarning ?? true;
   const provider = env.CC_CAPTURE_LLM?.trim() || DEFAULT_CAPTURE_LLM_PROVIDER;
 
-  if (provider !== DEFAULT_CAPTURE_LLM_PROVIDER) {
+  if (provider === DEFAULT_CAPTURE_LLM_PROVIDER) {
+    const model = env.CC_CAPTURE_CLAUDE_MODEL?.trim() || DEFAULT_CLAUDE_CLI_MODEL;
+    const timeoutMs = parsePositiveIntegerEnv(
+      env.CC_CAPTURE_CLAUDE_TIMEOUT_MS,
+      DEFAULT_CLAUDE_CLI_TIMEOUT_MS
+    );
+    let command: string;
+    try {
+      command = (options.findClaudeCli ?? defaultFindClaudeCli)(env);
+    } catch (error) {
+      const reason = isErrnoCode(error, 'ENOENT')
+        ? 'claude CLI not found; install Claude Code CLI, ensure it is on PATH, and log in before enabling capture'
+        : `claude CLI unavailable: ${errorMessage(error)}`;
+      if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+      return new DisabledCaptureLlmAdapter(model, reason, provider);
+    }
+
+    return new ClaudeCliCaptureLlmAdapter(
+      model,
+      command,
+      timeoutMs,
+      options.runClaudeCli ?? runClaudeCliSubprocess
+    );
+  }
+
+  if (provider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER) {
     return new UnsupportedCaptureLlmAdapter(provider, provider);
   }
 
   const apiKey = env.GEMINI_API_KEY?.trim();
   const model = env.CC_CAPTURE_GEMINI_MODEL?.trim() || DEFAULT_GEMINI_FLASH_MODEL;
   if (!apiKey) {
-    stdout.write('[cc-memory] auto-capture disabled: GEMINI_API_KEY is not set\n');
-    return new DisabledCaptureLlmAdapter(model, 'GEMINI_API_KEY is not set');
+    const reason = 'GEMINI_API_KEY is not set; gemini-flash capture requires a Gemini API key';
+    if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+    return new DisabledCaptureLlmAdapter(model, reason, provider);
   }
 
   return new GeminiFlashCaptureLlmAdapter(model, apiKey);

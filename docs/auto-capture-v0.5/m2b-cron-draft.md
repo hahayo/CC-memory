@@ -21,9 +21,10 @@ cd /home/haha/CC_project/CC-memory
 # Project DB only. Keep personal DB out of this worker.
 export DATABASE_URL="$(cat ~/.ccm-prod-url)"
 export CC_MEMORY_SPOOL_DIR="${CC_MEMORY_SPOOL_DIR:-$HOME/.cache/cc-memory/spool}"
-export CC_CAPTURE_LLM="${CC_CAPTURE_LLM:-gemini-flash}"
+export CC_CAPTURE_LLM="${CC_CAPTURE_LLM:-claude-cli}"
+export CC_CAPTURE_CLAUDE_MODEL="${CC_CAPTURE_CLAUDE_MODEL:-haiku}"
 
-if [[ -f "$HOME/.gemini-api-key" ]]; then
+if [[ "$CC_CAPTURE_LLM" == "gemini-flash" && -f "$HOME/.gemini-api-key" ]]; then
   export GEMINI_API_KEY="$(cat "$HOME/.gemini-api-key")"
 fi
 
@@ -45,6 +46,7 @@ hermes cron create \
 ## Operational Notes
 
 - The worker exits `0` and does not advance HWM when DB health check fails.
-- `GEMINI_API_KEY` absence disables capture without touching spool HWM.
+- Default capture uses `claude-cli`; the `claude` CLI must be installed, on `PATH`, and logged in with subscription auth.
+- `GEMINI_API_KEY` is only required when `CC_CAPTURE_LLM=gemini-flash`; absence disables gemini-flash capture without touching spool HWM.
 - Malformed LLM output writes `CC_MEMORY_SPOOL_DIR/.dead/<hash>.json`.
 - Register only after migrations 0011-0013 are verified on the project DB.
