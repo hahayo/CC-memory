@@ -5,8 +5,10 @@
 //   本檔為純測試屬 false-positive；先以他名寫入再 git mv 歸位。）
 //
 // 誠實標註（不造假 RED）：estimateDiscoveryTokens 已於 M2b 落地於
-// src/services/capture-llm.ts（公式 ceil(cjk*1.0 + asciiWord*1.3 + punct*0.3 + 12)），
-// 故案 1-4 為 acceptance / regression 測試——寫完立即綠，鎖住既有估算公式不漂移。
+// src/services/capture-llm.ts；M4 gate 校準後公式為
+// ceil(cjk*1.0 + asciiWord*1.3 + asciiPunct*0.3 + otherSymbol*1.0 + 12)，
+// word 以 camelCase/snake/kebab 段為單位（校準依據見 m4-gate-estimator-accuracy.json）。
+// 案 1-4 為 acceptance / regression 測試，鎖住估算公式不漂移。
 // 真正 RED 的只有案 5：buildRecentActivity 空殼會 not-implemented throw。
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -36,11 +38,24 @@ describe('estimateDiscoveryTokens (pure unit, acceptance)', () => {
     expect(estimateDiscoveryTokens('hello world foo')).toBe(16);
   });
 
-  it('案 3：標點與換行每個約 0.3 token', () => {
-    // '.' ',' ';' 3 個標點命中第一分支 [^\sA-Za-z0-9...]；
-    // '\n' 屬 \s 被第一分支排除，改由 |\n 分支命中（capture-llm.ts:250-252）
+  it('案 3：ASCII 標點與換行每個約 0.3 token', () => {
+    // '.' ',' ';' 命中 ASCII 標點類；'\n' 由 |\n 分支命中
     // → 共 4 次，各 0.3 → ceil(4*0.3 + 12) = ceil(13.2) = 14
     expect(estimateDiscoveryTokens('.,;\n')).toBe(14);
+  });
+
+  it('案 3b：非 ASCII 符號（全形標點/箭頭）每個約 1 token（M4 gate 校準）', () => {
+    // '，' '。' '→' 皆非 ASCII 標點、非 CJK 表意字 → otherSymbol 各 1.0
+    // → ceil(3*1.0 + 12) = 15
+    expect(estimateDiscoveryTokens('，。→')).toBe(15);
+  });
+
+  it('案 3c：複合識別字按段計 word（M4 gate 校準）', () => {
+    // cc_memory_save → cc/memory/save 3 段 (3*1.3) + 2 個底線 (2*0.3) = 4.5
+    // → ceil(4.5 + 12) = 17
+    expect(estimateDiscoveryTokens('cc_memory_save')).toBe(17);
+    // fooBar → camelCase 邊界斷開 2 段 → ceil(2*1.3 + 12) = ceil(14.6) = 15
+    expect(estimateDiscoveryTokens('fooBar')).toBe(15);
   });
 
   it('案 4：空字串只剩固定 metadata buffer +12', () => {

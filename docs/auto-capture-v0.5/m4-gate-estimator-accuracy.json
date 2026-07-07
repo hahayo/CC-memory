@@ -1,0 +1,151 @@
+{
+  "gate": "M4: 20 筆中英混合樣本 token 估算誤差 ±20%",
+  "method": "reference=Gemini countTokens(gemini-2.5-flash) proxy；estimate=estimateDiscoveryTokens(text)-12（扣 metadata buffer 比文字項）",
+  "generatedBy": "m4-gate-estimator-accuracy.ts (one-shot supervisor run)",
+  "samples": 20,
+  "within20Count": 17,
+  "meanAbsErrorPct": 11.6,
+  "verdict": "PASS_WITH_OUTLIERS",
+  "rows": [
+    {
+      "sample": "修正 capture worker 的空窗口 skip 邏輯：stop sentinel offset 等於事件 off",
+      "reference": 31,
+      "estimateText": 34,
+      "errorPct": 9.7,
+      "within20": true
+    },
+    {
+      "sample": "Implemented cc_memory_refine_delete MCP tool with soft-delet",
+      "reference": 33,
+      "estimateText": 29,
+      "errorPct": -12.1,
+      "within20": true
+    },
+    {
+      "sample": "決策：token budget 預設 1200，超過先截 observation ids，再截 summary text",
+      "reference": 35,
+      "estimateText": 35,
+      "errorPct": 0,
+      "within20": true
+    },
+    {
+      "sample": "The searchMemoryIndexes service now returns a SearchResultEn",
+      "reference": 45,
+      "estimateText": 38,
+      "errorPct": -15.6,
+      "within20": true
+    },
+    {
+      "sample": "在 src/services/observations.ts 新增 timeline 與 getObservations",
+      "reference": 34,
+      "estimateText": 32,
+      "errorPct": -5.9,
+      "within20": true
+    },
+    {
+      "sample": "Bug: drizzle sql template 對 JS array 綁成 record，PG 報 cannot c",
+      "reference": 38,
+      "estimateText": 40,
+      "errorPct": 5.3,
+      "within20": true
+    },
+    {
+      "sample": "全機啟用後踩出 1.7MB 巨窗口爆 CLI 的問題，加 CC_CAPTURE_MAX_WINDOW_BYTES=262",
+      "reference": 49,
+      "estimateText": 42,
+      "errorPct": -14.3,
+      "within20": true
+    },
+    {
+      "sample": "SessionStart hook outputs protocol JSON: {\"hookSpecificOutpu",
+      "reference": 31,
+      "estimateText": 35,
+      "errorPct": 12.9,
+      "within20": true
+    },
+    {
+      "sample": "測試基準更新：684 tests / 50 檔（592 → M1 +7 → M2a +9 → M2b +9 → clau",
+      "reference": 63,
+      "estimateText": 48,
+      "errorPct": -23.8,
+      "within20": false
+    },
+    {
+      "sample": "prompt injection 防禦：--append-system-prompt 指令/資料分離 + <transc",
+      "reference": 33,
+      "estimateText": 30,
+      "errorPct": -9.1,
+      "within20": true
+    },
+    {
+      "sample": "使用者拍板不為 Gemini 另付 API 費，CC_CAPTURE_LLM 預設改 claude-cli，spawn ",
+      "reference": 48,
+      "estimateText": 44,
+      "errorPct": -8.3,
+      "within20": true
+    },
+    {
+      "sample": "Cross-project deletion attempts must not leak existence: bot",
+      "reference": 25,
+      "estimateText": 30,
+      "errorPct": 20,
+      "within20": true
+    },
+    {
+      "sample": "注意 GEMINI_API_KEY 雙用途（capture LLM + embedding），別 unset，unset",
+      "reference": 29,
+      "estimateText": 28,
+      "errorPct": -3.4,
+      "within20": true
+    },
+    {
+      "sample": "hermes cron cc-memory-auto-capture registered with job id 3f",
+      "reference": 41,
+      "estimateText": 28,
+      "errorPct": -31.7,
+      "within20": false
+    },
+    {
+      "sample": "併行紀律：兩個 session 共用 test DB（port 5433），測試 seed 必須用自己的 prefix ",
+      "reference": 38,
+      "estimateText": 43,
+      "errorPct": 13.2,
+      "within20": true
+    },
+    {
+      "sample": "refineDelete performs a single atomic UPDATE guarded by stat",
+      "reference": 32,
+      "estimateText": 29,
+      "errorPct": -9.4,
+      "within20": true
+    },
+    {
+      "sample": "檔名註：harness Write denylist 的 *token* pattern 誤擋 spec 檔名，先以他名",
+      "reference": 36,
+      "estimateText": 31,
+      "errorPct": -13.9,
+      "within20": true
+    },
+    {
+      "sample": "M3 手測 drill-down 腳本模式：seed manual+rollup+observations 後走 han",
+      "reference": 33,
+      "estimateText": 33,
+      "errorPct": 0,
+      "within20": true
+    },
+    {
+      "sample": "Recent Activity builder 只查 rollups 不查全文 observations，discove",
+      "reference": 30,
+      "estimateText": 30,
+      "errorPct": 0,
+      "within20": true
+    },
+    {
+      "sample": "DSN 事故教訓：~/.ccm-prod-url 是舊 Zeabur 退役庫，正確 project DB 是 ~/.cc",
+      "reference": 58,
+      "estimateText": 45,
+      "errorPct": -22.4,
+      "within20": false
+    }
+  ]
+}

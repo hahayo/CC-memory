@@ -244,14 +244,29 @@ export function parseCaptureLlmExtraction(response: CaptureLlmRawResponse): Capt
   };
 }
 
+// M4 gate \u6821\u6e96\uff0820 \u7b46\u4e2d\u82f1\u6df7\u5408\u6a23\u672c vs Gemini countTokens\uff0c\u5831\u544a\u898b
+// docs/auto-capture-v0.5/m4-gate-estimator-accuracy.json\uff09\uff1a
+// - \u8907\u5408\u8b58\u5225\u5b57\u6309\u6bb5\u8a08 word\uff1a\u820a regex \u628a cc_memory_refine_delete / searchMemoryIndexes
+//   \u7b97 1 word\uff0c\u5be6\u969b tokenizer \u62c6 ~4-6 tokens\uff0cidentifier \u5bc6\u96c6\u6587\u672c\u7cfb\u7d71\u6027\u4f4e\u4f30 >30%
+// - \u975e ASCII \u7b26\u865f\uff08\u5168\u5f62\u6a19\u9ede/\u7bad\u982d\u7b49\uff09\u22481.0\uff1atokenizer \u5e7e\u4e4e\u4e0d\u8207\u76f8\u9130\u5b57\u5143\u5408\u4f75\uff0c0.3 \u4f4e\u4f30
+// known limitation\uff1ahex id\u3001URL \u8def\u5f91\u7b49\u7121\u5b57\u5178\u53ef\u8fa8\u7684\u9577 run \u4ecd\u4f4e\u4f30 ~20-30%\uff08\u4e0d\u518d\u52a0\u898f\u5247\u9632\u904e\u64ec\u5408\uff09
 export function estimateDiscoveryTokens(text: string): number {
   const cjkCount = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
-  const asciiWordCount = (text.match(/[A-Za-z0-9]+(?:[._'-][A-Za-z0-9]+)*/g) ?? []).length;
-  const punctuationAndBreakCount = (
-    text.match(/[^\sA-Za-z0-9\u3400-\u9fff\uf900-\ufaff]|\r|\n/g) ?? []
+  // camelCase \u908a\u754c\u5148\u65b7\u958b\uff0csnake/kebab/dot \u7531 [A-Za-z0-9]+ \u81ea\u7136\u65b7\u6bb5
+  const wordSource = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+  const asciiWordCount = (wordSource.match(/[A-Za-z0-9]+/g) ?? []).length;
+  const asciiPunctuationAndBreakCount = (text.match(/[!-/:-@[-`{-~]|\r|\n/g) ?? []).length;
+  const otherSymbolCount = (
+    text.match(/[^\sA-Za-z0-9\u3400-\u9fff\uf900-\ufaff!-/:-@[-`{-~]/g) ?? []
   ).length;
 
-  return Math.ceil(cjkCount * 1.0 + asciiWordCount * 1.3 + punctuationAndBreakCount * 0.3 + 12);
+  return Math.ceil(
+    cjkCount * 1.0 +
+      asciiWordCount * 1.3 +
+      asciiPunctuationAndBreakCount * 0.3 +
+      otherSymbolCount * 1.0 +
+      12
+  );
 }
 
 class DisabledCaptureLlmAdapter implements CaptureLlmAdapter {
