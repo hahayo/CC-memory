@@ -2,6 +2,12 @@
 # CC-memory v0.5 M2a Stop hook wrapper.
 # Local-only and best-effort: every path exits 0.
 
+# 遞迴 capture 斷路器：capture worker spawn 的 claude 子程序帶此 marker，
+# 其 Stop sentinel 不得進 spool（否則產生空 session 供下輪 worker 空轉）。
+if [[ -n "${CC_MEMORY_CAPTURE_CHILD:-}" ]]; then
+  exit 0
+fi
+
 payload="$(cat 2>/dev/null)"
 
 json_get_string() {

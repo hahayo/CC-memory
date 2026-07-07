@@ -36,7 +36,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 |---|---|---|
 | 設計地基 | `session_summaries` 單表 | `observations` + `project_memories(type='session')` rollup（彙總） |
 | 採集入口 | Stop hook 同步 Claude CLI subprocess（子程序） | PostToolUse/Stop hook 只 append（附加）本地 spool（緩衝暫存區），cron worker（排程工作程序）批次處理 |
-| LLM（大型語言模型） | Claude CLI，吃 subscription（訂閱） | 遠端 Gemini Flash，`CC_CAPTURE_LLM` 可切，無 key 靜默停用 |
+| LLM（大型語言模型） | Claude CLI，吃 subscription（訂閱） | 遠端 Gemini Flash，`CC_CAPTURE_LLM` 可切，無 key 靜默停用（**2026-07-07 使用者拍板改回 claude-cli 預設**：成本前提反轉——訂閱已付、Gemini 需另付 API 費；worker cron 內短暫 subprocess 無 v0.4 hook 同步問題。見 Constraints 紅線 3） |
 | 注入 | 固定 N+M 筆全文 | Recent Activity（近期活動）輕索引，每列標 `discovery_tokens` |
 | 檢索 | `cc_memory_search` 單層回全文 | search 輕索引 → timeline（時間軸）→ batch get observations（批次取觀察紀錄） |
 | 成本/RAM | 可能有本機常駐 daemon（守護程序）誘惑 | 明確禁止常駐 daemon；hook 不走網路、不 spawn LLM |
@@ -48,7 +48,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | `session_summaries` 是 auto-capture 主表 | 新增 `observations` 主表；session rollup 寫進既有 `project_memories(type='session')` | 細粒度 observation 是 PostToolUse worker 與 3 層 retrieval 的地基 | `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model、§Non-goals；`docs/plan.md` §Data Model；`docs/task.md` M1 | M1 schema 改寫；M3 search 結果單位改 rollup；M4 注入改 rollup index；benchmark 對比單位重定 |
 | `observations` 是 Stage 2 non-goal | v0.5 M1 必做 `observations` | 四大 gap 中 #3/#4 直接缺地基 | 舊 design §Non-goals/Future Roadmap；`docs/INDEX.md` 長期目標 | v0.4 舊 SDD 標 superseded；v0.5 不再稱 Stage 2 |
 | Stop hook 同步跑 capture-runner + Claude CLI | hook 僅 O(1) local append，不走網路、不 spawn LLM；cron worker 批次抽取 | RAM 紅線與 RTT（來回延遲）風險；不能讓每次 tool use（工具呼叫）受遠端 DB/LLM 牽制 | 舊 design §Capture Pipeline；`docs/plan.md` §Phase C 新增 services；舊 plan M2 | M2 拆 M2a hook 與 M2b worker；新增 spool 可靠性 Gate |
-| Claude CLI subprocess 摘要 | Gemini Flash 預設，`CC_CAPTURE_LLM` 可切；缺 key 靜默停用 | 本機不跑重型子程序；成本與 RAM 可控；對齊批量任務用便宜模型規則 | 舊 design §Claude CLI 呼叫；`docs/plan.md` env `CC_MEMORY_CLAUDE_MODEL` | env 全改；品質閘要記模型名；LLM 驗證失敗進 dead-letter（死信） |
+| Claude CLI subprocess 摘要 | Gemini Flash 預設，`CC_CAPTURE_LLM` 可切；缺 key 靜默停用（**後記 2026-07-07**：預設改回 `claude-cli`——使用者拍板不為 Gemini 另付 API 費；當年否定 Claude CLI 的 RAM/延遲顧慮針對 hook 同步 spawn，v0.5 的 cron worker 批次架構已消解；gemini-flash 降為可切選項） | 本機不跑重型子程序；成本與 RAM 可控；對齊批量任務用便宜模型規則 | 舊 design §Claude CLI 呼叫；`docs/plan.md` env `CC_MEMORY_CLAUDE_MODEL` | env 全改；品質閘要記模型名；LLM 驗證失敗進 dead-letter（死信） |
 | 固定 N summary + M manual 全文注入 | Recent Activity 輕索引 + `discovery_tokens` | token 經濟學：先低成本看索引，再按需展開 | 舊 design §SessionStart Re-inject；`docs/task.md` M4 | M4 增 token budget（預算）硬上限、截斷測試、污染防線 |
 | `cc_memory_search` 跨表加權後回全文 | `cc_memory_search` 回輕索引，不破 `SearchResultEnvelope`（搜尋結果信封）；新增 `cc_memory_timeline`、`cc_memory_get_observations` | 3 層 retrieval 才能同時省 token 與保細節 | 舊 design §Retrieval；`src/services/types.ts`；`src/services/feedback.ts` | M3 新工具；`search_feedback` 寫入形狀相容性 Gate |
 | 同一 session 一筆 active canonical summary | 保留 per-session canonical（每 session 單一標準列）語義；rollup 改寫 `project_memories(type='session')`，`idempotency_key=capture:v05:<project>:<session>`，後續 harvest 走 upsert update | 避免同 session 多個 harvest window 稀釋注入索引、search top-K 與品質閘對比單位 | 舊 design §Data Model partial unique；舊 plan M2 capture-runner；`docs/spec.md` Phase C | M2b 更新 rollup metadata；M3/M4/M6 都以 canonical rollup 去重；observations 仍 append-only |
@@ -156,7 +156,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Schema | `observations` 新表；必要 index；rollup 用既有 `project_memories` | migration 0011-0013 起 |
 | Capture hook | PostToolUse/Stop thin spool append | hook 不走網路 |
 | Worker | hermes cron 批次 harvest（收割）+ LLM extract（抽取）+ DB write | 不做 daemon |
-| LLM | Gemini Flash 預設；`CC_CAPTURE_LLM` 可切；無 key 靜默停用 | 仿 `src/utils/embedding.ts` 降級 |
+| LLM | `claude-cli` 預設（訂閱額度、`CC_CAPTURE_CLAUDE_MODEL` 預設 haiku）；`CC_CAPTURE_LLM` 可切 gemini-flash；provider 不可用靜默停用 | 仿 `src/utils/embedding.ts` 降級 |
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
@@ -168,7 +168,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 
 1. **不做常駐 daemon**：worker 走 hermes cron，跑完即退；不得常駐 worker-service。
 2. **hook 只做 O(1) 輕量寫入且不走網路**：PostToolUse 只 append thin JSONL；Stop 只 append sentinel；hook 內不 INSERT 遠端 DB、不 spawn LLM。
-3. **observation 抽取用遠端便宜模型**：預設 Gemini Flash；`CC_CAPTURE_LLM` 可切；缺 key 時靜默停用並告警，不做本機重型 subprocess。
+3. **observation 抽取用便宜模型**（2026-07-07 使用者拍板改版）：預設 `claude-cli`（`claude -p` 子程序吃 Claude Code 訂閱額度，模型 `CC_CAPTURE_CLAUDE_MODEL` 預設 `haiku`；只在 cron worker 內短暫存在、跑完即退，不違反紅線 1/2）；`CC_CAPTURE_LLM` 可切 `gemini-flash`（遠端 API，需 `GEMINI_API_KEY`）。provider 不可用（CLI 不存在／key 缺）時靜默停用並告警。**hook 內不 spawn LLM 的紅線不變**。
 
 ### 資料與部署
 

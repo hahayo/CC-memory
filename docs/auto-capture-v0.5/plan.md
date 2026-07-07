@@ -26,7 +26,7 @@ Claude Code session
        ├─ health check（健康檢查）SSH tunnel（通道）與 project DB（專案資料庫）
        ├─ file lock（檔案鎖）+ rotation（輪替）+ high-water mark（高水位）commit
        ├─ batch harvest（批次收割）transcript 增量窗口
-       ├─ Gemini Flash LLM（大型語言模型）一次呼叫
+       ├─ capture LLM（大型語言模型）一次呼叫（預設 claude-cli 吃訂閱；可切 gemini-flash）
        ├─ JSON schema validation（結構驗證）
        ├─ write rollup → project_memories(type='session')
        └─ write observations → observations
@@ -126,7 +126,7 @@ v0.5 不建遠端 pending queue（待處理佇列）。hook 不走網路是硬�
 src/services/capture-spool.ts          # spool append/lock/HWM/rotation/dead-letter
 src/services/capture-worker.ts         # harvest + LLM + schema validation + DB write
 src/services/observations.ts           # insert/search-index/timeline/get/archive
-src/services/capture-llm.ts            # Gemini Flash adapter + schema parser
+src/services/capture-llm.ts            # capture LLM adapter（claude-cli / gemini-flash）+ schema parser
 src/services/recent-activity.ts        # SessionStart index builder
 src/tools/timeline.ts                  # cc_memory_timeline
 src/tools/get-observations.ts          # cc_memory_get_observations
@@ -238,8 +238,9 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 
 | 名稱 | 預設值 | 讀取元件 | 缺值或降級行為 |
 |---|---|---|---|
-| `CC_CAPTURE_LLM` | `gemini-flash` | capture worker | 未支援 provider 時 fail-fast 到 dead-letter metadata |
-| `GEMINI_API_KEY` | 無 | capture LLM / embedding | 缺值時 capture 靜默停用並 stdout 告警；既有 search 降級沿用 `embedding.ts` |
+| `CC_CAPTURE_LLM` | `claude-cli`（2026-07-07 拍板，原 `gemini-flash`） | capture worker | 未支援 provider 時 fail-fast 到 dead-letter metadata |
+| `CC_CAPTURE_CLAUDE_MODEL` | `haiku` | capture LLM（claude-cli provider） | parse 失敗／缺值用預設；tier 別名交給 claude CLI 解析 |
+| `GEMINI_API_KEY` | 無 | capture LLM（僅 gemini-flash provider）/ embedding | gemini-flash 下缺值時 capture 靜默停用並 stdout 告警；claude-cli 下不需要；既有 search 降級沿用 `embedding.ts` |
 | `CC_MEMORY_SKIP_TOOLS` | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | hook wrapper | 設定後整個覆蓋預設；空字串代表不 skip |
 | `CC_MEMORY_SPOOL_DIR` | `~/.cache/cc-memory/spool` | hook / worker | 缺值用預設；無法建立時 hook 吞錯、worker 告警 |
 | `CC_MEMORY_SPOOL_MAX_MB` | `500` | worker | 超過上限停止 capture 並 stdout 告警 |
@@ -256,6 +257,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 - `CC_MEMORY_INJECT_RECENT=off` 預設。
 - 併用期兩週內只 capture，不注入。
 - 注入內容加 metadata marker（標記）`source=cc-memory-inject`；worker 看到該 marker 直接排除。
+- **遞迴 capture 斷路器**（2026-07-07 claude-cli provider 連帶補強）：worker spawn 的 claude 抽取子程序帶 `CC_MEMORY_CAPTURE_CHILD=1` env，兩支 capture hook 開頭偵測到即 exit 0——抽取 session 自身不得再進 spool；子程序另帶 `--strict-mcp-config` 不載使用者 MCP servers（概念仿 claude-mem 的子程序隔離 flags）。
 - token budget 預設 1,200；超過先截 observations ids，再截 summary text。
 - 每列 rollup 的 `discovery_tokens` 讀 `metadata.capture.discovery_tokens`；注入器不即時計算。
 - 注入 stdout 不含全文 observation narrative，只含索引。
@@ -300,7 +302,7 @@ Gate：
 
 交付：
 - `scripts/run-auto-capture.ts`。
-- Gemini Flash adapter、JSON schema validation、dead-letter。
+- capture LLM adapter（原交付 Gemini Flash；2026-07-07 預設改 claude-cli，見 spec 紅線 3）、JSON schema validation、dead-letter。
 - rollup + observations 寫入 transaction。
 - per-session canonical rollup upsert；同 session 多個 harvest window 只更新同一筆 rollup。
 - hermes cron draft（草稿）註冊說明，draft-first 不直接改使用者 settings（設定）。

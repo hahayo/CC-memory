@@ -115,7 +115,7 @@
 
 # M2b：Cron worker + LLM extraction
 
-> 目標：worker 從 spool harvest（收割）batch（批次），一次呼叫 Gemini Flash，驗證 JSON schema（結構），寫 rollup + observations。
+> 目標：worker 從 spool harvest（收割）batch（批次），一次呼叫 capture LLM（預設 claude-cli；2026-07-07 拍板前為 Gemini Flash），驗證 JSON schema（結構），寫 rollup + observations。
 
 ## 2b-1：Worker failure tests
 
@@ -131,8 +131,8 @@
 ## 2b-2：LLM adapter
 
 - [ ] 新增 `src/services/capture-llm.ts`
-- [ ] `CC_CAPTURE_LLM` 預設 Gemini Flash
-- [ ] 無 `GEMINI_API_KEY` 或 provider key 時靜默停用 capture，stdout 告警
+- [ ] `CC_CAPTURE_LLM` 預設 claude-cli（2026-07-07 拍板；原 Gemini Flash 交付後變更，gemini-flash 保留可切）；`CC_CAPTURE_CLAUDE_MODEL` 預設 haiku
+- [ ] provider 不可用（claude CLI 不存在／gemini 缺 `GEMINI_API_KEY`）時靜默停用 capture，stdout 告警
 - [ ] schema validation：必須一次回 `{ session_summary, observations[] }`
 - [ ] validation fail metadata 含 session id、offset、錯誤碼、模型名、content hash；不含全文 transcript
 - [ ] 新增或共用 `estimateDiscoveryTokens()`，供 rollup 寫入時保存 `metadata.capture.discovery_tokens`

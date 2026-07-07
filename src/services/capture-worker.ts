@@ -10,6 +10,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   CaptureLlmValidationError,
   estimateDiscoveryTokens,
+  formatCaptureLlmDisabledWarning,
   isCaptureLlmDisabled,
   parseCaptureLlmExtraction,
   type CaptureLlmAdapter,
@@ -832,6 +833,16 @@ export async function runCaptureWorkerOnce(
         });
         extraction = parseCaptureLlmExtraction(rawResponse);
       } catch (error) {
+        if (error instanceof CaptureLlmValidationError && error.code === 'CAPTURE_LLM_DISABLED') {
+          stdout.write(
+            formatCaptureLlmDisabledWarning(
+              typeof error.details.provider === 'string' ? error.details.provider : 'unknown',
+              error.message
+            )
+          );
+          result.skipped += 1;
+          continue;
+        }
         await writeDeadLetter(root, window, {
           model: error instanceof CaptureLlmValidationError && typeof error.details.model === 'string'
             ? error.details.model

@@ -27,6 +27,7 @@ import {
   sanitizeSpoolSegment,
 } from '../../src/services/capture-spool.js';
 import { runCaptureWorkerOnce } from '../../src/services/capture-worker.js';
+import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
   CaptureLlmObservation,
@@ -306,6 +307,41 @@ describe('capture worker failure contracts without DB', () => {
       })
     ).resolves.toMatchObject({ processed: 0, deadLettered: 0 });
     expect(llm.calls).toHaveLength(0);
+  });
+
+  it('treats runtime LLM disabled errors as a skip without dead-lettering', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'claude cli disappeared' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    const llm: CaptureLlmAdapter = {
+      model: 'haiku',
+      provider: 'claude-cli',
+      async extract(): Promise<CaptureLlmRawResponse> {
+        throw new CaptureLlmValidationError(
+          'CAPTURE_LLM_DISABLED',
+          'claude CLI not found',
+          {
+            model: 'haiku',
+            provider: 'claude-cli',
+          }
+        );
+      },
+    };
+
+    await expect(
+      runWorker(harness, {
+        db: {},
+        llm,
+      })
+    ).resolves.toMatchObject({ processed: 0, skipped: 1, deadLettered: 0 });
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(existsSync(hwmPath(harness))).toBe(false);
   });
 });
 

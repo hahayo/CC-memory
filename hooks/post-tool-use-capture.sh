@@ -2,6 +2,12 @@
 # CC-memory v0.5 M2a PostToolUse hook wrapper.
 # Local-only and best-effort: every path exits 0.
 
+# 遞迴 capture 斷路器：capture worker spawn 的 claude 子程序帶此 marker，
+# 其自身的 tool use 不得再進 spool（否則抽取 session 會被下輪 worker 再抽取）。
+if [[ -n "${CC_MEMORY_CAPTURE_CHILD:-}" ]]; then
+  exit 0
+fi
+
 payload="$(cat 2>/dev/null)"
 
 json_get_string() {

@@ -8,7 +8,11 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { sql } from 'drizzle-orm';
 import { config } from '../src/config.js';
-import { createCaptureLlmAdapter } from '../src/services/capture-llm.js';
+import {
+  createCaptureLlmAdapter,
+  formatCaptureLlmDisabledWarning,
+  isCaptureLlmDisabled,
+} from '../src/services/capture-llm.js';
 import { runCaptureWorkerOnce, type CaptureWorkerResult } from '../src/services/capture-worker.js';
 import { generateEmbedding } from '../src/utils/embedding.js';
 
@@ -27,7 +31,19 @@ export async function runAutoCaptureTick(): Promise<CaptureWorkerResult> {
   const client = postgres(config.databaseUrl, { max: 1, connect_timeout: 2, idle_timeout: 2 });
   const db = drizzle(client);
   try {
-    const llm = createCaptureLlmAdapter({ env: process.env, stdout: process.stdout });
+    const llm = createCaptureLlmAdapter({
+      env: process.env,
+      stdout: process.stdout,
+      emitDisabledWarning: false,
+    });
+    if (isCaptureLlmDisabled(llm)) {
+      process.stdout.write(
+        formatCaptureLlmDisabledWarning(
+          llm.provider ?? 'unknown',
+          llm.disabledReason ?? 'capture LLM provider unavailable'
+        )
+      );
+    }
     const result = await runCaptureWorkerOnce({
       db,
       llm,
