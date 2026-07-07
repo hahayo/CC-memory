@@ -24,14 +24,19 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
+const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
+const RAW_LLM_OUTPUT_LIMIT = 2048;
 const ROTATE_SIZE_BYTES = 10 * 1024 * 1024;
 const ROTATE_IDLE_MS = 24 * 60 * 60 * 1000;
+const MALFORMED_JSON_RETRY_PROMPT_PREFIX =
+  'Previous output was not valid JSON. Output JSON only; the first character must be `{` and the last character must be `}`. Do not include markdown, code fences, or commentary.';
 
 export interface CaptureWorkerResult {
   processed: number;
   skipped: number;
   failed: number;
   deadLettered: number;
+  llmRetries: number;
   observationsWritten: number;
   rollupsWritten: number;
 }
@@ -76,6 +81,7 @@ interface CaptureWindow {
   hwmOffsetStart: number;
   hwmOffsetEnd: number;
   processingTime: Date;
+  observedAtOffset?: number;
 }
 
 interface CaptureMetadata {
@@ -104,6 +110,7 @@ function emptyResult(): CaptureWorkerResult {
     skipped: 0,
     failed: 0,
     deadLettered: 0,
+    llmRetries: 0,
     observationsWritten: 0,
     rollupsWritten: 0,
   };
@@ -208,6 +215,11 @@ function spoolMaxBytes(env: Record<string, string | undefined>): number {
   return mb * 1024 * 1024;
 }
 
+function captureMaxWindowBytes(env: Record<string, string | undefined>): number {
+  const parsed = Number.parseInt(env.CC_CAPTURE_MAX_WINDOW_BYTES ?? '', 10);
+  return Number.isInteger(parsed) && parsed >= 4 ? parsed : DEFAULT_CAPTURE_MAX_WINDOW_BYTES;
+}
+
 async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
   let projectDirs;
   try {
@@ -308,6 +320,59 @@ async function readWindow(spool: SpoolSession, start: number, end: number, now: 
     hwmOffsetEnd,
     processingTime: now,
   };
+}
+
+function splitCaptureWindow(window: CaptureWindow, maxBytes: number): CaptureWindow[] {
+  if (Buffer.byteLength(window.transcript, 'utf8') <= maxBytes) {
+    return [{ ...window, observedAtOffset: 0 }];
+  }
+
+  const chunks: CaptureWindow[] = [];
+  let startIndex = 0;
+  let hwmOffsetStart = window.hwmOffsetStart;
+
+  while (startIndex < window.transcript.length) {
+    let endIndex = startIndex;
+    let byteLength = 0;
+    let newlineEndIndex = -1;
+    let newlineByteLength = 0;
+
+    for (let index = startIndex; index < window.transcript.length;) {
+      const codePoint = window.transcript.codePointAt(index);
+      if (codePoint === undefined) break;
+      const char = String.fromCodePoint(codePoint);
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (byteLength > 0 && byteLength + charBytes > maxBytes) break;
+
+      byteLength += charBytes;
+      index += char.length;
+      endIndex = index;
+
+      if (char === '\n') {
+        newlineEndIndex = index;
+        newlineByteLength = byteLength;
+      }
+    }
+
+    if (newlineEndIndex > startIndex && endIndex < window.transcript.length) {
+      endIndex = newlineEndIndex;
+      byteLength = newlineByteLength;
+    }
+
+    const transcript = window.transcript.slice(startIndex, endIndex);
+    const hwmOffsetEnd = hwmOffsetStart + byteLength;
+    chunks.push({
+      ...window,
+      transcript,
+      hwmOffsetStart,
+      hwmOffsetEnd,
+      observedAtOffset: 0,
+    });
+    startIndex = endIndex;
+    hwmOffsetStart = hwmOffsetEnd;
+  }
+
+  return chunks;
 }
 
 function captureTextForTokenEstimate(extraction: CaptureLlmExtraction): string {
@@ -510,6 +575,18 @@ async function insertObservation(
   }
 ): Promise<string | null> {
   const hash = observationHash(input.window, input.observation);
+  // spec 欄位契約：discovery_tokens 由 worker 寫入時計算（estimator ≥13，滿足 CHECK > 0），
+  // 不採信 LLM 輸出
+  const discoveryTokens = estimateDiscoveryTokens(
+    [
+      input.observation.title,
+      input.observation.subtitle ?? '',
+      ...input.observation.facts,
+      ...input.observation.concepts,
+      ...input.observation.files,
+      input.observation.narrative,
+    ].join('\n')
+  );
   const metadata = {
     capture: {
       version: '0.5',
@@ -558,7 +635,7 @@ async function insertObservation(
         ${pgTextArrayLiteral(input.observation.files)}::text[],
         ${input.observation.narrative},
         ${vectorLiteral(input.embedding)}::vector,
-        ${input.observation.discovery_tokens},
+        ${discoveryTokens},
         'post-tool-use',
         ${hash},
         ${input.writerHost},
@@ -632,9 +709,10 @@ async function writeCaptureWindow(
   }
 
   const insertedObservationIds: string[] = [];
+  const observedAtOffset = window.observedAtOffset ?? 0;
   for (let index = 0; index < extraction.observations.length; index += 1) {
     const observation = extraction.observations[index];
-    const observedAt = new Date(window.processingTime.getTime() + index);
+    const observedAt = new Date(window.processingTime.getTime() + observedAtOffset + index);
     const observationEmbedding = await safeEmbedding(
       options.generateEmbedding,
       [observation.title, observation.facts.join(' '), observation.narrative].join('\n')
@@ -681,15 +759,39 @@ function llmErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function llmRawOutputFromError(error: unknown): string | undefined {
+  if (
+    error instanceof CaptureLlmValidationError &&
+    typeof error.details.rawOutput === 'string'
+  ) {
+    return error.details.rawOutput;
+  }
+  if (error && typeof error === 'object' && typeof (error as { text?: unknown }).text === 'string') {
+    return (error as { text: string }).text;
+  }
+  return undefined;
+}
+
+function isMalformedJsonLlmError(error: unknown): boolean {
+  return error instanceof CaptureLlmValidationError && error.code === 'LLM_MALFORMED_JSON';
+}
+
+function truncateLlmRawOutput(rawOutput: string | null | undefined): string | null {
+  if (typeof rawOutput !== 'string' || rawOutput.length === 0) return null;
+  return rawOutput.slice(0, RAW_LLM_OUTPUT_LIMIT);
+}
+
 async function writeDeadLetter(
   root: string,
   window: CaptureWindow,
   input: {
     model: string;
     error: unknown;
-    rawText?: string;
+    legacyRawText?: string;
+    llmRawOutput?: string | null;
   }
 ): Promise<void> {
+  const llmRawOutput = truncateLlmRawOutput(input.llmRawOutput);
   const hash = contentHash([
     window.projectId,
     window.sessionId,
@@ -697,7 +799,7 @@ async function writeDeadLetter(
     window.spoolOffsetEnd,
     llmErrorCode(input.error),
     input.model,
-    input.rawText ?? llmErrorMessage(input.error),
+    llmRawOutput ?? input.legacyRawText ?? llmErrorMessage(input.error),
   ]);
   const deadRoot = join(root, '.dead');
   await mkdir(deadRoot, { recursive: true, mode: 0o700 });
@@ -721,7 +823,8 @@ async function writeDeadLetter(
     error: {
       message: llmErrorMessage(input.error),
     },
-    llm_output: input.rawText,
+    llm_output: input.legacyRawText,
+    llm_raw_output: llmRawOutput,
   };
   const path = join(deadRoot, `${hash}.json`);
   await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
@@ -767,6 +870,7 @@ export async function runCaptureWorkerOnce(
   }
 
   const maxBytes = spoolMaxBytes(env);
+  const maxWindowBytes = captureMaxWindowBytes(env);
   const totalBytes = await totalSpoolBytes(root);
   if (totalBytes > maxBytes) {
     stdout.write(
@@ -814,60 +918,102 @@ export async function runCaptureWorkerOnce(
         continue;
       }
 
+      if (window.transcript.trim().length === 0) {
+        await writeHwmAtomically(hwmPath, currentSize);
+        result.skipped += 1;
+        await maybeRotateSpool(spool, currentSize, currentSize, hasStopSentinel);
+        continue;
+      }
+
       if (isCaptureLlmDisabled(options.llm)) {
         result.skipped += 1;
         continue;
       }
 
-      let rawResponse: CaptureLlmRawResponse;
-      let extraction: CaptureLlmExtraction;
-      try {
-        rawResponse = await options.llm.extract({
-          projectId: window.projectId,
-          sessionId: window.sessionId,
-          transcript: window.transcript,
-          spoolOffsetStart: window.spoolOffsetStart,
-          spoolOffsetEnd: window.spoolOffsetEnd,
-          hwmOffsetStart: window.hwmOffsetStart,
-          hwmOffsetEnd: window.hwmOffsetEnd,
-        });
-        extraction = parseCaptureLlmExtraction(rawResponse);
-      } catch (error) {
-        if (error instanceof CaptureLlmValidationError && error.code === 'CAPTURE_LLM_DISABLED') {
-          stdout.write(
-            formatCaptureLlmDisabledWarning(
-              typeof error.details.provider === 'string' ? error.details.provider : 'unknown',
-              error.message
-            )
-          );
-          result.skipped += 1;
-          continue;
+      const chunks = splitCaptureWindow(window, maxWindowBytes);
+      let observedAtOffset = 0;
+      let sawDeadLetter = false;
+      let sawWriteFailure = false;
+      let sawRuntimeDisabled = false;
+
+      for (const chunk of chunks) {
+        const chunkWindow = { ...chunk, observedAtOffset };
+        let rawResponse: CaptureLlmRawResponse | null = null;
+        let extraction: CaptureLlmExtraction | null = null;
+        let chunkDeadLettered = false;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const retryPromptPrefix =
+            attempt === 0 ? undefined : MALFORMED_JSON_RETRY_PROMPT_PREFIX;
+          let attemptRawResponse: CaptureLlmRawResponse | null = null;
+          try {
+            attemptRawResponse = await options.llm.extract({
+              projectId: chunkWindow.projectId,
+              sessionId: chunkWindow.sessionId,
+              transcript: chunkWindow.transcript,
+              spoolOffsetStart: chunkWindow.spoolOffsetStart,
+              spoolOffsetEnd: chunkWindow.spoolOffsetEnd,
+              hwmOffsetStart: chunkWindow.hwmOffsetStart,
+              hwmOffsetEnd: chunkWindow.hwmOffsetEnd,
+              ...(retryPromptPrefix ? { retryPromptPrefix } : {}),
+            });
+            const attemptExtraction = parseCaptureLlmExtraction(attemptRawResponse);
+            rawResponse = attemptRawResponse;
+            extraction = attemptExtraction;
+            break;
+          } catch (error) {
+            if (attempt === 0 && isMalformedJsonLlmError(error)) {
+              result.llmRetries += 1;
+              continue;
+            }
+            if (error instanceof CaptureLlmValidationError && error.code === 'CAPTURE_LLM_DISABLED') {
+              stdout.write(
+                formatCaptureLlmDisabledWarning(
+                  typeof error.details.provider === 'string' ? error.details.provider : 'unknown',
+                  error.message
+                )
+              );
+              result.skipped += 1;
+              sawRuntimeDisabled = true;
+              break;
+            }
+            await writeDeadLetter(root, chunkWindow, {
+              model: error instanceof CaptureLlmValidationError && typeof error.details.model === 'string'
+                ? error.details.model
+                : attemptRawResponse?.model ?? options.llm.model,
+              error,
+              legacyRawText: (error as { text?: string }).text,
+              llmRawOutput: attemptRawResponse?.text ?? llmRawOutputFromError(error),
+            });
+            result.deadLettered += 1;
+            sawDeadLetter = true;
+            chunkDeadLettered = true;
+            break;
+          }
         }
-        await writeDeadLetter(root, window, {
-          model: error instanceof CaptureLlmValidationError && typeof error.details.model === 'string'
-            ? error.details.model
-            : options.llm.model,
-          error,
-          rawText: (error as { text?: string }).text,
-        });
-        result.deadLettered += 1;
-        continue;
+        if (sawRuntimeDisabled) break;
+        if (chunkDeadLettered || !rawResponse || !extraction) continue;
+
+        try {
+          const writeResult = await options.db.transaction((tx: DbClient) =>
+            writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {
+              writerHost,
+              generateEmbedding,
+            })
+          );
+          result.processed += 1;
+          result.observationsWritten += writeResult.observationsWritten;
+          result.rollupsWritten += writeResult.rollupsWritten;
+          observedAtOffset += extraction.observations.length;
+        } catch {
+          result.failed += 1;
+          sawWriteFailure = true;
+          break;
+        }
       }
 
-      try {
-        const writeResult = await options.db.transaction((tx: DbClient) =>
-          writeCaptureWindow(tx, window, extraction, rawResponse, {
-            writerHost,
-            generateEmbedding,
-          })
-        );
+      if (!sawDeadLetter && !sawWriteFailure && !sawRuntimeDisabled) {
         await writeHwmAtomically(hwmPath, currentSize);
-        result.processed += 1;
-        result.observationsWritten += writeResult.observationsWritten;
-        result.rollupsWritten += writeResult.rollupsWritten;
         await maybeRotateSpool(spool, currentSize, currentSize, hasStopSentinel);
-      } catch {
-        result.failed += 1;
       }
     } catch {
       // 框架層失敗（stat/readHwm/readWindow/spool parse/HWM 寫入）：單一壞 spool
