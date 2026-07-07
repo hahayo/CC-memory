@@ -15,7 +15,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
 import { connectTestDb, type Sql } from '../helpers/db.js';
 
 // 隔離 embedding 模組 — 避免打真 Gemini API；預設 isEmbeddingEnabled=false
@@ -262,12 +261,7 @@ describe('services/memories.ts integration (real PG)', () => {
 
   beforeAll(async () => {
     sql = await connectTestDb();
-    db = drizzle(
-      postgres(
-        process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test',
-        { max: 1 }
-      )
-    );
+    db = drizzle(sql);
   });
 
   afterAll(async () => {
@@ -764,12 +758,7 @@ describe('searchMemoryIndexes v0.5 search contract (integration, real PG)', () =
 
   beforeAll(async () => {
     sql = await connectTestDb();
-    db = drizzle(
-      postgres(
-        process.env.TEST_DATABASE_URL ?? 'postgres://test:test@localhost:5433/cc_memory_test',
-        { max: 1 }
-      )
-    );
+    db = drizzle(sql);
   });
 
   beforeEach(async () => {

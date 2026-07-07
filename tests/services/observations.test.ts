@@ -5,8 +5,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
-import { connectTestDb, TEST_DB_URL, type Sql } from '../helpers/db.js';
+import { connectTestDb, type Sql } from '../helpers/db.js';
 import { timeline, getObservations } from '../../src/services/observations.js';
 import { InvalidArgumentError, NotFoundError } from '../../src/services/errors.js';
 
@@ -115,7 +114,7 @@ describe('observations retrieval service (integration, real PG)', () => {
 
   beforeAll(async () => {
     sql = await connectTestDb();
-    db = drizzle(postgres(TEST_DB_URL, { max: 1 }));
+    db = drizzle(sql);
   });
 
   afterEach(async () => {
@@ -189,12 +188,19 @@ describe('observations retrieval service (integration, real PG)', () => {
     ]);
   });
 
-  it('timeline with rollup anchor expands linked observations and surrounding same-session context', async () => {
+  it('timeline with rollup anchor uses metadata capture session and ignores stray linked observations', async () => {
     const projectId = `${TEST_PREFIX}-timeline-rollup`;
     const sessionId = `session-${randomUUID()}`;
     const otherSessionId = `session-${randomUUID()}`;
     const rollupId = await seedRollup(sql, { projectId, sessionId });
 
+    await seedObservation(sql, {
+      projectId,
+      sessionId: otherSessionId,
+      rollupMemoryId: rollupId,
+      observedAt: new Date('2026-07-06T23:59:00.000Z'),
+      title: 'stray-linked-rollup',
+    });
     const before = await seedObservation(sql, {
       projectId,
       sessionId,
@@ -232,6 +238,30 @@ describe('observations retrieval service (integration, real PG)', () => {
 
     expect(result.anchorId).toBe(rollupId);
     expect(result.observations.map((row) => row.id)).toEqual([before, linked1, linked2, after]);
+  });
+
+  it('timeline with rollup anchor truncates middle rows at 100 and marks the result', async () => {
+    const projectId = `${TEST_PREFIX}-timeline-truncate`;
+    const sessionId = `session-${randomUUID()}`;
+    const rollupId = await seedRollup(sql, { projectId, sessionId });
+
+    const expectedIds: string[] = [];
+    for (let i = 0; i < 101; i += 1) {
+      const id = await seedObservation(sql, {
+        projectId,
+        sessionId,
+        rollupMemoryId: rollupId,
+        observedAt: new Date(Date.UTC(2026, 6, 7, 0, i, 0)),
+        title: `middle-${String(i).padStart(3, '0')}`,
+      });
+      if (i < 100) expectedIds.push(id);
+    }
+
+    const result = await timeline(db, rollupId, 0, 0, projectId);
+
+    expect(result.observations.map((row) => row.id)).toEqual(expectedIds);
+    expect(result.observations).toHaveLength(100);
+    expect(result.truncated).toBe(true);
   });
 
   it('timeline does not return archived observations and treats archived anchors as not found', async () => {
@@ -284,6 +314,12 @@ describe('observations retrieval service (integration, real PG)', () => {
     await expect(timeline(db, anchor, 1, 1, projectId)).rejects.toBeInstanceOf(NotFoundError);
   });
 
+  it('timeline rejects non-UUID anchor ids before querying PostgreSQL', async () => {
+    await expect(
+      timeline(db, 'not-a-uuid', 1, 1, `${TEST_PREFIX}-bad-anchor`)
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+  });
+
   it('getObservations returns active same-project rows in requested order and filters archived/cross-project ids', async () => {
     const projectId = `${TEST_PREFIX}-get`;
     const otherProjectId = `${TEST_PREFIX}-get-other`;
@@ -330,6 +366,12 @@ describe('observations retrieval service (integration, real PG)', () => {
     await expect(getObservations(db, [], projectId)).resolves.toEqual([]);
     await expect(
       getObservations(db, Array.from({ length: 51 }, () => randomUUID()), projectId)
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+  });
+
+  it('getObservations rejects non-UUID ids before querying PostgreSQL', async () => {
+    await expect(
+      getObservations(db, [randomUUID(), 'not-a-uuid'], `${TEST_PREFIX}-bad-ids`)
     ).rejects.toBeInstanceOf(InvalidArgumentError);
   });
 });

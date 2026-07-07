@@ -1023,6 +1023,7 @@ export async function handleToolCall(
           depth_before: result.depthBefore,
           depth_after: result.depthAfter,
           count: result.observations.length,
+          ...(result.truncated ? { truncated: true } : {}),
           observations: result.observations.map(observationIndexJson),
         });
       }

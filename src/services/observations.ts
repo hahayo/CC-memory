@@ -37,6 +37,8 @@ const VALID_SEARCH_MODES: readonly SearchMode[] = ['keyword', 'semantic', 'hybri
 const VALID_MEMORY_TYPES: readonly string[] = ['session', 'decision'];
 const OBSERVATION_BATCH_LIMIT = 50;
 const TIMELINE_DEPTH_LIMIT = 50;
+const TIMELINE_MIDDLE_LIMIT = 100;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface IndexSearchCandidate {
   result: MemoryIndexResult;
@@ -53,6 +55,7 @@ export interface TimelineResult {
   depthBefore: number;
   depthAfter: number;
   observations: Observation[];
+  truncated?: boolean;
 }
 
 function validateSearchInput(input: SearchMemoriesInput): {
@@ -106,6 +109,14 @@ function validateNonEmptyId(value: unknown, field: string): string {
   return value;
 }
 
+function validateUuid(value: unknown, field: string): string {
+  const id = validateNonEmptyId(value, field);
+  if (!UUID_RE.test(id)) {
+    throw new InvalidArgumentError(`${field} 必須為 UUID`, { [field]: value });
+  }
+  return id;
+}
+
 function validateDepth(value: number, field: string): number {
   if (!Number.isInteger(value) || value < 0 || value > TIMELINE_DEPTH_LIMIT) {
     throw new InvalidArgumentError(
@@ -129,7 +140,22 @@ function validateObservationIds(ids: unknown): string[] {
   if (ids.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
     throw new InvalidArgumentError('getObservations: ids 必須為非空字串陣列', { ids });
   }
+  if (ids.some((id) => !UUID_RE.test(id))) {
+    throw new InvalidArgumentError('getObservations: ids 必須為 UUID 字串陣列', { ids });
+  }
   return ids;
+}
+
+function metadataCapture(metadata: unknown): Record<string, unknown> | null {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const capture = (metadata as { capture?: unknown }).capture;
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return null;
+  return capture as Record<string, unknown>;
+}
+
+function captureString(capture: Record<string, unknown> | null, key: string): string | null {
+  const value = capture?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function observationExcludeReservedCondition(excludeReserved: boolean): SQL | null {
@@ -273,6 +299,7 @@ export async function keywordObservationIndexCandidates(
     .from(observations)
     .where(and(...conditions))
     .orderBy(desc(observations.observedAt))
+    // known limitation：先撈最新 limit*4 再文字過濾，較舊命中可能漏（同 keywordSearchRows 模式；M6 benchmark 後評估推進 SQL）
     .limit(limit * 4)) as Observation[];
 
   const keywords = input.query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -405,7 +432,7 @@ export async function timeline(
   projectId: string
 ): Promise<TimelineResult> {
   const guardedProjectId = validateProjectId(projectId, 'timeline');
-  const guardedAnchorId = validateNonEmptyId(anchorId, 'anchorId');
+  const guardedAnchorId = validateUuid(anchorId, 'anchorId');
   const beforeDepth = validateDepth(depthBefore, 'depthBefore');
   const afterDepth = validateDepth(depthAfter, 'depthAfter');
 
@@ -459,7 +486,7 @@ export async function timeline(
   }
 
   const rollupRows = (await db
-    .select({ id: projectMemories.id })
+    .select({ id: projectMemories.id, metadata: projectMemories.metadata })
     .from(projectMemories)
     .where(
       and(
@@ -468,7 +495,7 @@ export async function timeline(
         eq(projectMemories.status, 'active')
       )
     )
-    .limit(1)) as Array<{ id: string }>;
+    .limit(1)) as Array<{ id: string; metadata: unknown }>;
   if (rollupRows.length === 0) {
     throw new NotFoundError(`找不到 observation timeline anchor (ID: ${guardedAnchorId})`, {
       anchorId: guardedAnchorId,
@@ -494,8 +521,13 @@ export async function timeline(
     });
   }
 
-  const sessionId = linkedRows[0].sessionId;
-  const linkedInSession = linkedRows.filter((row) => row.sessionId === sessionId);
+  const metadataSessionId = captureString(metadataCapture(rollupRows[0].metadata), 'session_id');
+  let sessionId = metadataSessionId ?? linkedRows[0].sessionId;
+  let linkedInSession = linkedRows.filter((row) => row.sessionId === sessionId);
+  if (linkedInSession.length === 0 && metadataSessionId) {
+    sessionId = linkedRows[0].sessionId;
+    linkedInSession = linkedRows.filter((row) => row.sessionId === sessionId);
+  }
   const startAt = linkedInSession[0].observedAt;
   const endAt = linkedInSession[linkedInSession.length - 1].observedAt;
 
@@ -524,7 +556,10 @@ export async function timeline(
         lte(observations.observedAt, endAt)
       )
     )
-    .orderBy(asc(observations.observedAt))) as Observation[];
+    .orderBy(asc(observations.observedAt))
+    .limit(TIMELINE_MIDDLE_LIMIT + 1)) as Observation[];
+  const truncated = middleRows.length > TIMELINE_MIDDLE_LIMIT;
+  const visibleMiddleRows = middleRows.slice(0, TIMELINE_MIDDLE_LIMIT);
   const afterRows = (await db
     .select()
     .from(observations)
@@ -543,7 +578,8 @@ export async function timeline(
     anchorId: guardedAnchorId,
     depthBefore: beforeDepth,
     depthAfter: afterDepth,
-    observations: [...beforeRows.reverse(), ...middleRows, ...afterRows],
+    observations: [...beforeRows.reverse(), ...visibleMiddleRows, ...afterRows],
+    ...(truncated ? { truncated: true } : {}),
   };
 }
 
