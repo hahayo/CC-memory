@@ -99,7 +99,7 @@ done
 tree_hash() {
   local directory=$1
   local entry relative_path mode
-  [[ -d "$directory" ]] || return 1
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
 
   (
     cd "$directory"
@@ -228,7 +228,8 @@ APPLIED_SKILLS=()
 
 rollback() {
   local status=${1:-1}
-  local index destination backup failed_copy
+  local index destination backup failed_base failed_copy suffix
+  local rollback_failed=0
 
   trap - ERR INT TERM
   set +e
@@ -236,19 +237,33 @@ rollback() {
     destination=${APPLIED_DESTINATIONS[$index]}
     backup=${APPLIED_BACKUPS[$index]}
     if destination_exists "$destination"; then
-      failed_copy="$BACKUP_ROOT/$TIMESTAMP/.failed/${APPLIED_LABELS[$index]}/${APPLIED_SKILLS[$index]}"
-      mkdir -p "$(dirname "$failed_copy")"
-      if destination_exists "$failed_copy"; then
-        failed_copy="$failed_copy.$RANDOM"
+      failed_base="$BACKUP_ROOT/$TIMESTAMP/.failed/${APPLIED_LABELS[$index]}/${APPLIED_SKILLS[$index]}"
+      failed_copy=$failed_base
+      suffix=0
+      mkdir -p "$(dirname "$failed_base")"
+      while destination_exists "$failed_copy"; do
+        ((suffix += 1))
+        failed_copy="$failed_base.$suffix"
+      done
+      if ! mv "$destination" "$failed_copy"; then
+        echo "rollback could not quarantine: $destination" >&2
+        rollback_failed=1
+        continue
       fi
-      mv "$destination" "$failed_copy"
     fi
     if [[ -n "$backup" ]] && destination_exists "$backup"; then
       mkdir -p "$(dirname "$destination")"
-      mv "$backup" "$destination"
+      if ! mv "$backup" "$destination"; then
+        echo "rollback could not restore: $backup -> $destination" >&2
+        rollback_failed=1
+      fi
     fi
   done
-  echo 'install failed; restored previous skill directories' >&2
+  if ((rollback_failed == 0)); then
+    echo 'install failed; restored previous skill directories' >&2
+  else
+    echo 'install failed; rollback was incomplete, inspect backup paths' >&2
+  fi
   exit "$status"
 }
 

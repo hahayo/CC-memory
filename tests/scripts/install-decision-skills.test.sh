@@ -25,7 +25,7 @@ fail() {
 tree_hash() {
   local directory=$1
   local entry relative_path mode
-  [[ -d "$directory" ]] || return 1
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
 
   (
     cd "$directory"
@@ -48,7 +48,8 @@ tree_hash() {
 }
 
 installer() {
-  DECISION_SKILLS_TIMESTAMP="$TIMESTAMP" bash "$INSTALLER" "$@" \
+  DECISION_SKILLS_TIMESTAMP="${DECISION_SKILLS_TIMESTAMP:-$TIMESTAMP}" \
+    bash "$INSTALLER" "$@" \
     --claude-root "$CLAUDE_ROOT" \
     --codex-root "$CODEX_ROOT" \
     --port-root "$PORT_ROOT" \
@@ -85,6 +86,17 @@ done
 
 installer --check >/dev/null
 
+mv "$PORT_ROOT/save-decision" "$TMP_ROOT/linked-save-decision"
+ln -s "$TMP_ROOT/linked-save-decision" "$PORT_ROOT/save-decision"
+if installer --check >/dev/null 2>&1; then
+  fail 'check unexpectedly accepted a symlinked destination root'
+fi
+
+installer --install >/dev/null
+[[ -L "$BACKUP_ROOT/$TIMESTAMP/port/save-decision" ]] \
+  || fail 'symlinked destination root was not preserved in backup'
+assert_same_tree "$CANONICAL_ROOT/save-decision" "$PORT_ROOT/save-decision"
+
 ln -s SKILL.md "$CODEX_ROOT/setup-decision-wiki/untracked-link"
 if installer --check >/dev/null 2>&1; then
   fail 'check unexpectedly ignored a destination-only symlink'
@@ -118,6 +130,33 @@ done
 [[ "$(<"$CLAUDE_ROOT/keep-me/value.txt")" == 'preserve me' ]] \
   || fail 'unrelated skill changed during reinstall'
 
+installer --check >/dev/null
+
+ROLLBACK_TIMESTAMP='20260711T000001Z'
+FAILING_BIN="$TMP_ROOT/failing-bin"
+FAILED_COPY="$BACKUP_ROOT/$ROLLBACK_TIMESTAMP/.failed/claude/setup-decision-wiki"
+mkdir -p "$FAILING_BIN" "$FAILED_COPY" "$FAILED_COPY.1"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'destination="${@: -1}"' \
+  'mkdir -p "$destination"' \
+  'printf "%s\\n" partial > "$destination/partial.txt"' \
+  'exit 42' \
+  > "$FAILING_BIN/cp"
+chmod +x "$FAILING_BIN/cp"
+
+printf '%s\n' 'rollback drift' >> "$CLAUDE_ROOT/setup-decision-wiki/SKILL.md"
+if PATH="$FAILING_BIN:$PATH" DECISION_SKILLS_TIMESTAMP="$ROLLBACK_TIMESTAMP" \
+  installer --install >/dev/null 2>&1; then
+  fail 'install unexpectedly passed with a failing copy command'
+fi
+
+grep -q 'rollback drift' "$CLAUDE_ROOT/setup-decision-wiki/SKILL.md" \
+  || fail 'rollback did not restore the previous drifted skill'
+[[ -f "$FAILED_COPY.2/partial.txt" ]] \
+  || fail 'rollback did not choose the first free deterministic quarantine path'
+
+DECISION_SKILLS_TIMESTAMP="$ROLLBACK_TIMESTAMP" installer --install >/dev/null
 installer --check >/dev/null
 
 echo 'install-decision-skills: PASS'
