@@ -7,16 +7,39 @@ description: Use when a high-value repository decision has been explicitly settl
 
 ## Core rule
 
-Record one explicitly settled architecture（架構）, behavior（行為）, or config（設定） decision as one reviewable Git（版本控制） draft（草稿）. A proposed draft has no decision authority. Urgency, handoff（交接） pressure, or “write one option for now” never settles an unresolved choice.
+Record one explicitly settled architecture（架構）, behavior（行為）, or config（設定） decision as one reviewable Git（版本控制） draft（草稿）. A proposed draft has no decision authority.
+
+## HARD STOP — `NOT_SETTLED`
+
+Evaluate this predicate（判定條件） before generating an ID（識別碼） or performing any write:
+
+If any current request or current-session statement describes the decision's current state as **undecided, unselected, still discussing, tentative, or options open**, that fact controls—even when the same prompt names an option or commands “write,” “formalize,” or “commit” it. Stop immediately. Permit only read-only Git status（版本控制狀態） and contract/index checks. Generate no ID; create no draft or formal card; change no index or status; run no validator（驗證器）; make no commit（提交）.
+
+Return exactly:
+
+```text
+NOT_SETTLED
+Open choice: <concise unresolved choice>
+Files changed: none
+Commit: none
+```
+
+Proceed only with actual human selection evidence: an affirmative statement from a person with decision authority that selects the outcome. Never invent an approver, source, rationale, benchmark, metric, or other decision number.
+
+| Red flag or rationalization（合理化藉口） | Required interpretation |
+|---|---|
+| “Write, formalize, or commit option X now” or naming X | File-operation pressure is not selection evidence. |
+| Deadline, manager request, or handoff（交接） urgency | Pressure cannot settle an open choice. |
+| “Don't ask” or “we can correct it later” | Neither erases an explicit unsettled statement. |
 
 ## Workflow（工作流程）
 
 ### 1. Gate the repository and decision
 
 1. Locate the Git root, inspect its dirty state（未提交狀態）, and preserve unrelated work.
-2. On every invocation, re-read repository instructions, `docs/decisions/README.md`, and `docs/decisions/INDEX.md`. They are the runtime SSOT（執行期單一真相來源） for fields, lifecycle, sources, index shape, and validator（驗證器）. Never infer those from this skill.
+2. On every invocation, re-read repository instructions, `docs/decisions/README.md`, and `docs/decisions/INDEX.md`. They are the runtime SSOT（執行期單一真相來源） for fields, lifecycle, sources, index shape, and validation. Never infer those from this skill.
 3. If either decision contract file is missing, stop and invoke `setup-decision-wiki`; never create a partial Wiki（知識庫）.
-4. Require an authorized human to have explicitly selected one high-value outcome. If the choice remains unsettled, create no ID（識別碼）, draft, formal card, index or status edit, or commit（提交）; report the open choice. Split multiple settled decisions into separate runs.
+4. If `NOT_SETTLED` did not fire, verify direct human evidence explicitly selects one high-value outcome. Split multiple settled decisions into separate runs.
 
 ### 2. Create one safe proposed draft
 
