@@ -395,4 +395,70 @@ describe('validateDecisionWiki', () => {
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, cards: 1 });
   });
+
+  it.each([
+    'invalid: unquoted separator',
+    '"valid"trailing"',
+  ])('rejects malformed restricted scalar %s', async (title) => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120021Z-malformed-scalar';
+    await writeCard(repoRoot, `${id}.md`, makeCard({ id, title }));
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'FRONTMATTER_FORMAT');
+  });
+
+  it('ignores INDEX table rows inside HTML comments', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120022Z-commented-index-row';
+    await writeCard(repoRoot, `${id}.md`, makeCard({ id }));
+    await writeFile(
+      join(repoRoot, 'docs', 'decisions', 'INDEX.md'),
+      `# 決策索引\n\n<!--\n| \`${id}\` | [開啟](./${id}.md) |\n-->\n`,
+    );
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_ENTRY_MISSING');
+  });
+
+  it('does not join source blockquotes separated by a fenced block', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120023Z-fence-breaks-source';
+    const excerpt = 'first source line\nsecond source line';
+    const card = makeCard({ id, excerpt }).replace(
+      '> first source line\n> second source line',
+      '> first source line\n```text\nignored\n```\n> second source line',
+    );
+    await writeCard(repoRoot, `${id}.md`, card);
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'SOURCE_HASH_MISMATCH');
+  });
+
+  it('rejects a Windows single-backslash rooted source locator', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120024Z-win32-rooted-locator';
+    await writeCard(repoRoot, `${id}.md`, makeCard({
+      id,
+      sourceRef: '\\private\\decision.md',
+    }));
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'ABSOLUTE_SOURCE_LOCATOR');
+  });
+
+  it('prints clean JSON and exits 0 for a valid repository', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120025Z-cli-valid';
+    await writeCard(repoRoot, `${id}.md`, makeCard({ id }));
+    await writeIndex(repoRoot, [id]);
+
+    const result = await runTsScript(
+      join(process.cwd(), 'scripts', 'validate-decisions.ts'),
+      repoRoot,
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({ ok: true, cards: 1, issues: [] });
+  });
 });

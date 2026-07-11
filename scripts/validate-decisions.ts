@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 
 export interface ValidationIssue {
   code: string;
@@ -81,9 +81,14 @@ function unquoteScalar(rawValue: string): string | undefined {
   const first = value[0];
   const last = value[value.length - 1];
   if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
-    return value.slice(1, -1);
+    const inner = value.slice(1, -1);
+    const validInner = first === '"'
+      ? /^(?:[^"\\]|\\.)*$/.test(inner)
+      : /^(?:[^']|'')*$/.test(inner);
+    return validInner ? inner : undefined;
   }
   if (first === "'" || first === '"' || last === "'" || last === '"') return undefined;
+  if (value.includes(': ')) return undefined;
 
   if (
     value.startsWith('[')
@@ -345,13 +350,45 @@ function sourceExcerpts(body: string): Map<string, string> {
 function markdownLinesOutsideFences(markdown: string): string[] {
   const visibleLines: string[] = [];
   let fence: { character: '`' | '~'; length: number } | undefined;
+  let inHtmlComment = false;
 
-  for (const line of markdown.split('\n')) {
+  for (const rawLine of markdown.split('\n')) {
     if (fence !== undefined) {
       const closingFence = new RegExp(
         `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
       );
-      if (closingFence.test(line)) fence = undefined;
+      if (closingFence.test(rawLine)) fence = undefined;
+      continue;
+    }
+
+    let line = '';
+    let cursor = 0;
+    let removedComment = false;
+    while (cursor <= rawLine.length) {
+      if (inHtmlComment) {
+        removedComment = true;
+        const commentEnd = rawLine.indexOf('-->', cursor);
+        if (commentEnd === -1) {
+          cursor = rawLine.length + 1;
+          break;
+        }
+        inHtmlComment = false;
+        cursor = commentEnd + 3;
+        continue;
+      }
+
+      const commentStart = rawLine.indexOf('<!--', cursor);
+      if (commentStart === -1) {
+        line += rawLine.slice(cursor);
+        break;
+      }
+      line += rawLine.slice(cursor, commentStart);
+      inHtmlComment = true;
+      removedComment = true;
+      cursor = commentStart + 4;
+    }
+    if (removedComment && line.trim() === '') {
+      visibleLines.push('');
       continue;
     }
 
@@ -361,6 +398,7 @@ function markdownLinesOutsideFences(markdown: string): string[] {
         character: openingFence[1][0] as '`' | '~',
         length: openingFence[1].length,
       };
+      visibleLines.push('');
       continue;
     }
     visibleLines.push(line);
@@ -489,8 +527,7 @@ function validateCard(card: ParsedCard): ValidationIssue[] {
 
 function isLocalAbsoluteLocator(locator: string): boolean {
   return isAbsolute(locator)
-    || /^[A-Za-z]:[\\/]/.test(locator)
-    || locator.startsWith('\\\\')
+    || win32.isAbsolute(locator)
     || /^file:/i.test(locator);
 }
 
