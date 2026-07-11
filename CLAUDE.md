@@ -108,3 +108,12 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 4. **類型安全** - TypeScript strict mode + Drizzle ORM
 5. **MCP 標準** - 使用 StdioServerTransport 實作
 6. **保留 namespace** - `__personal__` 為個人近況/決策/待辦的保留 projectId。forced-mode instance 可讀寫；一般 project-mode instance 一律 deny（含全專案 search 於 WHERE 排除），避免個人資料外洩到專案 context
+
+## 決策文件工作流程
+
+- 在進行重大架構、系統行為或 config（設定）決策前，先讀 `docs/decisions/INDEX.md` 與相關決策卡。
+- 只有使用者或負責人明確拍板的決策，才可寫入 `docs/decisions/_draft/`；agent（代理程式）不得自行接受決策。
+- 若新討論只與既有決策卡相似，只能標為「未持久化推測」，不得視為已接受的決策。
+- `supersedes`（取代）、`depends_on`（依賴）、`conflicts_with`（衝突）與 `related_to`（相關）四種持久化關係都須人工確認，不得由 agent 自動判定。
+- 翻案時必須建立新卡，並以 `supersedes` 指向舊卡；不得直接改寫舊卡來掩蓋歷史。
+- 決策接受後，須在同一個 commit（提交）更新 `docs/decisions/INDEX.md`，並執行 `npm run decisions:validate`。
