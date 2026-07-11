@@ -1,6 +1,6 @@
 # Shared Decision Wiki Skills Design
 
-> Status：PROPOSED，待使用者書面 review（審查）後才進入實作。
+> Status：APPROVED（已核准）。使用者於 2026-07-11 書面核准本設計並授權進入實作。
 
 ## 目標
 
