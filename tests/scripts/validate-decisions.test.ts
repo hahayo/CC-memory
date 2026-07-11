@@ -576,4 +576,21 @@ describe('validateDecisionWiki', () => {
 
     expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_LINK_INVALID');
   });
+
+  it('ignores an unclosed HTML comment inside a closed fenced code block', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120035Z-fenced-unclosed-comment';
+    const card = makeCard({ id }).replace(
+      'Context.',
+      'Context.\n\n```html\n<!--\n```',
+    );
+    await writeCard(repoRoot, `${id}.md`, card);
+    await writeIndex(repoRoot, [id]);
+
+    await expect(validateDecisionWiki(repoRoot)).resolves.toEqual({
+      ok: true,
+      cards: 1,
+      issues: [],
+    });
+  });
 });

@@ -362,6 +362,15 @@ function markdownLineViews(markdown: string): MarkdownLineView[] {
   let inHtmlComment = false;
 
   for (const raw of markdown.split('\n')) {
+    if (fence !== undefined) {
+      const closingFence = new RegExp(
+        `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
+      );
+      if (closingFence.test(raw)) fence = undefined;
+      lines.push({ raw, structure: '' });
+      continue;
+    }
+
     let structure = '';
     let cursor = 0;
     while (cursor <= raw.length) {
@@ -384,15 +393,6 @@ function markdownLineViews(markdown: string): MarkdownLineView[] {
       structure += raw.slice(cursor, commentStart);
       inHtmlComment = true;
       cursor = commentStart + 4;
-    }
-
-    if (fence !== undefined) {
-      const closingFence = new RegExp(
-        `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
-      );
-      if (closingFence.test(structure)) fence = undefined;
-      lines.push({ raw, structure: '' });
-      continue;
     }
 
     const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(structure);
