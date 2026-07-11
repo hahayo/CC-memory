@@ -461,4 +461,20 @@ describe('validateDecisionWiki', () => {
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toEqual({ ok: true, cards: 1, issues: [] });
   });
+
+  it('hashes HTML-comment text inside a source blockquote exactly', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120026Z-comment-source-excerpt';
+    await writeCard(repoRoot, `${id}.md`, makeCard({
+      id,
+      excerpt: '<!-- approved -->',
+    }));
+    await writeIndex(repoRoot, [id]);
+
+    await expect(validateDecisionWiki(repoRoot)).resolves.toEqual({
+      ok: true,
+      cards: 1,
+      issues: [],
+    });
+  });
 });

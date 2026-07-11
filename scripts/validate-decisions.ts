@@ -350,17 +350,36 @@ function sourceExcerpts(body: string): Map<string, string> {
 function markdownLinesOutsideFences(markdown: string): string[] {
   const visibleLines: string[] = [];
   let fence: { character: '`' | '~'; length: number } | undefined;
-  let inHtmlComment = false;
 
-  for (const rawLine of markdown.split('\n')) {
+  for (const line of markdown.split('\n')) {
     if (fence !== undefined) {
       const closingFence = new RegExp(
         `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
       );
-      if (closingFence.test(rawLine)) fence = undefined;
+      if (closingFence.test(line)) fence = undefined;
       continue;
     }
 
+    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (openingFence !== null) {
+      fence = {
+        character: openingFence[1][0] as '`' | '~',
+        length: openingFence[1].length,
+      };
+      visibleLines.push('');
+      continue;
+    }
+    visibleLines.push(line);
+  }
+
+  return visibleLines;
+}
+
+function markdownStructureLines(markdown: string): string[] {
+  const commentFilteredLines: string[] = [];
+  let inHtmlComment = false;
+
+  for (const rawLine of markdown.split('\n')) {
     let line = '';
     let cursor = 0;
     let removedComment = false;
@@ -388,23 +407,13 @@ function markdownLinesOutsideFences(markdown: string): string[] {
       cursor = commentStart + 4;
     }
     if (removedComment && line.trim() === '') {
-      visibleLines.push('');
+      commentFilteredLines.push('');
       continue;
     }
-
-    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (openingFence !== null) {
-      fence = {
-        character: openingFence[1][0] as '`' | '~',
-        length: openingFence[1].length,
-      };
-      visibleLines.push('');
-      continue;
-    }
-    visibleLines.push(line);
+    commentFilteredLines.push(line);
   }
 
-  return visibleLines;
+  return markdownLinesOutsideFences(commentFilteredLines.join('\n'));
 }
 
 function validateCard(card: ParsedCard): ValidationIssue[] {
@@ -438,7 +447,7 @@ function validateCard(card: ParsedCard): ValidationIssue[] {
     }
   }
 
-  const bodyLines = new Set(markdownLinesOutsideFences(card.body).map((line) => line.trim()));
+  const bodyLines = new Set(markdownStructureLines(card.body).map((line) => line.trim()));
   for (const section of REQUIRED_SECTIONS) {
     if (!bodyLines.has(`## ${section}`)) {
       issues.push(makeIssue('REQUIRED_SECTION_MISSING', card.file, `missing section ${section}`));
@@ -714,7 +723,7 @@ function containsExactId(value: string, id: string): boolean {
 }
 
 function indexContainsLinkedRow(index: string, id: string): boolean {
-  return markdownLinesOutsideFences(index).some((line) => {
+  return markdownStructureLines(index).some((line) => {
     const row = line.trim();
     if (!row.startsWith('|') || !row.endsWith('|') || !containsExactId(row, id)) return false;
 
