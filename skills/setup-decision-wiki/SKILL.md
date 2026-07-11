@@ -46,10 +46,14 @@ If Node.js is missing or older than 18, stop and ask the user to choose a suppor
 
 ### 3. Choose a branch
 
+Inventory the whole footprint before choosing. Check for the `docs/decisions` path even when it is empty; all existing `DEC-*.md`, `_draft/`, `INDEX.md`, decision README, and ADR files under `docs/`; and every existing or repository-configured decision validator and test, including but not limited to the portable target paths.
+
 | Observable state | Required branch |
 |---|---|
-| `docs/decisions/README.md` is absent | Install from the bundled assets. |
-| It exists | Upgrade in place; retain all formal cards and accepted ADRs. |
+| The entire footprint is absent | Install from the bundled assets. |
+| Any footprint path or ADR exists | Upgrade/inventory in place; retain all existing relevant files before proposing changes. |
+
+README absence alone never proves a fresh install. A partial decision directory, card, draft, index, validator, test, or ADR always takes the upgrade branch.
 
 For an install, propose these repo-relative asset mappings:
 
@@ -71,8 +75,8 @@ For an upgrade:
 
 ### 4. Build a review patch
 
-1. Create a temporary candidate root outside the repo. For installs, copy the bundled decision documents into their repo-relative paths. For upgrades, first copy the complete current `docs/decisions/` tree and every referenced ADR into the same repo-relative paths, then overlay proposed changes. Keep unrelated files out of the candidate.
-2. Mirror proposed validator and test targets under the candidate root. For upgrades, start each candidate file from its current contents and make the smallest contract-preserving change. Never replace a populated `INDEX.md` with the empty template.
+1. Create a temporary candidate root outside the repo. For installs, copy the bundled decision documents into their repo-relative paths. For upgrades, seed the candidate with every relevant path found during inventory: the complete current decision tree, every decision card and ADR at its existing repo-relative path, plus every existing decision validator, test, and the configuration that invokes them. Keep unrelated files out of the candidate.
+2. Only after seeding, overlay proposed documents, validator, and test. For upgrades, start each candidate file from its current contents and make the smallest contract-preserving change. Never replace a populated `INDEX.md` with the empty template or silently move an existing card or ADR.
 3. Validate the candidate tree before touching the repo:
 
    ```bash

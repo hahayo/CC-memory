@@ -234,9 +234,10 @@ function parseCard(content, absoluteFile, file, draft) {
 function sourceExcerpts(body) {
     const lines = markdownLineViews(body);
     const excerpts = new Map();
+    const headingCounts = new Map();
     const sourceSection = lines.findIndex(({ structure }) => structure.trim() === '## 原文溯源');
     if (sourceSection === -1)
-        return excerpts;
+        return { excerpts, headingCounts };
     let index = sourceSection + 1;
     while (index < lines.length && !/^##\s+/.test(lines[index].structure)) {
         const heading = /^###\s+(.+?)\s*$/.exec(lines[index].structure);
@@ -245,6 +246,7 @@ function sourceExcerpts(body) {
             continue;
         }
         const sourceId = heading[1];
+        headingCounts.set(sourceId, (headingCounts.get(sourceId) ?? 0) + 1);
         index += 1;
         while (index < lines.length && lines[index].structure.trim() === '')
             index += 1;
@@ -255,10 +257,10 @@ function sourceExcerpts(body) {
             excerptLines.push(lines[index].raw.slice(2));
             index += 1;
         }
-        if (excerptLines.length > 0)
+        if (excerptLines.length > 0 && !excerpts.has(sourceId))
             excerpts.set(sourceId, excerptLines.join('\n'));
     }
-    return excerpts;
+    return { excerpts, headingCounts };
 }
 function markdownLineViews(markdown) {
     const lines = [];
@@ -339,7 +341,18 @@ function validateCard(card) {
     if (!card.draft && !card.sources.some((source) => source.verified === 'true')) {
         issues.push(makeIssue('VERIFIED_SOURCE_REQUIRED', card.file, 'formal decision card requires at least one verified source'));
     }
-    const excerpts = sourceExcerpts(card.body);
+    const { excerpts, headingCounts } = sourceExcerpts(card.body);
+    const declaredSourceIds = new Set(card.sources
+        .map((source) => source.id)
+        .filter((sourceId) => sourceId !== undefined));
+    for (const [sourceId, count] of headingCounts) {
+        if (count > 1) {
+            issues.push(makeIssue('SOURCE_HEADING_DUPLICATE', card.file, `source heading ${sourceId} appears more than once`));
+        }
+        if (!declaredSourceIds.has(sourceId)) {
+            issues.push(makeIssue('SOURCE_HEADING_UNDECLARED', card.file, `source heading ${sourceId} has no matching frontmatter source`));
+        }
+    }
     const sourceIds = new Set();
     for (const source of card.sources) {
         for (const field of SOURCE_FIELDS) {
@@ -569,13 +582,17 @@ function indexDecisionRows(index) {
         const row = line.trim();
         if (!row.startsWith('|') || !row.endsWith('|'))
             continue;
-        const idCell = /^\|\s*`([^`]+)`\s*\|/.exec(row);
-        if (idCell === null || !DECISION_ID_PATTERN.test(idCell[1]))
+        const cells = row.slice(1, -1).split('|').map((cell) => cell.trim());
+        const quotedId = /^`([^`]+)`$/.exec(cells[0] ?? '');
+        const id = quotedId === null ? (cells[0] ?? '') : quotedId[1];
+        if (!id.startsWith('DEC-'))
             continue;
         const links = [...row.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)];
         rows.push({
-            id: idCell[1],
+            id,
+            status: cells[1],
             target: links.length === 0 ? undefined : links[links.length - 1][1],
+            validId: quotedId !== null && DECISION_ID_PATTERN.test(id),
         });
     }
     return rows;
@@ -591,10 +608,15 @@ async function indexIssues(repoRoot, cards) {
     }
     const issues = [];
     const formalCards = cards.filter((card) => !card.draft && card.fields.id !== undefined);
-    const formalIds = new Set(formalCards.map((card) => card.fields.id));
+    const formalCardsById = new Map(formalCards.map((card) => [card.fields.id, card]));
     const rowCounts = new Map();
     for (const row of indexDecisionRows(index)) {
-        if (!formalIds.has(row.id)) {
+        if (!row.validId) {
+            issues.push(makeIssue('INDEX_ID_INVALID', 'docs/decisions/INDEX.md', `INDEX.md contains a malformed DEC ID: ${row.id}`));
+            continue;
+        }
+        const formalCard = formalCardsById.get(row.id);
+        if (formalCard === undefined) {
             issues.push(makeIssue('INDEX_ENTRY_STALE', 'docs/decisions/INDEX.md', `INDEX.md contains a DEC row without a formal card: ${row.id}`));
             continue;
         }
@@ -606,6 +628,10 @@ async function indexIssues(repoRoot, cards) {
         const expectedTarget = `./${row.id}.md`;
         if (row.target !== expectedTarget) {
             issues.push(makeIssue('INDEX_LINK_INVALID', 'docs/decisions/INDEX.md', `formal decision ${row.id} must link exactly to ${expectedTarget}`));
+        }
+        const expectedStatus = formalCard.fields.status;
+        if (expectedStatus !== undefined && row.status !== expectedStatus) {
+            issues.push(makeIssue('INDEX_STATUS_MISMATCH', 'docs/decisions/INDEX.md', `formal decision ${row.id} has INDEX status ${row.status ?? '(missing)'} instead of ${expectedStatus}`));
         }
     }
     for (const card of formalCards) {

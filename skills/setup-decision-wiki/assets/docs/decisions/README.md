@@ -6,7 +6,7 @@
 
 - `_draft/`：尚未具決策權威的候選卡，只能使用 `status: proposed`。
 - 根目錄 `DEC-*.md`：人工接受的正式卡，只能使用 `active`、`superseded` 或 `archived`。
-- `INDEX.md`：正式卡及既有 ADR（Architecture Decision Record，架構決策紀錄）的導覽索引。每張正式 DEC 必須恰有一列可見索引；草稿、未知 ID、重複或過期的 DEC 列都不合法。正式 DEC 的 Markdown（標記語言）連結必須精確為 `./<id>.md`，不可使用 URI scheme（統一資源識別符配置）、絕對路徑、路徑穿越或其他位置；既有 ADR 連結可保留原路徑。
+- `INDEX.md`：正式卡及既有 ADR（Architecture Decision Record，架構決策紀錄）的導覽索引。每張正式 DEC 必須恰有一列可見索引，且索引狀態必須等於卡片狀態；草稿、未知 ID、重複、過期或格式不合 `DEC-YYYYMMDDTHHMMSSZ-<kebab-slug>` 的 DEC-like（類 DEC）列都不合法。正式 DEC 的 Markdown（標記語言）連結必須精確為 `./<id>.md`，不可使用 URI scheme（統一資源識別符配置）、絕對路徑、路徑穿越或其他位置；既有 ADR 連結可保留原路徑。
 
 只有明確拍板的重大架構、行為或 config（設定）決策才建立草稿。Agent（代理程式）不得自行接受；人工確認內容、來源及關係後，才可把卡片移出 `_draft/`，並在同一個 commit（提交）更新索引。
 
@@ -62,7 +62,7 @@ Semantic similarity（語意相似度）只能在閱讀或搜尋時計算並標�
 5. 原文溯源
 6. 後續結果與沿革
 
-每個 source（來源）都要在可見的「原文溯源」下使用可見的 `### <source-id>`，後接連續 blockquote（引文區塊）行；藏在 HTML comment（HTML 註解）或 fenced code block（圍欄程式碼區塊）中的節或來源標題不算。寫入前先遮罩密鑰、個資及不應進 Git 的內容，不保存完整 transcript（逐字紀錄）。Hash（雜湊）正規化規則固定為：移除每行開頭的 `> `，其餘 bytes（位元組）原樣保留，以 `\n` 連接，不加尾端換行，再用 UTF-8 計算 SHA-256。
+每個 source（來源）都要在可見的「原文溯源」下恰有一個可見的 `### <source-id>`，後接連續 blockquote（引文區塊）行；不得重複標題，也不得出現 frontmatter（檔頭）未宣告的孤立來源標題。藏在 HTML comment（HTML 註解）或 fenced code block（圍欄程式碼區塊）中的節或來源標題不算。寫入前先遮罩密鑰、個資及不應進 Git 的內容，不保存完整 transcript（逐字紀錄）。Hash（雜湊）正規化規則固定為：移除每行開頭的 `> `，其餘 bytes（位元組）原樣保留，以 `\n` 連接，不加尾端換行，再用 UTF-8 計算 SHA-256。
 
 ## 接受、取代與既有資料
 

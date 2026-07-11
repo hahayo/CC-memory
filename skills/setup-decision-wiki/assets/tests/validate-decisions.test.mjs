@@ -178,6 +178,38 @@ test('reports source excerpt hash drift', async () => {
   assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes('SOURCE_HASH_MISMATCH'));
 });
 
+test('rejects duplicate visible source headings', async () => {
+  const repoRoot = await createRepo();
+  const id = 'DEC-20260711T120015Z-duplicate-source-heading';
+  const quotedExcerpt = defaultExcerpt.split('\n').map((line) => `> ${line}`).join('\n');
+  const sourceBlock = `### S1\n\n${quotedExcerpt}`;
+  const card = makeCard({ id }).replace(
+    sourceBlock,
+    `${sourceBlock}\n\n### S1\n\n${quotedExcerpt}`,
+  );
+  await writeCard(repoRoot, `${id}.md`, card);
+  await writeIndex(repoRoot, [{ id }]);
+
+  assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes(
+    'SOURCE_HEADING_DUPLICATE',
+  ));
+});
+
+test('rejects an undeclared visible source heading', async () => {
+  const repoRoot = await createRepo();
+  const id = 'DEC-20260711T120016Z-undeclared-source-heading';
+  const card = makeCard({ id }).replace(
+    '## 後續結果與沿革',
+    '### S2\n\n> Orphan excerpt.\n\n## 後續結果與沿革',
+  );
+  await writeCard(repoRoot, `${id}.md`, card);
+  await writeIndex(repoRoot, [{ id }]);
+
+  assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes(
+    'SOURCE_HEADING_UNDECLARED',
+  ));
+});
+
 for (const field of ['similarity', 'semantic_similarity', 'similar_to']) {
   test(`forbids persisted ${field}`, async () => {
     const repoRoot = await createRepo();
@@ -294,6 +326,28 @@ test('rejects a proposed draft row in INDEX', async () => {
   await writeIndex(repoRoot, [{ id, status: 'proposed' }]);
 
   assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes('INDEX_ENTRY_STALE'));
+});
+
+test('rejects a malformed DEC-like ID in INDEX', async () => {
+  const repoRoot = await createRepo();
+  const malformedId = 'DEC-20260711T120017Z-Bad-Slug';
+  await writeIndexRows(
+    repoRoot,
+    `| \`${malformedId}\` | active | 2026-07-11 | Invalid ID | [開啟](./${malformedId}.md) |\n`,
+  );
+
+  assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes('INDEX_ID_INVALID'));
+});
+
+test('rejects an INDEX status that differs from the formal card', async () => {
+  const repoRoot = await createRepo();
+  const id = 'DEC-20260711T120018Z-index-status-mismatch';
+  await writeCard(repoRoot, `${id}.md`, makeCard({ id, status: 'active' }));
+  await writeIndex(repoRoot, [{ id, status: 'archived' }]);
+
+  assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes(
+    'INDEX_STATUS_MISMATCH',
+  ));
 });
 
 test('CLI prints JSON and exits nonzero for an invalid repository', async () => {
