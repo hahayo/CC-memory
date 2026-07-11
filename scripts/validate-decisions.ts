@@ -320,14 +320,14 @@ function parseCard(content: string, absoluteFile: string, file: string, draft: b
 }
 
 function sourceExcerpts(body: string): Map<string, string> {
-  const lines = markdownLinesOutsideFences(body);
+  const lines = markdownLineViews(body);
   const excerpts = new Map<string, string>();
-  const sourceSection = lines.findIndex((line) => line.trim() === '## 原文溯源');
+  const sourceSection = lines.findIndex(({ structure }) => structure.trim() === '## 原文溯源');
   if (sourceSection === -1) return excerpts;
 
   let index = sourceSection + 1;
-  while (index < lines.length && !/^##\s+/.test(lines[index])) {
-    const heading = /^###\s+(.+?)\s*$/.exec(lines[index]);
+  while (index < lines.length && !/^##\s+/.test(lines[index].structure)) {
+    const heading = /^###\s+(.+?)\s*$/.exec(lines[index].structure);
     if (heading === null) {
       index += 1;
       continue;
@@ -335,11 +335,15 @@ function sourceExcerpts(body: string): Map<string, string> {
 
     const sourceId = heading[1];
     index += 1;
-    while (index < lines.length && lines[index].trim() === '') index += 1;
+    while (index < lines.length && lines[index].structure.trim() === '') index += 1;
 
     const excerptLines: string[] = [];
-    while (index < lines.length && lines[index].startsWith('> ')) {
-      excerptLines.push(lines[index].slice(2));
+    while (
+      index < lines.length
+      && lines[index].structure.startsWith('> ')
+      && lines[index].raw.startsWith('> ')
+    ) {
+      excerptLines.push(lines[index].raw.slice(2));
       index += 1;
     }
     if (excerptLines.length > 0) excerpts.set(sourceId, excerptLines.join('\n'));
@@ -347,48 +351,24 @@ function sourceExcerpts(body: string): Map<string, string> {
   return excerpts;
 }
 
-function markdownLinesOutsideFences(markdown: string): string[] {
-  const visibleLines: string[] = [];
-  let fence: { character: '`' | '~'; length: number } | undefined;
-
-  for (const line of markdown.split('\n')) {
-    if (fence !== undefined) {
-      const closingFence = new RegExp(
-        `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
-      );
-      if (closingFence.test(line)) fence = undefined;
-      continue;
-    }
-
-    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (openingFence !== null) {
-      fence = {
-        character: openingFence[1][0] as '`' | '~',
-        length: openingFence[1].length,
-      };
-      visibleLines.push('');
-      continue;
-    }
-    visibleLines.push(line);
-  }
-
-  return visibleLines;
+interface MarkdownLineView {
+  raw: string;
+  structure: string;
 }
 
-function markdownStructureLines(markdown: string): string[] {
-  const commentFilteredLines: string[] = [];
+function markdownLineViews(markdown: string): MarkdownLineView[] {
+  const lines: MarkdownLineView[] = [];
+  let fence: { character: '`' | '~'; length: number } | undefined;
   let inHtmlComment = false;
 
-  for (const rawLine of markdown.split('\n')) {
-    let line = '';
+  for (const raw of markdown.split('\n')) {
+    let structure = '';
     let cursor = 0;
-    let removedComment = false;
-    while (cursor <= rawLine.length) {
+    while (cursor <= raw.length) {
       if (inHtmlComment) {
-        removedComment = true;
-        const commentEnd = rawLine.indexOf('-->', cursor);
+        const commentEnd = raw.indexOf('-->', cursor);
         if (commentEnd === -1) {
-          cursor = rawLine.length + 1;
+          cursor = raw.length + 1;
           break;
         }
         inHtmlComment = false;
@@ -396,24 +376,42 @@ function markdownStructureLines(markdown: string): string[] {
         continue;
       }
 
-      const commentStart = rawLine.indexOf('<!--', cursor);
+      const commentStart = raw.indexOf('<!--', cursor);
       if (commentStart === -1) {
-        line += rawLine.slice(cursor);
+        structure += raw.slice(cursor);
         break;
       }
-      line += rawLine.slice(cursor, commentStart);
+      structure += raw.slice(cursor, commentStart);
       inHtmlComment = true;
-      removedComment = true;
       cursor = commentStart + 4;
     }
-    if (removedComment && line.trim() === '') {
-      commentFilteredLines.push('');
+
+    if (fence !== undefined) {
+      const closingFence = new RegExp(
+        `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
+      );
+      if (closingFence.test(structure)) fence = undefined;
+      lines.push({ raw, structure: '' });
       continue;
     }
-    commentFilteredLines.push(line);
+
+    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(structure);
+    if (openingFence !== null) {
+      fence = {
+        character: openingFence[1][0] as '`' | '~',
+        length: openingFence[1].length,
+      };
+      lines.push({ raw, structure: '' });
+      continue;
+    }
+    lines.push({ raw, structure });
   }
 
-  return markdownLinesOutsideFences(commentFilteredLines.join('\n'));
+  return lines;
+}
+
+function markdownStructureLines(markdown: string): string[] {
+  return markdownLineViews(markdown).map(({ structure }) => structure);
 }
 
 function validateCard(card: ParsedCard): ValidationIssue[] {
@@ -625,10 +623,17 @@ function relationIssues(cards: ParsedCard[], legacyIds: Set<string>): Validation
   const decisionIds = new Set(cards
     .map((card) => card.fields.id)
     .filter((id): id is string => id !== undefined));
-  const targets = new Set([...decisionIds, ...legacyIds]);
+  const formalDecisionIds = new Set(cards
+    .filter((card) => !card.draft)
+    .map((card) => card.fields.id)
+    .filter((id): id is string => id !== undefined));
 
   for (const card of cards) {
     const id = card.fields.id;
+    const targets = new Set([
+      ...(card.draft ? decisionIds : formalDecisionIds),
+      ...legacyIds,
+    ]);
     for (const relation of RELATION_FIELDS) {
       for (const target of card.relations[relation]) {
         if (target === id) {
@@ -641,7 +646,7 @@ function relationIssues(cards: ParsedCard[], legacyIds: Set<string>): Validation
           issues.push(makeIssue(
             'DANGLING_RELATION',
             card.file,
-            `${relation} points to missing decision ${target}`,
+            `${relation} points to a missing or non-formal decision ${target}`,
           ));
         }
       }
@@ -717,23 +722,27 @@ function duplicateIdIssues(cards: ParsedCard[]): ValidationIssue[] {
   return issues;
 }
 
-function containsExactId(value: string, id: string): boolean {
-  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^A-Za-z0-9-])${escapedId}($|[^A-Za-z0-9-])`).test(value);
+interface IndexDecisionRow {
+  id: string;
+  target: string | undefined;
 }
 
-function indexContainsLinkedRow(index: string, id: string): boolean {
-  return markdownStructureLines(index).some((line) => {
+function indexDecisionRows(index: string): IndexDecisionRow[] {
+  const rows: IndexDecisionRow[] = [];
+  for (const line of markdownStructureLines(index)) {
     const row = line.trim();
-    if (!row.startsWith('|') || !row.endsWith('|') || !containsExactId(row, id)) return false;
+    if (!row.startsWith('|') || !row.endsWith('|')) continue;
 
-    const links = row.matchAll(/\[[^\]]+\]\(([^)]+)\)/g);
-    for (const link of links) {
-      const target = link[1].trim().replace(/^<|>$/g, '').split(/[?#]/, 1)[0];
-      if (basename(target) === `${id}.md`) return true;
-    }
-    return false;
-  });
+    const idCell = /^\|\s*`([^`]+)`\s*\|/.exec(row);
+    if (idCell === null || !DECISION_ID_PATTERN.test(idCell[1])) continue;
+
+    const links = [...row.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)];
+    rows.push({
+      id: idCell[1],
+      target: links.length === 0 ? undefined : links[links.length - 1][1],
+    });
+  }
+  return rows;
 }
 
 async function indexIssues(repoRoot: string, cards: ParsedCard[]): Promise<ValidationIssue[]> {
@@ -749,14 +758,53 @@ async function indexIssues(repoRoot: string, cards: ParsedCard[]): Promise<Valid
     )];
   }
 
-  return cards
-    .filter((card) => !card.draft && card.fields.id !== undefined)
-    .filter((card) => !indexContainsLinkedRow(index, card.fields.id))
-    .map((card) => makeIssue(
-      'INDEX_ENTRY_MISSING',
-      card.file,
-      `formal decision ${card.fields.id} is missing from INDEX.md`,
-    ));
+  const issues: ValidationIssue[] = [];
+  const formalCards = cards.filter((card) => !card.draft && card.fields.id !== undefined);
+  const formalIds = new Set(formalCards.map((card) => card.fields.id as string));
+  const rowCounts = new Map<string, number>();
+
+  for (const row of indexDecisionRows(index)) {
+    if (!formalIds.has(row.id)) {
+      issues.push(makeIssue(
+        'INDEX_ENTRY_STALE',
+        'docs/decisions/INDEX.md',
+        `INDEX.md contains a DEC row without a formal card: ${row.id}`,
+      ));
+      continue;
+    }
+
+    const count = (rowCounts.get(row.id) ?? 0) + 1;
+    rowCounts.set(row.id, count);
+    if (count > 1) {
+      issues.push(makeIssue(
+        'INDEX_ENTRY_DUPLICATE',
+        'docs/decisions/INDEX.md',
+        `formal decision ${row.id} appears more than once in INDEX.md`,
+      ));
+    }
+
+    const expectedTarget = `./${row.id}.md`;
+    if (row.target !== expectedTarget) {
+      issues.push(makeIssue(
+        'INDEX_LINK_INVALID',
+        'docs/decisions/INDEX.md',
+        `formal decision ${row.id} must link exactly to ${expectedTarget}`,
+      ));
+    }
+  }
+
+  for (const card of formalCards) {
+    const id = card.fields.id as string;
+    if ((rowCounts.get(id) ?? 0) === 0) {
+      issues.push(makeIssue(
+        'INDEX_ENTRY_MISSING',
+        card.file,
+        `formal decision ${id} is missing from INDEX.md`,
+      ));
+    }
+  }
+
+  return issues;
 }
 
 export async function validateDecisionWiki(repoRoot: string): Promise<ValidationReport> {

@@ -6,7 +6,7 @@
 
 - `_draft/`：尚未具決策權威的候選卡，只能使用 `status: proposed`。
 - 根目錄 `DEC-*.md`：人工接受的正式卡，只能使用 `active`、`superseded` 或 `archived`。
-- `INDEX.md`：正式卡及既有 ADR（Architecture Decision Record，架構決策紀錄）的導覽索引。
+- `INDEX.md`：正式卡及既有 ADR（Architecture Decision Record，架構決策紀錄）的導覽索引。每張正式 DEC 必須恰有一列可見索引；草稿、未知 ID、重複或過期的 DEC 列都不合法。正式 DEC 的 Markdown（標記語言）連結必須精確為 `./<id>.md`，不可使用 URI scheme（統一資源識別符配置）、絕對路徑、路徑穿越或其他位置；既有 ADR 連結可保留原路徑。
 
 只有明確拍板的重大架構、行為或 config（設定）決策才建立草稿。Agent（代理程式）不得自行接受；人工確認內容、來源及關係後，才可把卡片移出 `_draft/`，並在同一個 commit（提交）更新索引。
 
@@ -47,6 +47,8 @@ sources:
 - `conflicts_with`：本決策與目標決策不相容。
 - `related_to`：經人工確認、但不屬於前三類的關聯。
 
+正式卡的關係目標只能是另一張正式 DEC 或已發現的既有 ADR；`_draft/` 中的 proposed（提議中）卡不得作為正式卡的關係目標。
+
 Semantic similarity（語意相似度）只能在閱讀或搜尋時計算並標為推測，不得寫成 `similarity`、`semantic_similarity` 或 `similar_to` 欄位。若相似性值得永久保存，必須先經人工確認，再轉成 `related_to`。
 
 ## 正文與原文溯源
@@ -60,7 +62,7 @@ Semantic similarity（語意相似度）只能在閱讀或搜尋時計算並標�
 5. 原文溯源
 6. 後續結果與沿革
 
-每個 source 都要在「原文溯源」下使用 `### <source-id>`，後接連續 blockquote（引文區塊）行。寫入前先遮罩密鑰、個資及不應進 Git 的內容，不保存完整 transcript（逐字紀錄）。Hash 正規化規則固定為：移除每行開頭的 `> `，以 `\n` 連接，不加尾端換行，再用 UTF-8 計算 SHA-256。
+每個 source 都要在可見的「原文溯源」下使用可見的 `### <source-id>`，後接連續 blockquote（引文區塊）行；藏在 HTML comment（HTML 註解）中的節或來源標題不算。寫入前先遮罩密鑰、個資及不應進 Git 的內容，不保存完整 transcript（逐字紀錄）。Hash 正規化規則固定為：移除每行開頭的 `> `，其餘 bytes（位元組）原樣保留（包含 `<!-- approved -->` 這類引文內容），以 `\n` 連接，不加尾端換行，再用 UTF-8 計算 SHA-256。
 
 ## 接受、取代與既有資料
 

@@ -122,6 +122,10 @@ async function writeCard(repoRoot: string, relativePath: string, card: string): 
 
 async function writeIndex(repoRoot: string, ids: string[]): Promise<void> {
   const rows = ids.map((id) => `| \`${id}\` | [開啟](./${id}.md) |`).join('\n');
+  await writeIndexRows(repoRoot, rows);
+}
+
+async function writeIndexRows(repoRoot: string, rows: string): Promise<void> {
   await writeFile(
     join(repoRoot, 'docs', 'decisions', 'INDEX.md'),
     `# 決策索引\n\n| ID | 決策卡 |\n|---|---|\n${rows}\n`,
@@ -476,5 +480,100 @@ describe('validateDecisionWiki', () => {
       cards: 1,
       issues: [],
     });
+  });
+
+  it('does not accept an entirely HTML-commented source section as provenance', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120027Z-commented-source-section';
+    const quotedExcerpt = DEFAULT_EXCERPT.split('\n').map((line) => `> ${line}`).join('\n');
+    const sourceSection = `## 原文溯源\n\n### S1\n\n${quotedExcerpt}`;
+    const card = makeCard({ id }).replace(sourceSection, `<!--\n${sourceSection}\n-->`);
+    await writeCard(repoRoot, `${id}.md`, card);
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'SOURCE_EXCERPT_MISSING');
+  });
+
+  it('ignores a hidden duplicate source heading without changing visible excerpt bytes', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120028Z-hidden-duplicate-source';
+    const excerpt = '<!-- approved -->';
+    const sourceBlock = `### S1\n\n> ${excerpt}`;
+    const card = makeCard({ id, excerpt }).replace(
+      sourceBlock,
+      `${sourceBlock}\n\n<!--\n### S1\n\n> hidden duplicate\n-->`,
+    );
+    await writeCard(repoRoot, `${id}.md`, card);
+    await writeIndex(repoRoot, [id]);
+
+    await expect(validateDecisionWiki(repoRoot)).resolves.toEqual({
+      ok: true,
+      cards: 1,
+      issues: [],
+    });
+  });
+
+  it.each<RelationField>([
+    'supersedes',
+    'depends_on',
+    'conflicts_with',
+    'related_to',
+  ])('rejects a formal %s relation to a proposed draft', async (relation) => {
+    const repoRoot = await createRepo();
+    const formalId = `DEC-20260711T120029Z-formal-${relation.replaceAll('_', '-')}`;
+    const draftId = `DEC-20260711T120030Z-draft-${relation.replaceAll('_', '-')}`;
+    await writeCard(repoRoot, `_draft/${draftId}.md`, makeCard({
+      id: draftId,
+      status: 'proposed',
+    }));
+    await writeCard(repoRoot, `${formalId}.md`, makeCard({
+      id: formalId,
+      [relation]: [draftId],
+    }));
+    await writeIndex(repoRoot, [formalId]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'DANGLING_RELATION');
+  });
+
+  it('rejects a stale INDEX DEC row for a proposed draft', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120031Z-indexed-draft';
+    await writeCard(repoRoot, `_draft/${id}.md`, makeCard({ id, status: 'proposed' }));
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_ENTRY_STALE');
+  });
+
+  it('rejects a stale INDEX DEC row for an unknown ID', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120032Z-unknown-index-entry';
+    await writeIndex(repoRoot, [id]);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_ENTRY_STALE');
+  });
+
+  it('rejects duplicate visible INDEX rows for the same formal DEC card', async () => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120033Z-duplicate-index-entry';
+    const row = `| \`${id}\` | [開啟](./${id}.md) |`;
+    await writeCard(repoRoot, `${id}.md`, makeCard({ id }));
+    await writeIndexRows(repoRoot, `${row}\n${row}`);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_ENTRY_DUPLICATE');
+  });
+
+  it.each([
+    ['a URI scheme', 'https://example.com/CARD.md'],
+    ['an absolute path', '/tmp/CARD.md'],
+    ['path traversal', '../archive/CARD.md'],
+    ['another relative location', './archive/CARD.md'],
+  ])('rejects a formal INDEX link using %s', async (_description, targetTemplate) => {
+    const repoRoot = await createRepo();
+    const id = 'DEC-20260711T120034Z-invalid-index-link';
+    const target = targetTemplate.replace('CARD', id);
+    await writeCard(repoRoot, `${id}.md`, makeCard({ id }));
+    await writeIndexRows(repoRoot, `| \`${id}\` | [開啟](${target}) |`);
+
+    expectIssue(await validateDecisionWiki(repoRoot), 'INDEX_LINK_INVALID');
   });
 });
