@@ -41,18 +41,38 @@ Proceed only with actual human selection evidence: an affirmative statement from
 3. If either decision contract file is missing, stop and invoke `setup-decision-wiki`; never create a partial Wiki（知識庫）.
 4. If `NOT_SETTLED` did not fire, verify direct human evidence explicitly selects one high-value outcome. Split multiple settled decisions into separate runs.
 
-### 2. Create one exact proposed draft
+### 2. Build a fact ledger before drafting
 
-1. Read the actual system clock（系統時鐘） and use it for the UTC（世界協調時間） ID and `captured_at`. Use an explicit human-provided decision time for `decided_at`; when none was supplied, use the actual current time. Never invent or round a timestamp. Create only `docs/decisions/_draft/<id>.md` with `status: proposed`.
-2. Copy the exact frontmatter（檔頭） shape from the current README. Keep all four relationship fields in its required inline-array（行內陣列） syntax—for example, `supersedes: [DEC-...]` and `related_to: [DEC-...]`, never indented block lists.
-3. A source excerpt is not a summary. Copy the selected source text into the visible blockquote byte-for-byte, except for the minimum substitution of each sensitive span with `[REDACTED]`. Do not add or paraphrase approval, locator, or explanation lines inside the blockquote. Store the durable locator（定位資訊） only in source metadata（中繼資料）. Normalize and SHA-256（安全雜湊演算法） hash exactly that visible redacted text as the repository specifies.
-4. Never retain a full transcript（逐字紀錄） or invent provenance（溯源資訊）. Use only supplied or repository-established decision facts. When required rationale, alternatives, consequences, or outcomes are absent, write `Not recorded` or the repository's equivalent instead of filling gaps.
+Build this exact fact ledger（事實帳本） before writing a file:
 
-### 3. Constrain relationships and supersession
+```text
+selected_outcome:
+supersedes:
+depends_on:
+conflicts_with:
+related_to:
+source_excerpt_bytes:
+locator:
+decision_time:
+capture_time:
+background:
+alternatives_and_rejection_reasons:
+rationale:
+consequences:
+outcomes:
+```
 
-- Treat semantic similarity（語意相似度） only as an unpersisted hypothesis.
-- Persist only `supersedes`, `depends_on`, `conflicts_with`, or `related_to`, and only when a human explicitly confirms that exact relationship. Otherwise leave it empty.
-- A reversal creates a new proposed card pointing to the old formal record. Never revise the old decision body. After acceptance, change only the old card's lifecycle status to `superseded`.
+Populate slots only from exact user text, read-only repository evidence, or the actual system clock（系統時鐘） for time. Domain knowledge（領域知識）, likely benefits, and plausible implications are not evidence. Missing narrative slots—background, alternatives and rejection reasons, rationale, consequences, or outcomes—must render as literal `Not recorded` or a repository-mandated equivalent.
+
+For the four relationship lists, copy every explicitly human-confirmed supported edge into its named list. Keep the same target in multiple lists when multiple relation types were confirmed; never infer, merge, or deduplicate across relation types. Semantic similarity（語意相似度） populates no field.
+
+### 3. Render one exact proposed draft
+
+1. Use the actual clock for the UTC（世界協調時間） ID and `capture_time`. Use an explicit human decision time when supplied; otherwise use the actual current time. Never invent or round timestamps.
+2. Copy the current README's exact frontmatter（檔頭） shape. Render all four ledger relationship lists in its required inline-array（行內陣列） syntax—for example, `supersedes: [DEC-...]` and `related_to: [DEC-...]`, never block lists.
+3. If the user labels a span as source, excerpt, or quote, `source_excerpt_bytes` equals only those bytes. Its visible blockquote contains only those bytes with the minimum sensitive substring replaced by `[REDACTED]`; never prepend or append a decision summary, approval statement, locator, or explanation. Keep `locator` only in source metadata（中繼資料） and SHA-256（安全雜湊演算法） hash exactly the visible redacted text under the repository normalization rule.
+4. Render body sections only from these ledger slots, in order: `background`; `alternatives_and_rejection_reasons`; `selected_outcome` plus `rationale`; `consequences`; source metadata plus `source_excerpt_bytes`; `outcomes`. Never retain a full transcript（逐字紀錄） or invent provenance（溯源資訊）. Create only `docs/decisions/_draft/<id>.md` with `status: proposed`.
+5. A reversal creates a new proposed card. Never revise the old decision body; after acceptance, change only its lifecycle status to `superseded`.
 
 ### 4. Validate before preview
 
