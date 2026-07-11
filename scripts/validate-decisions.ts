@@ -83,6 +83,7 @@ function unquoteScalar(rawValue: string): string | undefined {
   if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
     return value.slice(1, -1);
   }
+  if (first === "'" || first === '"' || last === "'" || last === '"') return undefined;
 
   if (
     value.startsWith('[')
@@ -91,6 +92,8 @@ function unquoteScalar(rawValue: string): string | undefined {
     || value.endsWith('}')
     || value === '|'
     || value === '>'
+    || /^[!&*@`]/.test(value)
+    || /^[-?:]\s/.test(value)
   ) {
     return undefined;
   }
@@ -185,6 +188,7 @@ function parseCard(content: string, absoluteFile: string, file: string, draft: b
   }
 
   const seenRelations = new Set<RelationField>();
+  const seenTopLevel = new Set<string>();
   let sawSources = false;
   let insideSources = false;
   let currentSource: Record<string, string> | undefined;
@@ -202,6 +206,12 @@ function parseCard(content: string, absoluteFile: string, file: string, draft: b
       }
 
       const [, key, rawValue] = match;
+      if (seenTopLevel.has(key)) {
+        issues.push(makeIssue('DUPLICATE_FIELD', file, `frontmatter repeats ${key}`));
+        continue;
+      }
+      seenTopLevel.add(key);
+
       if (FORBIDDEN_SIMILARITY_FIELDS.has(key)) {
         issues.push(makeIssue(
           'FORBIDDEN_SIMILARITY_FIELD',
@@ -305,7 +315,7 @@ function parseCard(content: string, absoluteFile: string, file: string, draft: b
 }
 
 function sourceExcerpts(body: string): Map<string, string> {
-  const lines = body.split('\n');
+  const lines = markdownLinesOutsideFences(body);
   const excerpts = new Map<string, string>();
   const sourceSection = lines.findIndex((line) => line.trim() === '## 原文溯源');
   if (sourceSection === -1) return excerpts;
@@ -330,6 +340,33 @@ function sourceExcerpts(body: string): Map<string, string> {
     if (excerptLines.length > 0) excerpts.set(sourceId, excerptLines.join('\n'));
   }
   return excerpts;
+}
+
+function markdownLinesOutsideFences(markdown: string): string[] {
+  const visibleLines: string[] = [];
+  let fence: { character: '`' | '~'; length: number } | undefined;
+
+  for (const line of markdown.split('\n')) {
+    if (fence !== undefined) {
+      const closingFence = new RegExp(
+        `^ {0,3}\\${fence.character}{${fence.length},}\\s*$`,
+      );
+      if (closingFence.test(line)) fence = undefined;
+      continue;
+    }
+
+    const openingFence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (openingFence !== null) {
+      fence = {
+        character: openingFence[1][0] as '`' | '~',
+        length: openingFence[1].length,
+      };
+      continue;
+    }
+    visibleLines.push(line);
+  }
+
+  return visibleLines;
 }
 
 function validateCard(card: ParsedCard): ValidationIssue[] {
@@ -363,7 +400,7 @@ function validateCard(card: ParsedCard): ValidationIssue[] {
     }
   }
 
-  const bodyLines = new Set(card.body.split('\n').map((line) => line.trim()));
+  const bodyLines = new Set(markdownLinesOutsideFences(card.body).map((line) => line.trim()));
   for (const section of REQUIRED_SECTIONS) {
     if (!bodyLines.has(`## ${section}`)) {
       issues.push(makeIssue('REQUIRED_SECTION_MISSING', card.file, `missing section ${section}`));
@@ -409,10 +446,7 @@ function validateCard(card: ParsedCard): ValidationIssue[] {
         `source ${sourceId ?? '(unknown)'} has invalid verified value`,
       ));
     }
-    if (
-      source.ref !== undefined
-      && (isAbsolute(source.ref) || /^[A-Za-z]:[\\/]/.test(source.ref) || source.ref.startsWith('file://'))
-    ) {
+    if (source.ref !== undefined && isLocalAbsoluteLocator(source.ref)) {
       issues.push(makeIssue(
         'ABSOLUTE_SOURCE_LOCATOR',
         card.file,
@@ -453,6 +487,13 @@ function validateCard(card: ParsedCard): ValidationIssue[] {
   return issues;
 }
 
+function isLocalAbsoluteLocator(locator: string): boolean {
+  return isAbsolute(locator)
+    || /^[A-Za-z]:[\\/]/.test(locator)
+    || locator.startsWith('\\\\')
+    || /^file:/i.test(locator);
+}
+
 async function listDecisionCardFiles(
   repoRoot: string,
   issues: ValidationIssue[],
@@ -485,12 +526,24 @@ async function listDecisionCardFiles(
     files.push(...draftEntries
       .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'README.md')
       .map((entry) => ({ absoluteFile: join(draftDirectory, entry.name), draft: true })));
-  } catch {
-    // An empty wiki may not have a draft directory yet.
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, 'ENOENT')) {
+      issues.push(makeIssue(
+        'DRAFT_DIRECTORY_READ_ERROR',
+        repoRelative(repoRoot, draftDirectory),
+        `cannot read draft directory: ${error instanceof Error ? error.message : String(error)}`,
+      ));
+    }
   }
 
   files.sort((left, right) => left.absoluteFile.localeCompare(right.absoluteFile));
   return files;
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === code;
 }
 
 async function collectLegacyIds(docsDirectory: string): Promise<Set<string>> {
@@ -618,9 +671,23 @@ function duplicateIdIssues(cards: ParsedCard[]): ValidationIssue[] {
   return issues;
 }
 
-function indexContainsId(index: string, id: string): boolean {
+function containsExactId(value: string, id: string): boolean {
   const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^A-Za-z0-9-])${escapedId}($|[^A-Za-z0-9-])`, 'm').test(index);
+  return new RegExp(`(^|[^A-Za-z0-9-])${escapedId}($|[^A-Za-z0-9-])`).test(value);
+}
+
+function indexContainsLinkedRow(index: string, id: string): boolean {
+  return markdownLinesOutsideFences(index).some((line) => {
+    const row = line.trim();
+    if (!row.startsWith('|') || !row.endsWith('|') || !containsExactId(row, id)) return false;
+
+    const links = row.matchAll(/\[[^\]]+\]\(([^)]+)\)/g);
+    for (const link of links) {
+      const target = link[1].trim().replace(/^<|>$/g, '').split(/[?#]/, 1)[0];
+      if (basename(target) === `${id}.md`) return true;
+    }
+    return false;
+  });
 }
 
 async function indexIssues(repoRoot: string, cards: ParsedCard[]): Promise<ValidationIssue[]> {
@@ -638,7 +705,7 @@ async function indexIssues(repoRoot: string, cards: ParsedCard[]): Promise<Valid
 
   return cards
     .filter((card) => !card.draft && card.fields.id !== undefined)
-    .filter((card) => !indexContainsId(index, card.fields.id))
+    .filter((card) => !indexContainsLinkedRow(index, card.fields.id))
     .map((card) => makeIssue(
       'INDEX_ENTRY_MISSING',
       card.file,
@@ -707,8 +774,6 @@ async function runCli(): Promise<void> {
   }
 }
 
-const commandPath = process.argv[1];
-const commandName = commandPath === undefined ? '' : basename(commandPath);
-if (commandName === 'validate-decisions.ts' || commandName === 'validate-decisions.js') {
+if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {
   void runCli();
 }
