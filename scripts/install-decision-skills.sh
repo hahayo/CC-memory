@@ -96,6 +96,66 @@ for command_name in find sort sha256sum cut cp mv mkdir date readlink stat; do
   command -v "$command_name" >/dev/null || die "required command not found: $command_name"
 done
 
+canonicalize_path() {
+  local path=$1
+  readlink -m -- "$path"
+}
+
+paths_overlap() {
+  local left=$1
+  local right=$2
+
+  [[ "$left" == "$right" ]] && return 0
+  [[ "$left" == / || "$right" == / ]] && return 0
+  [[ "$left" == "$right/"* || "$right" == "$left/"* ]]
+}
+
+reject_path_overlap() {
+  local left_label=$1
+  local left=$2
+  local right_label=$3
+  local right=$4
+
+  if paths_overlap "$left" "$right"; then
+    die "unsafe path overlap: $left_label=$left $right_label=$right"
+  fi
+}
+
+TARGET_LABELS=(claude codex port)
+TARGET_ROOTS=("$CLAUDE_ROOT" "$CODEX_ROOT" "$PORT_ROOT")
+CANONICAL_SOURCE_ROOT="$(canonicalize_path "$SOURCE_ROOT")" \
+  || die "cannot canonicalize source root: $SOURCE_ROOT"
+CANONICAL_BACKUP_ROOT="$(canonicalize_path "$BACKUP_ROOT")" \
+  || die "cannot canonicalize backup root: $BACKUP_ROOT"
+CANONICAL_TARGET_ROOTS=()
+
+for index in "${!TARGET_ROOTS[@]}"; do
+  canonical_root="$(canonicalize_path "${TARGET_ROOTS[$index]}")" \
+    || die "cannot canonicalize ${TARGET_LABELS[$index]} root: ${TARGET_ROOTS[$index]}"
+  CANONICAL_TARGET_ROOTS+=("$canonical_root")
+  reject_path_overlap \
+    source "$CANONICAL_SOURCE_ROOT" \
+    "${TARGET_LABELS[$index]} target" "$canonical_root"
+done
+
+for ((left_index = 0; left_index < ${#CANONICAL_TARGET_ROOTS[@]}; left_index++)); do
+  for ((right_index = left_index + 1; right_index < ${#CANONICAL_TARGET_ROOTS[@]}; right_index++)); do
+    reject_path_overlap \
+      "${TARGET_LABELS[$left_index]} target" "${CANONICAL_TARGET_ROOTS[$left_index]}" \
+      "${TARGET_LABELS[$right_index]} target" "${CANONICAL_TARGET_ROOTS[$right_index]}"
+  done
+done
+
+reject_path_overlap \
+  backup "$CANONICAL_BACKUP_ROOT" \
+  source "$CANONICAL_SOURCE_ROOT"
+
+for index in "${!CANONICAL_TARGET_ROOTS[@]}"; do
+  reject_path_overlap \
+    backup "$CANONICAL_BACKUP_ROOT" \
+    "${TARGET_LABELS[$index]} target" "${CANONICAL_TARGET_ROOTS[$index]}"
+done
+
 tree_hash() {
   local directory=$1
   local entry relative_path mode
@@ -134,9 +194,6 @@ for skill in "${SKILLS[@]}"; do
   SOURCE_HASHES[$skill]="$(tree_hash "$source_directory")" \
     || die "cannot hash canonical skill: $source_directory"
 done
-
-TARGET_LABELS=(claude codex port)
-TARGET_ROOTS=("$CLAUDE_ROOT" "$CODEX_ROOT" "$PORT_ROOT")
 
 check_installation() {
   local failures=0

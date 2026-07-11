@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const RELATION_FIELDS = [
     'supersedes',
@@ -452,7 +452,7 @@ async function collectLegacyIds(docsDirectory) {
                 await walk(absolutePath);
                 continue;
             }
-            if (!entry.isFile() || basename(dirname(absolutePath)) !== 'decisions')
+            if (!entry.isFile())
                 continue;
             const match = /^(ADR-\d+)(?:-|\.md$)/.exec(entry.name);
             if (match !== null && entry.name.endsWith('.md'))

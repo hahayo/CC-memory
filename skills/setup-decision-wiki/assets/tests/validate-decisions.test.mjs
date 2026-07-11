@@ -243,6 +243,25 @@ test('rejects a formal relation to a proposed draft', async () => {
   assert.ok(issueCodes(await validateDecisionWiki(repoRoot)).includes('DANGLING_RELATION'));
 });
 
+test('accepts a formal relation to an ADR at any existing path under docs', async () => {
+  const repoRoot = await createRepo();
+  const id = 'DEC-20260711T120019Z-related-to-legacy-adr';
+  const adrDirectory = join(repoRoot, 'docs', 'adr');
+  await mkdir(adrDirectory, { recursive: true });
+  await writeFile(join(adrDirectory, 'ADR-001-existing-decision.md'), '# Existing ADR\n');
+  await writeCard(repoRoot, `${id}.md`, makeCard({
+    id,
+    relatedTo: ['ADR-001'],
+  }));
+  await writeIndex(repoRoot, [{ id }]);
+
+  assert.deepEqual(await validateDecisionWiki(repoRoot), {
+    ok: true,
+    cards: 1,
+    issues: [],
+  });
+});
+
 test('accepts a supersedes edge when the target is superseded', async () => {
   const repoRoot = await createRepo();
   const oldId = 'DEC-20260711T120005Z-old-decision';

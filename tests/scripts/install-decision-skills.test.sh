@@ -63,7 +63,134 @@ assert_same_tree() {
     || fail "tree hash mismatch: $actual"
 }
 
+PATH_SAFETY_FAILURES=0
+
+record_path_safety_failure() {
+  echo "PATH SAFETY FAIL: $*" >&2
+  PATH_SAFETY_FAILURES=$((PATH_SAFETY_FAILURES + 1))
+}
+
+run_path_safety_case() {
+  local pair=$1
+  local relation=$2
+  local case_name="$pair-$relation"
+  local case_root="$TMP_ROOT/path-safety/$case_name"
+  local state_root="$case_root/state"
+  local fixture_repo="$state_root/repo"
+  local fixture_installer="$fixture_repo/scripts/install-decision-skills.sh"
+  local spy_bin="$case_root/spy-bin"
+  local mutation_log="$case_root/mutations.log"
+  local stdout_file="$case_root/stdout.log"
+  local stderr_file="$case_root/stderr.log"
+  local claude_root="$state_root/targets/claude"
+  local codex_root="$state_root/targets/codex"
+  local port_root="$state_root/targets/port"
+  local backup_root="$state_root/backups"
+  local before_hash after_hash status
+
+  mkdir -p "$fixture_repo/scripts" "$state_root/targets" "$spy_bin"
+  cp -a "$CANONICAL_ROOT" "$fixture_repo/skills"
+  cp -a "$INSTALLER" "$fixture_installer"
+  ln -s "$fixture_repo" "$state_root/repo-alias"
+  ln -s "$state_root/targets" "$state_root/targets-alias"
+
+  case "$pair:$relation" in
+    source-target:same)
+      claude_root="$state_root/repo-alias/skills/."
+      ;;
+    source-target:ancestor)
+      claude_root="$state_root/repo-alias/skills/nested/../nested"
+      ;;
+    source-target:descendant)
+      claude_root="$state_root/repo-alias"
+      ;;
+    target-target:same)
+      claude_root="$state_root/targets/shared"
+      codex_root="$state_root/targets-alias/shared/."
+      ;;
+    target-target:ancestor)
+      claude_root="$state_root/targets/shared"
+      codex_root="$state_root/targets-alias/shared/nested"
+      ;;
+    target-target:descendant)
+      claude_root="$state_root/targets/shared/nested"
+      codex_root="$state_root/targets-alias/shared"
+      ;;
+    backup-source:same)
+      backup_root="$state_root/repo-alias/skills/."
+      ;;
+    backup-source:ancestor)
+      backup_root="$state_root/repo-alias"
+      ;;
+    backup-source:descendant)
+      backup_root="$state_root/repo-alias/skills/backups"
+      ;;
+    backup-target:same)
+      claude_root="$state_root/targets/shared"
+      backup_root="$state_root/targets-alias/shared/."
+      ;;
+    backup-target:ancestor)
+      claude_root="$state_root/targets-alias/shared"
+      backup_root="$state_root/targets"
+      ;;
+    backup-target:descendant)
+      claude_root="$state_root/targets/shared"
+      backup_root="$state_root/targets-alias/shared/backups"
+      ;;
+    *)
+      fail "unknown path safety case: $case_name"
+      ;;
+  esac
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" "mkdir $*" >> "${PATH_SAFETY_MUTATION_LOG:?}"' \
+    'exit 97' \
+    > "$spy_bin/mkdir"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" "mv $*" >> "${PATH_SAFETY_MUTATION_LOG:?}"' \
+    'exit 98' \
+    > "$spy_bin/mv"
+  chmod +x "$spy_bin/mkdir" "$spy_bin/mv"
+
+  before_hash="$(tree_hash "$state_root")"
+  if PATH="$spy_bin:$PATH" \
+    PATH_SAFETY_MUTATION_LOG="$mutation_log" \
+    DECISION_SKILLS_TIMESTAMP="$TIMESTAMP" \
+    bash "$fixture_installer" --install \
+      --claude-root "$claude_root" \
+      --codex-root "$codex_root" \
+      --port-root "$port_root" \
+      --backup-root "$backup_root" \
+      >"$stdout_file" 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  after_hash="$(tree_hash "$state_root")"
+
+  [[ "$status" -eq 2 ]] \
+    || record_path_safety_failure "$case_name exited $status instead of 2"
+  grep -Fq 'unsafe path overlap:' "$stderr_file" \
+    || record_path_safety_failure "$case_name did not report unsafe overlap"
+  [[ ! -s "$mutation_log" ]] \
+    || record_path_safety_failure \
+      "$case_name attempted mutation before rejection: $(<"$mutation_log")"
+  [[ "$after_hash" == "$before_hash" ]] \
+    || record_path_safety_failure "$case_name changed protected state"
+}
+
 [[ -f "$INSTALLER" ]] || fail "installer missing: $INSTALLER"
+
+for pair in source-target target-target backup-source backup-target; do
+  for relation in same ancestor descendant; do
+    run_path_safety_case "$pair" "$relation"
+  done
+done
+
+((PATH_SAFETY_FAILURES == 0)) \
+  || fail "$PATH_SAFETY_FAILURES path safety assertion(s) failed"
 
 if installer --check >/dev/null 2>&1; then
   fail "check unexpectedly passed with missing destinations"

@@ -68,7 +68,7 @@ For an install, propose these repo-relative asset mappings:
 For an upgrade:
 
 - Treat the existing cards and ADR（架構決策紀錄）files as immutable history.
-- Keep an existing validator only when its native tests pass and it enforces the repository's current `docs/decisions/README.md` contract. Otherwise propose the portable validator and test as an explicit replacement patch.
+- Keep an existing validator only when its native tests pass and it enforces the repository's current `docs/decisions/README.md` contract. Otherwise propose the portable validator and test as an explicit replacement patch. Record the selected contract and validator: repo-native when retaining the existing contract, portable for a fresh install or an explicitly reviewed portable-contract adoption.
 - Keep each existing ADR at its current path. Add an ADR index row only when the record is already explicitly accepted.
 - Treat decisions found only in specs, plans, memories, or database records as candidates. After deduplication, place any proposed conversion under `_draft/`; never accept or delete it automatically.
 - Do not add a database, MCP（模型情境協定）service, hook（事件掛鉤）, semantic index（語意索引）, or session scanner.
@@ -77,14 +77,18 @@ For an upgrade:
 
 1. Create a temporary candidate root outside the repo. For installs, copy the bundled decision documents into their repo-relative paths. For upgrades, seed the candidate with every relevant path found during inventory: the complete current decision tree, every decision card and ADR at its existing repo-relative path, plus every existing decision validator, test, and the configuration that invokes them. Keep unrelated files out of the candidate.
 2. Only after seeding, overlay proposed documents, validator, and test. For upgrades, start each candidate file from its current contents and make the smallest contract-preserving change. Never replace a populated `INDEX.md` with the empty template or silently move an existing card or ADR.
-3. Validate the candidate tree before touching the repo:
+3. Validate the candidate tree with the selected contract-aware validator before touching the repo:
 
-   ```bash
-   node --test "<skill-dir>/assets/tests/validate-decisions.test.mjs"
-   node "<skill-dir>/assets/scripts/validate-decisions.mjs" "<candidate-root>"
-   ```
+   - For a fresh install or reviewed portable-contract adoption, run:
 
-4. Do not call the candidate review-ready（可送審） until both commands exit `0`. On any failure, show the exact output and stop without applying files.
+     ```bash
+     node --test "<skill-dir>/assets/tests/validate-decisions.test.mjs"
+     node "<skill-dir>/assets/scripts/validate-decisions.mjs" "<candidate-root>"
+     ```
+
+   - When retaining a valid repo-native contract and validator, run that validator's native tests and validate `<candidate-root>` according to repository instructions. Do not use the bundled validator's fixed schema to judge that target corpus.
+
+4. Do not call the candidate review-ready（可送審） until every selected validator test and validation command exits `0`. On any failure, show the exact output and stop without applying files.
 5. Show the complete file list and full unified diff（統一差異）, including every new file in full. A summary is not a preview.
 6. Wait for approval of the Wiki patch before applying it.
 
@@ -96,21 +100,19 @@ Apply only the approved candidate files. Do not stage, commit, push（推送）,
 
 Run all applicable gates in this order:
 
-1. Bundled asset tests:
+1. Run the selected contract-aware validator gate:
 
-   ```bash
-   node --test "<skill-dir>/assets/tests/validate-decisions.test.mjs"
-   ```
+   - For the portable contract, run its bundled tests and validate the repository:
 
-2. Portable validation against the repository:
+     ```bash
+     node --test "<skill-dir>/assets/tests/validate-decisions.test.mjs"
+     node "<skill-dir>/assets/scripts/validate-decisions.mjs" "<repo-root>"
+     ```
 
-   ```bash
-   node "<skill-dir>/assets/scripts/validate-decisions.mjs" "<repo-root>"
-   ```
+   - For a retained repo-native contract, run its native tests and validator against `<repo-root>`. Do not run the bundled validator against the target corpus unless the portable contract was explicitly adopted.
 
-3. Installed or retained validator and its tests.
-4. Repository-local typecheck（型別檢查）, lint（靜態檢查）, test, and build gates required by repo instructions.
-5. `git diff --check`, a final `git status --short`, and a complete diff review proving unrelated work stayed untouched.
+2. Repository-local typecheck（型別檢查）, lint（靜態檢查）, test, and build gates required by repo instructions.
+3. `git diff --check`, a final `git status --short`, and a complete diff review proving unrelated work stayed untouched.
 
 If any gate fails, stop, keep the patch uncommitted, and report the exact failure. Only commit after a separate explicit request.
 

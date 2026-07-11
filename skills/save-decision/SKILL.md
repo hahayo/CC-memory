@@ -99,6 +99,8 @@ Use separate questions and wait for a separate user turn（使用者回合） af
 
 Silence, pressure to skip questions, and an earlier general request to formalize satisfy neither gate.
 
+If Gate 1 or Gate 2 is rejected, immediately remove only the proposed draft created by this run; leave the old card, `INDEX.md`, and every unrelated file byte-for-byte unchanged. Show `git status --short` proving the rejected draft and its locator are no longer present, then stop. If the user requests revision instead of acceptance, remove the rejected version first, rebuild only from the newly confirmed facts, rerun validation, and restart both applicable gates from the full preview. Never leave rejected sensitive content or provenance on disk between attempts.
+
 ### 6. Land, validate, then ask about commit
 
 After all applicable gates pass, change the new card to `active`, move it out of `_draft/`, add exactly one `./<id>.md` index row, and—when superseding—change only the old card's status. Preserve the old accepted body byte-for-byte.
