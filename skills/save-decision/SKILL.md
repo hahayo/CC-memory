@@ -64,6 +64,16 @@ outcomes:
 
 Populate slots only from exact user text, read-only repository evidence, or the actual system clock（系統時鐘） for time. Domain knowledge（領域知識）, likely benefits, and plausible implications are not evidence. Missing narrative slots—background, alternatives and rejection reasons, rationale, consequences, or outcomes—must render as literal `Not recorded` or a repository-mandated equivalent.
 
+Render narrative as a mechanical projection（機械投影）, never as prose completion:
+
+- Background = `background`, verbatim; empty = `Not recorded`.
+- Alternatives and rejection reasons = `alternatives_and_rejection_reasons`, verbatim; empty = `Not recorded`.
+- Final decision = `selected_outcome`, verbatim; rationale = `rationale`, verbatim or `Not recorded`.
+- Consequences = `consequences`, verbatim; empty = `Not recorded`.
+- Later outcomes = `outcomes`, verbatim; empty = `Not recorded`.
+
+A relationship target, locator, old-card title, or selected outcome does not supply unstated background, rejection reasons, rationale, consequences, or operational requirements. Repository evidence may populate only the exact fact it states; do not sentence-expand it.
+
 For the four relationship lists, copy every explicitly human-confirmed supported edge into its named list. Keep the same target in multiple lists when multiple relation types were confirmed; never infer, merge, or deduplicate across relation types. Semantic similarity（語意相似度） populates no field.
 
 ### 3. Render one exact proposed draft
@@ -71,7 +81,7 @@ For the four relationship lists, copy every explicitly human-confirmed supported
 1. Use the actual clock for the UTC（世界協調時間） ID and `capture_time`. Use an explicit human decision time when supplied; otherwise use the actual current time. Never invent or round timestamps.
 2. Copy the current README's exact frontmatter（檔頭） shape. Render all four ledger relationship lists in its required inline-array（行內陣列） syntax—for example, `supersedes: [DEC-...]` and `related_to: [DEC-...]`, never block lists.
 3. If the user labels a span as source, excerpt, or quote, `source_excerpt_bytes` equals only those bytes. Its visible blockquote contains only those bytes with the minimum sensitive substring replaced by `[REDACTED]`; never prepend or append a decision summary, approval statement, locator, or explanation. Keep `locator` only in source metadata（中繼資料） and SHA-256（安全雜湊演算法） hash exactly the visible redacted text under the repository normalization rule.
-4. Render body sections only from these ledger slots, in order: `background`; `alternatives_and_rejection_reasons`; `selected_outcome` plus `rationale`; `consequences`; source metadata plus `source_excerpt_bytes`; `outcomes`. Never retain a full transcript（逐字紀錄） or invent provenance（溯源資訊）. Create only `docs/decisions/_draft/<id>.md` with `status: proposed`.
+4. Render body sections from the mechanical projection above, then source metadata plus `source_excerpt_bytes`. Never retain a full transcript（逐字紀錄） or invent provenance（溯源資訊）. Create only `docs/decisions/_draft/<id>.md` with `status: proposed`.
 5. A reversal creates a new proposed card. Never revise the old decision body; after acceptance, change only its lifecycle status to `superseded`.
 
 ### 4. Validate before preview
