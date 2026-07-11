@@ -28,6 +28,7 @@
 | `../CLAUDE.md` | repo 總覽：18 個 MCP tools、env vars、設計模式（第一入口） |
 | `../README.md` | 安裝 + Coolify 部署（SSH tunnel 流程） |
 | `INDEX.md`（本檔） | track 導覽 |
+| `decisions/{README,INDEX,_draft/,DEC-*.md}` | Git（版本控制）決策卡：跨 Claude Code／Codex 共用的決策 SSOT（單一真相來源），涵蓋規範、索引、候選草稿與正式決策 |
 | `auto-capture-v0.5/{spec,plan,task}.md` | Track 1 v0.5 auto-capture SDD（Spec-Driven Development，規格驅動開發）三件套；取代 v0.4 Phase C 休眠設計 |
 | `personal-hub/prod-runbook.md` | 維運手冊（2026-07-05 已更新為 Coolify 拓樸） |
 | `personal-hub/{spec,plan,task}.md` + `decisions/ADR-001-*.md` | Track 2 SDD（已交付，仍為維運依據）；ADR-001 = 獨立 personal DB 決策 SSOT |
