@@ -110,6 +110,7 @@ export type CaptureLlmErrorCode =
   | 'UNSUPPORTED_CAPTURE_LLM'
   | 'CLAUDE_CLI_EXIT_NONZERO'
   | 'CLAUDE_CLI_OUTPUT_INVALID'
+  | 'CLAUDE_CLI_RATE_LIMITED'
   | 'CLAUDE_CLI_TIMEOUT'
   | 'LLM_MALFORMED_JSON'
   | 'LLM_SCHEMA_INVALID'
@@ -392,6 +393,26 @@ function parseClaudeCliEnvelope(stdout: string, model: string): string {
   return parsed.result;
 }
 
+function parseClaudeCliRateLimit(stdout: string, model: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonObjectCandidate(stdout));
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed) || parsed.is_error !== true || parsed.api_error_status !== 429) {
+    return null;
+  }
+
+  return {
+    model,
+    provider: DEFAULT_CAPTURE_LLM_PROVIDER,
+    apiErrorStatus: 429,
+    ...(typeof parsed.result === 'string' ? { result: parsed.result } : {}),
+  };
+}
+
 export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<ClaudeCliRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(input.command, input.args, {
@@ -510,6 +531,15 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
     }
 
     if (result.exitCode !== 0) {
+      const rateLimitDetails = parseClaudeCliRateLimit(result.stdout || result.stderr || '', this.model);
+      if (rateLimitDetails) {
+        throw new CaptureLlmValidationError(
+          'CLAUDE_CLI_RATE_LIMITED',
+          'claude-cli rate limited',
+          rateLimitDetails
+        );
+      }
+
       throw new CaptureLlmValidationError(
         'CLAUDE_CLI_EXIT_NONZERO',
         `claude-cli exited with code ${result.exitCode ?? 'null'}`,

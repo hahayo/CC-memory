@@ -297,6 +297,37 @@ describe('claude-cli extraction subprocess contract', () => {
     });
   });
 
+  it('maps Claude CLI 429 envelopes to a rate-limited validation error', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({
+          stdout: JSON.stringify({
+            type: 'result',
+            subtype: 'success',
+            is_error: true,
+            api_error_status: 429,
+            result: 'session limit resets later',
+          }),
+          exitCode: 1,
+        }),
+      })
+    );
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CLAUDE_CLI_RATE_LIMITED');
+    expect(error.details).toMatchObject({
+      model: 'haiku',
+      provider: 'claude-cli',
+      apiErrorStatus: 429,
+      result: 'session limit resets later',
+    });
+    expect(JSON.stringify(error.details)).not.toContain(request().transcript);
+  });
+
   it('turns mock timeout results into validation errors without hanging', async () => {
     const runClaudeCli = vi.fn<MockClaudeCliRunner>(async () => ({
       stdout: '',

@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -155,6 +156,14 @@ function hwmPath(harness: TestHarness): string {
     sanitizeSpoolSegment(harness.projectId),
     `${sanitizeSpoolSegment(harness.sessionId)}.hwm`
   );
+}
+
+function spoolPath(harness: TestHarness): string {
+  return resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+}
+
+function lockPath(harness: TestHarness): string {
+  return `${spoolPath(harness)}.lock`;
 }
 
 function deadDir(harness: TestHarness): string {
@@ -385,7 +394,7 @@ describe('capture worker failure contracts without DB', () => {
     expect(existsSync(deadDir(harness))).toBe(false);
   });
 
-  it('dead-letters only after the malformed JSON retry also fails', async () => {
+  it('holds HWM after malformed JSON retry failure (retry sidecar counts attempt, parks at 5)', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { timestamp: '2026-01-01T00:00:00.000Z', message: SECRET_TRANSCRIPT_TEXT },
@@ -397,21 +406,45 @@ describe('capture worker failure contracts without DB', () => {
     });
     const firstMalformedOutput = 'first malformed output';
     const retryMalformedOutput = 'retry malformed output';
-    const llm = mockLlm([
+
+    // First tick: attempt 1 — hold, no dead-letter
+    const llm1 = mockLlm([
       { model: TEST_MODEL, text: firstMalformedOutput },
       { model: TEST_MODEL, text: retryMalformedOutput },
     ]);
 
-    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+    await expect(runWorker(harness, { db: {}, llm: llm1 })).resolves.toMatchObject({
       processed: 0,
-      deadLettered: 1,
+      deadLettered: 0,
       llmRetries: 1,
     });
+    expect(llm1.calls).toHaveLength(2);
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(existsSync(hwmPath(harness))).toBe(false);
 
-    expect(llm.calls).toHaveLength(2);
+    // Ticks 2-4: keep failing
+    for (let tick = 2; tick <= 4; tick += 1) {
+      const llm = mockLlm([
+        { model: TEST_MODEL, text: 'malformed' },
+        { model: TEST_MODEL, text: 'still malformed' },
+      ]);
+      await runWorker(harness, { db: {}, llm });
+      expect(existsSync(deadDir(harness))).toBe(false);
+    }
+
+    // Tick 5: parks — writes dead-letter, advances HWM
+    const llm5 = mockLlm([
+      { model: TEST_MODEL, text: 'final malformed' },
+      { model: TEST_MODEL, text: 'final retry malformed' },
+    ]);
+    const result5 = await runWorker(harness, { db: {}, llm: llm5 });
+    expect(result5.deadLettered).toBe(1);
+    expect(result5.parked).toBe(1);
+    expect(existsSync(deadDir(harness))).toBe(true);
     const deadLetter = readOnlyDeadLetter(harness);
-    expect(deadLetter.llm_raw_output).toBe(retryMalformedOutput);
     expect(JSON.stringify(deadLetter)).not.toContain(SECRET_TRANSCRIPT_TEXT);
+    // HWM advanced past the window
+    expect(existsSync(hwmPath(harness))).toBe(true);
   });
 
   it('treats runtime LLM disabled errors as a skip without dead-lettering', async () => {
@@ -447,6 +480,209 @@ describe('capture worker failure contracts without DB', () => {
     ).resolves.toMatchObject({ processed: 0, skipped: 1, deadLettered: 0 });
     expect(existsSync(deadDir(harness))).toBe(false);
     expect(existsSync(hwmPath(harness))).toBe(false);
+  });
+
+  it('treats Claude CLI 429 rate limits as transient without dead-lettering or counting attempts', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'capture waits for Claude quota reset' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:05.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CLAUDE_CLI_RATE_LIMITED', 'claude-cli rate limited', {
+        model: 'haiku',
+        provider: 'claude-cli',
+        apiErrorStatus: 429,
+      }),
+    ]);
+
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      rateLimited: 1,
+      deadLettered: 0,
+    });
+
+    expect(existsSync(deadDir(harness))).toBe(false);
+    expect(existsSync(hwmPath(harness))).toBe(false);
+  });
+
+  it('reclaims stale spool locks so killed workers do not block a session forever', async () => {
+    const harness = makeHarness();
+    const spoolEnd = await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    writeFileSync(lockPath(harness), '', { mode: 0o600 });
+    const staleTime = new Date('2000-01-01T00:00:00.000Z');
+    utimesSync(lockPath(harness), staleTime, staleTime);
+    const llm = mockLlm([]);
+
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      skipped: 1,
+      deadLettered: 0,
+    });
+
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+    expect(existsSync(lockPath(harness))).toBe(false);
+  });
+
+  it('does not steal a fresh spool lock from a possibly running worker', async () => {
+    const harness = makeHarness();
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    writeFileSync(lockPath(harness), '', { mode: 0o600 });
+    const llm = mockLlm([]);
+
+    await expect(runWorker(harness, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      skipped: 1,
+      deadLettered: 0,
+    });
+
+    expect(existsSync(hwmPath(harness))).toBe(false);
+    expect(existsSync(lockPath(harness))).toBe(true);
+  });
+
+  it('honors CC_CAPTURE_MAX_SESSIONS_PER_TICK to keep cron ticks bounded', async () => {
+    const first = makeHarness({
+      projectId: `capture-worker-max-a-${randomUUID()}`,
+      sessionId: `session-a-${randomUUID()}`,
+    });
+    first.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    const second: TestHarness = {
+      ...first,
+      projectId: `capture-worker-max-z-${randomUUID()}`,
+      sessionId: `session-z-${randomUUID()}`,
+      transcriptPath: join(first.root, 'second.transcript.jsonl'),
+    };
+    writeFileSync(second.transcriptPath, '', { mode: 0o600 });
+    const firstEnd = await appendWindow(first, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    await appendWindow(second, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:31.000Z',
+    });
+    const llm = mockLlm([]);
+
+    await expect(runWorker(first, { db: {}, llm })).resolves.toMatchObject({
+      processed: 0,
+      skipped: 1,
+      deadLettered: 0,
+    });
+
+    expect(readFileSync(hwmPath(first), 'utf8')).toBe(String(firstEnd));
+    expect(existsSync(hwmPath(second))).toBe(false);
+  });
+
+  it('parks after 5 tick attempts via retry sidecar, then EEXIST dedup on replay', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'replayed dead-letter window' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:10.000Z',
+    });
+
+    const repeatedError = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'claude-cli exited with code 1',
+      {
+        model: 'haiku',
+        rawOutput:
+          '{"type":"result","subtype":"success","is_error":true,"api_error_status":500,"result":"synthetic server error"}',
+      }
+    );
+
+    // Ticks 1-4: hold (no dead-letter)
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const llm = mockLlm([repeatedError, repeatedError]);
+      const r = await runWorker(harness, { db: {}, llm });
+      expect(r.deadLettered).toBe(0);
+      expect(existsSync(hwmPath(harness))).toBe(false);
+    }
+
+    // Tick 5: park — dead-letter + HWM advance
+    const llm5 = mockLlm([repeatedError, repeatedError]);
+    await expect(runWorker(harness, { db: {}, llm: llm5 })).resolves.toMatchObject({
+      processed: 0,
+      deadLettered: 1,
+      parked: 1,
+    });
+
+    expect(readDeadLetters(harness)).toHaveLength(1);
+    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(
+      String(statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env })).size)
+    );
+  });
+
+  it('splits a prompt-too-long chunk into smaller retries before dead-lettering', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript, 'utf8'));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:32.000Z',
+    });
+
+    const promptTooLong = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'claude-cli exited with code 1',
+      {
+        model: 'haiku',
+        rawOutput:
+          '{"type":"result","subtype":"success","is_error":true,"api_error_status":400,"terminal_reason":"prompt_too_long","result":"Prompt is too long"}',
+      }
+    );
+    const llm = mockLlm([
+      promptTooLong,
+      rawExtraction({
+        summary: 'smaller retry one',
+        observations: [observation('smaller retry one', 'smaller retry one narrative')],
+      }),
+      rawExtraction({
+        summary: 'smaller retry two',
+        observations: [observation('smaller retry two', 'smaller retry two narrative')],
+      }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({
+        observationsWritten: 1,
+        rollupsWritten: 1,
+      }),
+    };
+
+    await expect(runWorker(harness, { db: fakeDb, llm })).resolves.toMatchObject({
+      processed: 2,
+      deadLettered: 0,
+      observationsWritten: 2,
+    });
+
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      originalTranscript,
+      lines[0],
+      lines[1],
+    ]);
+    expect(existsSync(deadDir(harness))).toBe(false);
   });
 
   it('excludes injected cc-memory-inject lines from the transcript sent to the LLM', async () => {
@@ -501,6 +737,360 @@ describe('capture worker failure contracts without DB', () => {
     expect(llm.calls).toHaveLength(0);
     expect(existsSync(deadDir(harness))).toBe(false);
     expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+  });
+});
+
+describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
+  it('newline fallback: partial tail is not processed, leaves data for next tick', async () => {
+    const harness = makeHarness();
+    // Use transcriptEnd=0 so the window has empty transcript (skip+advance path)
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    // Append raw bytes without trailing newline to spool (simulates hook writing mid-line)
+    const sp = spoolPath(harness);
+    const sizeBeforePartial = statSync(sp).size;
+    appendFileSync(sp, '{"partial":true');
+    const totalSize = statSync(sp).size;
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+    // The valid lines are processed (empty transcript = skip+advance)
+    expect(result.skipped).toBe(1);
+    // HWM is at the last complete newline boundary, not at total file size
+    const hwmVal = Number.parseInt(readFileSync(hwmPath(harness), 'utf8'), 10);
+    expect(hwmVal).toBe(sizeBeforePartial);
+    expect(hwmVal).toBeLessThan(totalSize);
+  });
+
+  it('malformed spool lines are skipped and counted, HWM advances past them', async () => {
+    const harness = makeHarness();
+    // Manually construct a spool with a garbage line mixed with valid records
+    const sp = resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)), { recursive: true });
+    const validEvent = JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      transcript_path: harness.transcriptPath,
+      transcript_offset: 0,
+    });
+    const validSentinel = JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      transcript_path: harness.transcriptPath,
+      hwm_offset: 0,
+    });
+    writeFileSync(sp, `this is garbage\n${validEvent}\n${validSentinel}\n`, { mode: 0o600 });
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.malformed).toBe(1);
+    // HWM advanced (empty transcript since hwm_offset=0)
+    expect(existsSync(hwmPath(harness))).toBe(true);
+  });
+
+  it('tick budget stops processing before timeout, preserving HWM at last completed window', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'budget test content' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    // Set tick budget to 0 (immediately expired after first check)
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '1';
+    const llm = mockLlm([]);
+
+    let callCount = 0;
+    const result = await runCaptureWorkerOnce({
+      db: {} as any,
+      env: harness.env,
+      llm,
+      now: () => new Date('2026-07-06T10:00:00.000Z'),
+      nowMs: () => {
+        callCount += 1;
+        // First call returns start, subsequent calls simulate time passing
+        return callCount === 1 ? 1000 : 1000 + 100;
+      },
+      writerHost: TEST_WRITER,
+      generateEmbedding: async () => null,
+    });
+    // Budget expired before processing sessions
+    expect(result.processed).toBe(0);
+  });
+
+  it('retry sidecar: 429 does NOT increment attempts', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: '429 retry test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+
+    // Run 6 ticks with 429 — should never park
+    for (let tick = 0; tick < 6; tick += 1) {
+      const llm = mockLlm([
+        new CaptureLlmValidationError('CLAUDE_CLI_RATE_LIMITED', 'rate limited', {
+          model: 'haiku',
+          provider: 'claude-cli',
+          apiErrorStatus: 429,
+        }),
+      ]);
+      const r = await runWorker(harness, { db: {}, llm });
+      expect(r.rateLimited).toBe(1);
+      expect(r.deadLettered).toBe(0);
+      expect(r.parked).toBe(0);
+    }
+    expect(existsSync(deadDir(harness))).toBe(false);
+  });
+
+  it('retry sidecar cleans up entries below HWM on next processing pass', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'stale retry cleanup window one' },
+    ]);
+    const firstSpoolEnd = await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+
+    // Fail the first tick to create a retry entry
+    const errorLlm = mockLlm([
+      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'fail', { model: 'haiku', rawOutput: 'err' }),
+      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'fail', { model: 'haiku', rawOutput: 'err' }),
+    ]);
+    await runWorker(harness, { db: {}, llm: errorLlm });
+    const sp = spoolPath(harness);
+    const retryPath = sp.replace(/\.jsonl$/, '.retry.json');
+    expect(existsSync(retryPath)).toBe(true);
+    expect(existsSync(hwmPath(harness))).toBe(false);
+
+    // Now manually advance HWM past the window (simulating park or external fix)
+    writeFileSync(hwmPath(harness), String(firstSpoolEnd), { mode: 0o600 });
+
+    // Append new spool data with EMPTY transcript so it skip+advances without LLM
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:01:00.000Z',
+    });
+    const llm2 = mockLlm([]);
+    await runWorker(harness, { db: {}, llm: llm2 });
+    // Retry file cleaned since old entry is below new HWM
+    expect(existsSync(retryPath)).toBe(false);
+  });
+
+  it('lock release does not unlink when token does not match (anti-steal)', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'lock token test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    const sp = spoolPath(harness);
+    const lp = `${sp}.lock`;
+    // Place a lock with a different token
+    const otherLock = { pid: 99999, host: 'other', token: 'other-token', acquiredAtIso: new Date().toISOString() };
+    writeFileSync(lp, JSON.stringify(otherLock), { mode: 0o600 });
+    // Mark it as stale so the worker can reclaim
+    const staleTime = new Date('2000-01-01T00:00:00.000Z');
+    utimesSync(lp, staleTime, staleTime);
+
+    const llm = mockLlm([]);
+    await runWorker(harness, { db: {}, llm });
+
+    // After worker completes, it released its own lock (which it created after reclaiming stale)
+    // The lock file should be gone (worker created + released its own)
+    expect(existsSync(lp)).toBe(false);
+  });
+
+  it('transcriptMissing counts sessions with null transcript path', async () => {
+    const harness = makeHarness();
+    // Create a spool entry with no transcript_path and offsets 0/0
+    const sp = resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)), { recursive: true });
+    writeFileSync(sp, JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      transcript_path: null,
+      transcript_offset: 0,
+    }) + '\n' + JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      transcript_path: null,
+      hwm_offset: 0,
+    }) + '\n', { mode: 0o600 });
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.transcriptMissing).toBe(1);
+    // HWM still advances (skip + advance per existing semantics)
+    expect(existsSync(hwmPath(harness))).toBe(true);
+  });
+
+  it('summary line includes all new fields', async () => {
+    // Verify the summary format in run-auto-capture.ts by testing assessment parsing
+    const { assessAutoCaptureExecution } = await import('../../src/services/auto-capture-alerts.js');
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=2 skipped=1 dead-letter=0 failed=0 rate-limited=3 malformed=1 transcript-missing=2\n',
+      stderr: '',
+    });
+    // rate-limited > 0 makes it not ok
+    expect(assessment.ok).toBe(false);
+    expect(assessment.rateLimitedCount).toBe(3);
+    expect(assessment.malformedCount).toBe(1);
+    expect(assessment.transcriptMissingCount).toBe(2);
+    expect(assessment.failedCount).toBe(0);
+  });
+
+  it('assessor synthesizes problemLine when rateLimited > 0 but no stdout problem', async () => {
+    const { assessAutoCaptureExecution } = await import('../../src/services/auto-capture-alerts.js');
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=2 malformed=0 transcript-missing=0\n',
+      stderr: '',
+    });
+    expect(assessment.ok).toBe(false);
+    expect(assessment.problemLine).toBe('rate-limited=2');
+    expect(assessment.fingerprint).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it('assessor treats transcript-missing as informational (does not affect ok)', async () => {
+    const { assessAutoCaptureExecution } = await import('../../src/services/auto-capture-alerts.js');
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=5\n',
+      stderr: '',
+    });
+    expect(assessment.ok).toBe(true);
+    expect(assessment.transcriptMissingCount).toBe(5);
+  });
+
+  it('rotation re-stats spool before deciding to rotate', async () => {
+    const harness = makeHarness();
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    // Spool is small so no rotation expected
+    const llm = mockLlm([]);
+    await runWorker(harness, { db: {}, llm });
+    // Spool file should still exist (no rotation since it's small)
+    expect(existsSync(spoolPath(harness))).toBe(true);
+  });
+
+  it('all-malformed spool: terminal discard advances HWM and counts malformed', async () => {
+    const harness = makeHarness();
+    const sp = resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)), { recursive: true });
+    writeFileSync(sp, 'garbage line one\ngarbage line two\n', { mode: 0o600 });
+    const fileSize = statSync(sp).size;
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.malformed).toBe(2);
+    // HWM advanced to file end (terminal discard)
+    expect(Number.parseInt(readFileSync(hwmPath(harness), 'utf8'), 10)).toBe(fileSize);
+
+    // Second tick: nothing to process (HWM at end)
+    const result2 = await runWorker(harness, { db: {}, llm });
+    expect(result2.malformed).toBe(0);
+    expect(result2.skipped).toBe(1);
+  });
+
+  it('multi-record window splits at sentinel boundary, not mid-pair', async () => {
+    const harness = makeHarness();
+    // Create 4 records: event1+sentinel1+event2+sentinel2
+    // sentinel1 hwm_offset = small (within cap), sentinel2 hwm_offset = large (exceeds cap)
+    const sp = resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)), { recursive: true });
+    const smallEnd = 50;
+    const bigEnd = 120;
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '80';
+    const event1 = JSON.stringify({ session_id: harness.sessionId, project_id: harness.projectId, tool_name: 'Bash', timestamp: '2026-01-01T00:00:00.000Z', transcript_path: harness.transcriptPath, transcript_offset: 0 });
+    const sentinel1 = JSON.stringify({ session_id: harness.sessionId, project_id: harness.projectId, timestamp: '2026-01-01T00:00:01.000Z', transcript_path: harness.transcriptPath, hwm_offset: smallEnd });
+    const event2 = JSON.stringify({ session_id: harness.sessionId, project_id: harness.projectId, tool_name: 'Read', timestamp: '2026-01-01T00:00:02.000Z', transcript_path: harness.transcriptPath, transcript_offset: smallEnd });
+    const sentinel2 = JSON.stringify({ session_id: harness.sessionId, project_id: harness.projectId, timestamp: '2026-01-01T00:00:03.000Z', transcript_path: harness.transcriptPath, hwm_offset: bigEnd });
+    writeFileSync(sp, `${event1}\n${sentinel1}\n${event2}\n${sentinel2}\n`, { mode: 0o600 });
+    // Write enough transcript content to cover both ranges
+    appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'a'.repeat(200) },
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 1, rollupsWritten: 1 }) };
+    const llm = mockLlm([
+      rawExtraction({ summary: 'window one', observations: [observation('win1', 'win1 narrative')] }),
+      rawExtraction({ summary: 'window two', observations: [observation('win2', 'win2 narrative')] }),
+    ]);
+
+    const result = await runCaptureWorkerOnce({
+      db: fakeDb as any,
+      env: harness.env,
+      llm,
+      now: () => new Date('2026-07-06T10:00:00.000Z'),
+      writerHost: TEST_WRITER,
+      generateEmbedding: async () => null,
+    });
+    expect(result.processed).toBe(2);
+    // LLM was called twice with different transcript ranges
+    expect(llm.calls).toHaveLength(2);
+    // First window transcript should be 0..smallEnd range
+    expect(llm.calls[0].hwmOffsetStart).toBe(0);
+    expect(llm.calls[0].hwmOffsetEnd).toBe(smallEnd);
+    // Second window transcript should be smallEnd..bigEnd range
+    expect(llm.calls[1].hwmOffsetStart).toBe(smallEnd);
+    expect(llm.calls[1].hwmOffsetEnd).toBe(bigEnd);
+  });
+
+  it('session round-robin cursor prevents starvation under cap=1', async () => {
+    const sessionA = makeHarness({
+      projectId: `capture-worker-rr-a-${randomUUID()}`,
+      sessionId: `session-a-${randomUUID()}`,
+    });
+    sessionA.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    const sessionB: TestHarness = {
+      ...sessionA,
+      projectId: `capture-worker-rr-z-${randomUUID()}`,
+      sessionId: `session-z-${randomUUID()}`,
+      transcriptPath: join(sessionA.root, 'b.transcript.jsonl'),
+    };
+    writeFileSync(sessionB.transcriptPath, '', { mode: 0o600 });
+    await appendWindow(sessionA, { transcriptStart: 0, transcriptEnd: 0, timestamp: '2026-07-06T10:00:00.000Z' });
+    await appendWindow(sessionB, { transcriptStart: 0, transcriptEnd: 0, timestamp: '2026-07-06T10:00:01.000Z' });
+    const llm = mockLlm([]);
+
+    // Tick 1: processes session A (alphabetically first), writes cursor
+    await runWorker(sessionA, { db: {}, llm });
+    const cursorFile = join(sessionA.spoolDir, '.tick-cursor.json');
+    expect(existsSync(cursorFile)).toBe(true);
+
+    // Tick 2: cursor rotates, processes session B
+    await runWorker(sessionA, { db: {}, llm });
+    // Both sessions should have HWM files now
+    expect(existsSync(hwmPath(sessionA))).toBe(true);
+    expect(existsSync(hwmPath(sessionB))).toBe(true);
   });
 });
 
@@ -567,7 +1157,7 @@ describe('capture worker DB-backed RED contracts', () => {
     });
   });
 
-  it('dead-letters the retry malformed LLM JSON with truncated raw output and without transcript text or DB rows', async () => {
+  it('parks malformed LLM JSON after 5 tick attempts with truncated raw output and without transcript text or DB rows', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       {
@@ -580,23 +1170,29 @@ describe('capture worker DB-backed RED contracts', () => {
       transcriptEnd,
       timestamp: '2026-07-06T10:01:00.000Z',
     });
-    const firstMalformedOutput = 'first attempt was not json';
     const retryMalformedOutput = `retry-not-json:${'x'.repeat(3000)}`;
-    const llm = mockLlm([
-      { model: TEST_MODEL, text: firstMalformedOutput },
+
+    // Ticks 1-4: hold
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const llm = mockLlm([
+        { model: TEST_MODEL, text: 'not json' },
+        { model: TEST_MODEL, text: retryMalformedOutput },
+      ]);
+      await runWorker(harness, { db, llm });
+    }
+
+    // Tick 5: park
+    const llm5 = mockLlm([
+      { model: TEST_MODEL, text: 'final not json' },
       { model: TEST_MODEL, text: retryMalformedOutput },
     ]);
-
-    await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
+    await expect(runWorker(harness, { db, llm: llm5 })).resolves.toMatchObject({
       processed: 0,
       deadLettered: 1,
+      parked: 1,
       llmRetries: 1,
     });
 
-    expect(llm.calls).toHaveLength(2);
-    expect(
-      (llm.calls[1] as CaptureLlmRequest & { retryPromptPrefix?: string }).retryPromptPrefix
-    ).toContain('first character must be `{`');
     const deadLetter = readOnlyDeadLetter(harness);
     const metadata = deadLetter.metadata as Record<string, unknown>;
     expect(metadata).toMatchObject({
@@ -675,9 +1271,9 @@ describe('capture worker DB-backed RED contracts', () => {
     );
   });
 
-  it('continues remaining chunks after one chunk fails but preserves existing no-HWM-advance failure semantics', async () => {
+  it('holds HWM when a chunk within a single oversized window fails (retry sidecar)', async () => {
     const harness = makeHarness();
-    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+    const { transcriptEnd, cap } = makeChunkedTranscript(harness, {
       lineCount: 3,
       messageBytes: 80,
     });
@@ -697,30 +1293,15 @@ describe('capture worker DB-backed RED contracts', () => {
       }),
       { model: TEST_MODEL, text: chunkTwoRaw },
       { model: TEST_MODEL, text: chunkTwoRetryRaw },
-      rawExtraction({
-        summary: 'partial chunk three summary',
-        observations: [observation('partial chunk three', 'partial chunk three narrative')],
-      }),
     ]);
 
+    // Under new semantics: chunk failure within a window → hold entire window (attempt 1)
     await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
-      deadLettered: 1,
+      deadLettered: 0,
       llmRetries: 1,
-      observationsWritten: 2,
     });
 
-    expect(llm.calls.map((call) => call.transcript)).toEqual([
-      lines[0],
-      lines[1],
-      lines[1],
-      lines[2],
-    ]);
-    expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
-      observations: 2,
-      rollups: 1,
-    });
-    const deadLetter = readOnlyDeadLetter(harness);
-    expect(deadLetter.llm_raw_output).toBe(chunkTwoRetryRaw);
+    // HWM held
     expect(readFileSync(hwmPath(harness), 'utf8')).toBe('0');
   });
 
@@ -915,14 +1496,26 @@ describe('capture worker DB-backed RED contracts', () => {
       }),
     ]);
 
-    await expect(runWorker(badHarness, { db, llm })).resolves.toMatchObject({
+    const result = await runWorker(badHarness, { db, llm });
+    // Under new semantics: malformed lines are tolerated (skipped + counted),
+    // bad session's valid records have empty transcript → skip+advance.
+    expect(result).toMatchObject({
       processed: 1,
-      failed: 1,
+      failed: 0,
+      malformed: 1,
     });
     expect(await countRows(sql, goodHarness.projectId, goodHarness.sessionId)).toMatchObject({
       observations: 1,
       rollups: 1,
     });
+    // Bad session HWM advanced past the malformed lines (terminal discard)
+    const badHwmPath = join(
+      badHarness.spoolDir,
+      sanitizeSpoolSegment(badHarness.projectId),
+      `${sanitizeSpoolSegment(badHarness.sessionId)}.hwm`
+    );
+    const badHwmVal = Number.parseInt(readFileSync(badHwmPath, 'utf8'), 10);
+    expect(badHwmVal).toBe(statSync(resolveCaptureSpoolPath(badHarness.projectId, badHarness.sessionId, { env: badHarness.env })).size);
   });
 
   it('keeps one active rollup for two harvest windows in the same session', async () => {

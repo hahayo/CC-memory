@@ -16,12 +16,18 @@ import {
 import { runCaptureWorkerOnce, type CaptureWorkerResult } from '../src/services/capture-worker.js';
 import { generateEmbedding } from '../src/utils/embedding.js';
 
+/** 遮罩 DSN 中 scheme 之後、@ 之前的帳密區段 */
+export function maskDsnCredentials(text: string): string {
+  return text.replace(/:\/\/[^@]+@/g, '://***@');
+}
+
 async function dbHealthCheck(db: { execute(query: unknown): Promise<unknown> }): Promise<boolean> {
   try {
     await db.execute(sql`SELECT 1`);
     return true;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const raw = error instanceof Error ? error.message : String(error);
+    const message = maskDsnCredentials(raw);
     process.stdout.write(`[cc-memory] auto-capture skipped: DB health check failed: ${message}\n`);
     return false;
   }
@@ -52,7 +58,7 @@ export async function runAutoCaptureTick(): Promise<CaptureWorkerResult> {
       stdout: process.stdout,
     });
     process.stdout.write(
-      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered}\n`
+      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} transcript-missing=${result.transcriptMissing}\n`
     );
     return result;
   } finally {
@@ -66,7 +72,8 @@ const isMain =
 
 if (isMain) {
   runAutoCaptureTick().catch((error) => {
-    console.error('[run-auto-capture] failed:', error);
+    const raw = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[run-auto-capture] failed: ${maskDsnCredentials(raw)}\n`);
     process.exitCode = 1;
   });
 }
