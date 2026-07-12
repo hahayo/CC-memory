@@ -116,6 +116,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
       mkdirSync(join(dir, '.git'), { recursive: true }); // round 23：marker 需在 repo 內才生效
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const id = resolveProjectId({ cwd: dir });
       expect(id).toBe('from-marker');
     } finally {
@@ -127,6 +128,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     process.env.CC_MEMORY_PROJECT_ID = '   ';
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj2w-'));
     try {
+      // 無 .git → 無 marker → fallback 到 basename
       const id = resolveProjectId({ cwd: dir });
       const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
       expect(id).toBe(parts[parts.length - 1]);
@@ -143,6 +145,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
       mkdirSync(join(dir, '.git'), { recursive: true }); // round 23：marker 需在 repo 內才生效
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const id = resolveProjectId({ cwd: dir, cwdIsExplicit: true });
       expect(id).toBe('from-marker');
     } finally {
@@ -156,6 +159,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
       mkdirSync(join(dir, '.git'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const id = resolveProjectId({ cwd: dir });
       expect(id).toBe('from-env');
     } finally {
@@ -169,6 +173,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), '<!-- cc-memory: project="from-marker" -->');
       mkdirSync(join(dir, '.git'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const id = resolveProjectId({ explicit: 'from-caller', cwd: dir, cwdIsExplicit: true });
       expect(id).toBe('from-caller');
     } finally {
@@ -182,6 +187,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     try {
       writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="repo-root-id" -->');
       mkdirSync(join(root, '.git'), { recursive: true }); // 標記為 repo root
+      writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const subdir = join(root, 'src', 'tools', 'deep');
       mkdirSync(subdir, { recursive: true });
       // 從 deep subdir 解析，應找到 root 的 marker（不是 fallback 到 basename）
@@ -196,6 +202,7 @@ describe('resolveProjectId (5-layer priority)', () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-memory-local-'));
     try {
       mkdirSync(join(root, '.git'), { recursive: true }); // 標記為 repo root
+      writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const subdir = join(root, 'sub');
       mkdirSync(subdir, { recursive: true });
       writeFileSync(join(root, 'CLAUDE.md'), '<!-- cc-memory: project="parent" -->');
@@ -229,6 +236,7 @@ describe('resolveProjectId (5-layer priority)', () => {
       // repo 本身無 CLAUDE.md，但有 .git
       const repo = join(parent, 'my-repo');
       mkdirSync(join(repo, '.git'), { recursive: true });
+      writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       const subdir = join(repo, 'src', 'tools');
       mkdirSync(subdir, { recursive: true });
       // 從 subdir 解析，walk-up 應在 repo (`.git`) 邊界停；不會拿 parent 的 marker
@@ -247,6 +255,7 @@ describe('resolveProjectId (5-layer priority)', () => {
       writeFileSync(join(parent, 'CLAUDE.md'), '<!-- cc-memory: project="outer-ignored" -->');
       const repo = join(parent, 'my-repo');
       mkdirSync(join(repo, '.git'), { recursive: true });
+      writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
       writeFileSync(join(repo, 'CLAUDE.md'), '<!-- cc-memory: project="repo-marker" -->');
       const subdir = join(repo, 'src');
       mkdirSync(subdir, { recursive: true });

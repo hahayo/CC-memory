@@ -55,11 +55,24 @@ function nonEmpty(s: string | null | undefined): string | null {
 
 const WALK_UP_MAX_DEPTH = 64; // 防 symlink 循環或奇怪 path
 
-function findRepoRoot(cwd: string, existsFn: ExistsSyncFn): string | null {
-  // 從 cwd 往上找第一個含 `.git` 的目錄（repo root）；找不到回 null。
+function findRepoRoot(
+  cwd: string,
+  existsFn: ExistsSyncFn,
+  readFn: ReadFileSyncFn
+): string | null {
+  // 從 cwd 往上找第一個「真正的 git repo」目錄；找不到回 null。
+  // 判定條件：.git/HEAD 存在（正常 clone/init）或 .git 是 worktree pointer 檔案。
+  // 空 .git 目錄（如環境殘留）不算合法 repo root。
   let current = cwd;
   for (let i = 0; i < WALK_UP_MAX_DEPTH; i++) {
-    if (existsFn(join(current, '.git'))) return current;
+    if (existsFn(join(current, '.git', 'HEAD'))) return current;
+    // worktree：.git 是檔案內容以 'gitdir:' 開頭
+    try {
+      const content = readFn(join(current, '.git'));
+      if (content.trimStart().startsWith('gitdir:')) return current;
+    } catch {
+      // .git 不存在或不可讀 → 非 repo root
+    }
     const parent = dirname(current);
     if (parent === current) return null; // filesystem root
     current = parent;
@@ -81,7 +94,7 @@ function tryReadClaudeMdMarker(
   //     仍會一路走到 `~/CLAUDE.md` → 把 demo 解成陌生 project。修法：先找 repo
   //     root；找不到 repo root（非 git 目錄）→ marker 完全不適用，回 null 讓
   //     layer 4/5 fallback 接手。
-  const repoRoot = findRepoRoot(cwd, existsFn);
+  const repoRoot = findRepoRoot(cwd, existsFn, readFn);
   if (repoRoot === null) return null;
 
   // 在 [cwd, repoRoot] 範圍內逐層讀 CLAUDE.md，找 marker
