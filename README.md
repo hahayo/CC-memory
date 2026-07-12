@@ -31,7 +31,7 @@ npm run build
 
 ### 2. 設定資料庫
 
-在 Zeabur 或其他服務建立 PostgreSQL 資料庫，然後執行 migration：
+主要路徑：Coolify 部署 PostgreSQL + 本機 SSH tunnel（詳見下方「Coolify 部署」段）。Zeabur 已退役（2026-07-01 遷移完成）。確認連線後執行 migration：
 
 ```bash
 # 設定環境變數

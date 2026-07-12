@@ -1,6 +1,6 @@
 # CC-memory v0.5 auto-capture Spec
 
-> **狀態（2026-07-05）**：Draft（待 Claude main loop 審查）。本檔是 SDD（Spec-Driven Development，規格驅動開發）三件套之一，與 [plan.md](plan.md)、[task.md](task.md) 共同取代 v0.4 Phase C auto-capture（自動採集）休眠設計。
+> **狀態（2026-07-12）**：Delivered（M1-M6 已交付 2026-07-08；行為契約以 2026-07-12 修訂為準）。本檔是 SDD（Spec-Driven Development，規格驅動開發）三件套之一，與 [plan.md](plan.md)、[task.md](task.md) 共同取代 v0.4 Phase C auto-capture（自動採集）休眠設計。
 >
 > **資料來源**：`CLAUDE.md`、`docs/INDEX.md`、`docs/spec.md`、`docs/superpowers/specs/2026-04-22-auto-capture-design.md`、`docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md`、`docs/personal-hub/*`、`src/db/schema.ts`、`sql/migrations/0000-0010*.sql`、`scripts/test-db-setup.ts`、`src/services/{delivery-queue,scope-policy,tool-policy,memories,feedback}.ts`、`src/utils/embedding.ts`。
 >
@@ -83,7 +83,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 驗收條件：
 - hook 永不 throw；任何錯誤只寫本地 debug log（除錯紀錄）或略過。
 - worker 起手 health check（健康檢查）DB/SSH tunnel；失敗只累積 spool 並 stdout 告警，不在 stderr 無限刷重試。
-- LLM schema 驗證失敗整包 dead-letter，內容本身不落 DB。
+- LLM schema 驗證失敗：retry sidecar（`<session>.retry.json`）跨 tick 累計 attempts；第 1-4 次 hold（HWM hold、不寫 DB）；第 5 次 park（dead-letter + HWM 前進越過該窗）；內容本身不落 DB。429 不計 attempts，HWM hold。
 
 ### US-V5-3：細粒度 observation 可下鑽
 
@@ -162,11 +162,16 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Refine | delete only | write guard 必做 |
 | Benchmark | 對 claude-mem 10.5.2 觀察級行為 | 併用 2 週 |
 
+> 2026-07-12 註：排程端已規劃自 hermes cron（定時任務）遷移至 systemd user timer（見 memory-ops-cutover.md）；本段保留原文為歷史紀錄，「跑完即退」的非常駐要求不變。
+
 ## Constraints
 
 ### RAM 三紅線
 
 1. **不做常駐 daemon**：worker 走 hermes cron，跑完即退；不得常駐 worker-service。
+
+> 2026-07-12 註：排程端已規劃自 hermes cron 遷移至 systemd user timer（見 memory-ops-cutover.md）；本段保留原文為歷史紀錄，「跑完即退」的非常駐要求不變。
+
 2. **hook 只做 O(1) 輕量寫入且不走網路**：PostToolUse 只 append thin JSONL；Stop 只 append sentinel；hook 內不 INSERT 遠端 DB、不 spawn LLM。
 3. **observation 抽取用便宜模型**（2026-07-07 使用者拍板改版）：預設 `claude-cli`（`claude -p` 子程序吃 Claude Code 訂閱額度，模型 `CC_CAPTURE_CLAUDE_MODEL` 預設 `haiku`；只在 cron worker 內短暫存在、跑完即退，不違反紅線 1/2）；`CC_CAPTURE_LLM` 可切 `gemini-flash`（遠端 API，需 `GEMINI_API_KEY`）。provider 不可用（CLI 不存在／key 缺）時靜默停用並告警。**hook 內不 spawn LLM 的紅線不變**。
 
@@ -273,7 +278,7 @@ worker 對 LLM output 採 all-or-nothing（全有或全無）策略：
 2. 必須含 `session_summary` 與 `observations`。
 3. `session_summary.summary` 不可空白，且要能映射到 `project_memories.summary`。
 4. `observations` 每筆必須通過 type/concepts/facts/files/narrative 驗證。`discovery_tokens` 由 worker 寫入時以 estimator 計算，不採信 LLM 輸出（2026-07-07 真 tick 實證：haiku 常給 0/null，整批炸 schema——對齊上方欄位契約「寫入時計算」）。
-5. 任一筆 observation 壞掉，整包進 dead-letter，不半吞。
+5. 任一筆 observation 壞掉，整包進 hold/park 分流：第 1-4 次 hold（跨 tick retry sidecar，HWM hold）；第 5 次 park（寫 dead-letter + HWM 前進越過該窗）；不半吞。
 6. dead-letter metadata 必須可追查 session id、hwm offset、模型名、錯誤碼、content hash。
 7. dead-letter 不把 transcript 全文或 LLM 原文落 DB。
 
@@ -321,7 +326,7 @@ No-Go：保留 claude-mem，回 Phase 2 補強 query/taxonomy/worker。
 - [ ] PostToolUse hook append thin JSONL，內容含 session/project/tool metadata 且權限 0600。
 - [ ] Stop hook append sentinel；worker 讀 transcript 增量窗口並更新 hwm_offset。
 - [ ] DB tunnel 關閉時 worker 不呼叫 LLM、不寫 DB，只累積 spool 並告警。
-- [ ] LLM 回 malformed JSON（格式錯誤 JSON）時整包 dead-letter，DB 無半包資料。
+- [ ] LLM 回 malformed JSON（格式錯誤 JSON）時整包進 hold/park 分流（第 1-4 次 hold、第 5 次 park dead-letter）；DB 無半包資料；429 不計 attempts，HWM hold。
 - [ ] `cc_memory_search` 回 rollup/observation index；`recordSearchQuery` 仍能寫既有欄位。
 - [ ] `cc_memory_timeline` 對 anchor observation 回同 project 且同 session 前後 N 筆；anchor rollup 先展開 linked observations。
 - [ ] `cc_memory_get_observations` 批次 ids 回全文與總 `discovery_tokens`。

@@ -72,9 +72,13 @@ command = "/home/<user>/CC_project/CC-memory/hooks/stop-capture-sentinel.sh"
 
 **⚠️ hook trust（信任）**：Codex 的 user hooks 需 trust 過才會執行（依 hook 定義的 sha256）。加完設定後**互動跑一次 `codex`**，在 trust 提示出現時接受；未 trust 前 headless `codex exec` 會**靜默跳過** hooks（不報錯）。驗證是否生效：跑一次 `codex exec "run: echo hi"` 後檢查 `~/.cache/cc-memory/spool/<cwd 專案>/` 是否出現 codex session（uuid v7）的 jsonl。
 
-## 3. Worker（cron 端）
+## 3. Worker（排程端）
 
-worker 每 5 分鐘讀本機 spool → claude CLI（haiku）抽取 → 寫 prod DB。wrapper 範本：`docs/auto-capture-v0.5/m2b-cron-draft.md`（hermes 版）；實際部署版在主力機的 `~/.hermes/scripts/cc-memory-auto-capture.sh`（含「正常 tick 靜默、異常才輸出」過濾）。
+主力機的推薦部署已改成 `systemd` supervisor：見 `docs/auto-capture-v0.5/memory-ops-cutover.md` 與 `ops/systemd/`。Hermes 版 wrapper 只保留作歷史草稿與其他機器的遷移參考。
+
+（截至 2026-07-12：主力機 PC040200197 尚未執行 systemd 安裝步驟，實際仍由 hermes cron 驅動；遷移手順見 memory-ops-cutover.md §3。）
+
+worker 每 5 分鐘讀本機 spool → claude CLI（haiku）抽取 → 寫 prod DB。若你的機器沒有要裝 `systemd` user timer，也可用 plain crontab；wrapper 範本仍可沿用 `docs/auto-capture-v0.5/m2b-cron-draft.md` 的核心邏輯。
 
 沒有 hermes 的機器用 plain crontab（邏輯相同）：
 
@@ -106,5 +110,5 @@ exec npx tsx scripts/run-auto-capture.ts
 - **遞迴斷路器**：worker spawn 的 claude 子程序帶 `CC_MEMORY_CAPTURE_CHILD=1`，hooks 開頭 guard 直接 exit 0——抽取 session 不會再進 spool。不要移除該 guard。
 - **`GEMINI_API_KEY` 不要 unset**：雙用途（gemini-flash capture 選項 + search embedding）；unset 會讓語義搜尋失效。claude-cli capture 不需要它。
 - spool 安全閥：單檔 >10MB rotate、全 spool >500MB 停止 capture（`CC_MEMORY_SPOOL_MAX_MB`）。
-- 窗口安全閥：空窗口 skip；>256KB 依 UTF-8 邊界分塊（`CC_CAPTURE_MAX_WINDOW_BYTES`）。
+- 窗口安全閥：空窗口 skip；超過上限依 UTF-8 邊界分塊（`CC_CAPTURE_MAX_WINDOW_BYTES`）——claude-cli 預設 96 KiB、其他 provider 256 KiB；顯式設定則優先。
 - 環境變數全表：`plan.md` §Environment Variables。

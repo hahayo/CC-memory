@@ -8,7 +8,7 @@
 
 | Track | 目錄 | 狀態 | 一句話 |
 |---|---|---|---|
-| **Track 1：memory 核心（v0.3 → v0.5）** | `docs/auto-capture-v0.5/` + `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**v0.5 active（SDD 起草）** | auto-capture（自動採集）是「取代 claude-mem」主線；v0.4 Phase C 休眠設計已被 v0.5 observation-first（觀察紀錄優先）SDD 取代 |
+| **Track 1：memory 核心（v0.3 → v0.5）** | `docs/auto-capture-v0.5/` + `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**v0.5 M1-M6 已交付（2026-07-08，PR #9-#18）；benchmark Go/No-Go 預計 2026-07-21** | auto-capture（自動採集）是「取代 claude-mem」主線；v0.4 Phase C 休眠設計已被 v0.5 observation-first（觀察紀錄優先）SDD 取代 |
 | **Track 2：personal-hub 個人中樞** | `docs/personal-hub/` | ✅ **已交付**（2026-06-10 prod cutover） | Phase 0-3 + Todoist 5 tools + at-least-once（至少一次投遞）queue 全上線；維運見 `personal-hub/prod-runbook.md` |
 | **Track 3：project DB cutover** | `docs/migrations/2026-06-29-cc-memory-project-cutover/` | ✅ **EXECUTED**（2026-07-01） | Zeabur → Coolify，Plan B fresh schema（全新結構）；`addendum-2026-06-30-plan-b.md` 是 actual runbook；剩 Step F（Zeabur 退役）待做 |
 
@@ -25,11 +25,16 @@
 
 | 檔案 | 角色 |
 |---|---|
-| `../CLAUDE.md` | repo 總覽：18 個 MCP tools、env vars、設計模式（第一入口） |
+| `../CLAUDE.md` | repo 總覽：21 個 MCP tools、env vars、設計模式（第一入口） |
 | `../README.md` | 安裝 + Coolify 部署（SSH tunnel 流程） |
 | `INDEX.md`（本檔） | track 導覽 |
 | `decisions/{README,INDEX,_draft/,DEC-*.md}` | Git（版本控制）決策卡：跨 Claude Code／Codex 共用的決策 SSOT（單一真相來源），涵蓋規範、索引、候選草稿與正式決策 |
 | `auto-capture-v0.5/{spec,plan,task}.md` | Track 1 v0.5 auto-capture SDD（Spec-Driven Development，規格驅動開發）三件套；取代 v0.4 Phase C 休眠設計 |
+| `auto-capture-v0.5/memory-ops-cutover.md` | Hermes→systemd 維運遷移手冊（Active） |
+| `auto-capture-v0.5/benchmark-fixtures.md` | benchmark（基準測試）查詢 fixture（固定資料）集（Active） |
+| `auto-capture-v0.5/m4-settings-draft.md` | M4 SessionStart 注入 settings 草稿（Active；待 user review 後落地） |
+| `auto-capture-v0.5/m4-gate-estimator-accuracy.json` | M4 token estimator 精度量測紀錄（Active） |
+| `auto-capture-v0.5/oq1-gate-report.json` | OQ1 PostToolUse payload gate 報告（Active） |
 | `personal-hub/prod-runbook.md` | 維運手冊（2026-07-05 已更新為 Coolify 拓樸） |
 | `personal-hub/{spec,plan,task}.md` + `decisions/ADR-001-*.md` | Track 2 SDD（已交付，仍為維運依據）；ADR-001 = 獨立 personal DB 決策 SSOT |
 | `migrations/2026-06-29-cc-memory-project-cutover/` 四件 | Track 3 SDD（EXECUTED；addendum 為 actual runbook） |
@@ -45,6 +50,8 @@
 
 | 檔案 | 標記 |
 |---|---|
+| `auto-capture-v0.5/m2a-settings-draft.md` | Historical（M2a hook settings 草稿；已由 M4 草稿取代） |
+| `auto-capture-v0.5/m2b-cron-draft.md` | Historical（hermes cron draft；已降級，systemd 路線為主） |
 | `next-session-handoff.md` | SUPERSEDED（2026-04-23 的交接，主線早已轉向） |
 | `TODO.md` | ARCHIVED（v0.1 checklist，2026-02 後未維護） |
 | `plans/2026-02-01-cc-memory-design.md` | HISTORICAL（v0.1 原始設計） |
@@ -58,5 +65,5 @@
 
 ## 版號說明
 
-- `package.json` **0.4.0**（2026-07-05 bump）= 現況：Phase A（v0.3）+ personal-hub Phase 0-3 + Todoist + project DB cutover。
+- `package.json` **0.5.0**（2026-07-08 bump）= 現況：Phase A（v0.3）+ personal-hub Phase 0-3 + Todoist + project DB cutover + v0.5 auto-capture M1-M6 已交付。
 - ⚠️ 「v0.4」在歷史文件裡有兩個用法：`docs/spec.md` 的 v0.4 = Phase C auto-capture（未實作且已 superseded）；ADR-001 的「Phase 3 v0.4」= personal DB 分離（已交付）。Track 1 auto-capture 後續以 **v0.5 / 0.5.x** 指涉。

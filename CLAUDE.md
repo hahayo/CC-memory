@@ -24,26 +24,32 @@ CC-memory 是一個 Claude Code 專案記憶同步系統，透過 MCP (Model Con
 ## Build Commands
 
 ```bash
-npm run build    # 編譯 TypeScript 到 build/ 目錄
-npm run dev      # Watch 模式編譯
-npm start        # 啟動 MCP server
-npm test         # 執行 vitest 測試
-npm run lint     # ESLint 檢查 src/**/*.ts
-npm run clean    # 清除 build/ 目錄
+npm run build              # 編譯 TypeScript 到 build/ 目錄
+npm run dev                # Watch 模式編譯
+npm start                  # 啟動 MCP server
+npm test                   # 執行 vitest 測試
+npm run test:ci            # vitest run 單次執行，CI 用
+npm run typecheck          # tsc --noEmit 型別檢查
+npm run lint               # ESLint 檢查 src/ scripts/ tests/
+npm run clean              # 清除 build/ 目錄
+npm run decisions:validate # 決策卡格式驗證
 ```
 
 ## Architecture
 
 ### MCP Server (src/index.ts)
-主要進入點，實作 18 個 MCP 工具：
+主要進入點，實作 21 個 MCP 工具：
 
-Memory（6）：
+Memory（9）：
 - `cc_memory_save` - 儲存記憶（summary, keywords, decisions, nextSteps）
 - `cc_memory_search` - 關鍵字／語義／混合搜尋（省略 selector = 全專案搜尋，刻意 feature）
 - `cc_memory_list` - 列出專案記憶（分頁支援）
 - `cc_memory_get` - 取得單一記憶
 - `cc_memory_stats` - 取得專案統計
 - `cc_memory_delete` - 刪除記憶（軟刪除）
+- `cc_memory_timeline` - 時間軸瀏覽觀察記錄
+- `cc_memory_get_observations` - 按 ID 批次取觀察
+- `cc_memory_refine_delete` - 精修刪除觀察
 
 Task（6）：
 - `cc_task_create` - 建立任務
@@ -52,6 +58,8 @@ Task（6）：
 - `cc_task_stats` - 任務統計 JSON（today/overdue/open/in_progress/completed_recently，日界 Asia/Taipei）
 - `cc_task_set_reminder` - 設定提醒（remind_at 觸發時點 + 可選 recurrence；Personal-Hub Phase 1）
 - `cc_task_snooze` - 暫緩提醒到 snooze_until（Personal-Hub Phase 1）
+
+> 備注：`cc_task_snooze` 功能上屬 Task 群組，但在 `src/index.ts` 的物理位置鄰近 `cc_reminders_due`（消除 6+1 vs 5+2 計數歧義）。
 
 Reminder（1）：
 - `cc_reminders_due` - 撈 + 認領到期提醒（poller 入口；會寫 reminder_log，read-only mode 下歸寫入類拒）
@@ -99,6 +107,27 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_READ_ONLY` - read-only mode（Phase 2）：寫入類 tool 在 ListTools 隱藏 + handler 拒絕（雙層 enforce）。給 `/hi` 注入等只讀消費端
 - `CC_TOOL_ALLOWLIST` - 逗號分隔 tool 白名單（Phase 2）：只露/允許集合內 tool（含 read）；集合外兩層皆拒
 - `CC_SEARCH_FEEDBACK` - search telemetry 開關（Phase 2，預設 on）：`off`/`0`/`false` 關閉 `cc_memory_search` 的 `search_feedback` 寫入
+
+### v0.5 auto-capture / 告警（worker 與 hooks 端，非 MCP server 本體）
+
+- `CC_CAPTURE_LLM` - capture worker 使用的 LLM provider（預設 `claude-cli`；可切 `gemini-flash`）
+- `CC_CAPTURE_CLAUDE_MODEL` - claude-cli provider 的模型（預設 `haiku`）
+- `CC_CAPTURE_CLAUDE_TIMEOUT_MS` - claude-cli provider 的 timeout（逾時）毫秒數
+- `CC_MEMORY_SPOOL_DIR` - spool（本地緩衝）根目錄（預設 `~/.cache/cc-memory/spool`）
+- `CC_MEMORY_SPOOL_MAX_MB` - spool 總大小上限（MB）；超過停止 capture 並告警
+- `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 96 KiB、其他 provider 256 KiB
+- `CC_CAPTURE_MAX_SESSIONS_PER_TICK` - worker 每次 tick（執行輪次）最多處理幾個 session
+- `CC_MEMORY_SPOOL_LOCK_STALE_MS` - spool 檔案鎖過期毫秒數
+- `CC_MEMORY_ALERT_BOT_TOKEN` - Telegram 告警 bot token
+- `CC_MEMORY_ALERT_CHAT_ID` - Telegram 告警 chat id
+- `CC_MEMORY_ALERT_API_BASE` - Telegram API base URL（可選，覆蓋預設）
+- `CC_MEMORY_INJECT_TOKEN_BUDGET` - SessionStart（工作階段啟動）注入的 token budget（語彙預算，預設 1200）
+- `CC_MEMORY_INJECT_RECENT` - SessionStart Recent Activity 注入開關（預設 off）
+- `CC_MEMORY_INCLUDE_OBSERVATIONS` - search 是否包含 observations（觀察記錄，預設 on）
+- `CC_MEMORY_CAPTURE_CHILD` - 遞迴採集斷路器：worker spawn 的子程序設為 1，hooks（掛鉤）偵測到即 exit 0
+- `CC_CAPTURE_TICK_BUDGET_MS` - worker 每 tick（執行輪次）的時間預算毫秒（預設 240000；0=停用；預算耗盡則不開新窗優雅收尾）
+- `EMBEDDING_MODEL` - embedding（嵌入向量）模型名稱（預設 `gemini-embedding-001`）
+- `EMBEDDING_DIMENSIONS` - embedding 向量維度（預設 1536）
 
 ## Key Design Patterns
 

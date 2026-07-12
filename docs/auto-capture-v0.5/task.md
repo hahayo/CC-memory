@@ -22,6 +22,8 @@
 
 # M1：Schema + migrations 0011-0013
 
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
+
 > 目標：新增 `observations` 表；不建 `pending_observations` 遠端 queue（佇列）；project/personal/test 三側欄位一致，並以 0012/0013 補 observations 分側路由 CHECK。
 
 ## 1a：Schema tests 先紅
@@ -72,6 +74,8 @@
 
 # M2a：Hook 端與 PostToolUse payload gate
 
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
+
 > 目標：實測 hook payload（掛鉤輸入）與 transcript offset（逐字稿偏移），並實作 O(1) local spool append（本地緩衝附加）。
 
 ## 2a-1：Payload probe tests
@@ -115,6 +119,8 @@
 
 # M2b：Cron worker + LLM extraction
 
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
+
 > 目標：worker 從 spool harvest（收割）batch（批次），一次呼叫 capture LLM（預設 claude-cli；2026-07-07 拍板前為 Gemini Flash），驗證 JSON schema（結構），寫 rollup + observations。
 
 ## 2b-1：Worker failure tests
@@ -156,13 +162,13 @@
 - [ ] 起手 health check SSH tunnel/project DB
 - [ ] spool lock + HWM + rotation
 - [ ] stdout summary：processed/skipped/dead-letter counts
-- [ ] hermes cron draft：`cc-memory-auto-capture` */5min
+- [ ] hermes cron draft：`cc-memory-auto-capture` */5min（hermes cron draft 已降級為歷史/替代機器參考）
 
 ## M2b Gate
 
 - [ ] **回歸基線**：現行 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`
 - [ ] DB tunnel down：worker exit 0/非破壞，spool 未前進，LLM 未呼叫
-- [ ] malformed LLM output：dead-letter 有 metadata，DB 無半包資料
+- [ ] malformed LLM output：第 1-4 次 hold（HWM hold、不落 DB）；第 5 次 park（dead-letter 有 metadata、HWM 前進越過該窗）；DB 無半包資料
 - [ ] 成功 batch：rollup + observations 同 transaction 寫入
 - [ ] 重跑同 batch：不重複 observations
 - [ ] 同 session 多個 batch：仍只有一筆 active rollup，observations append-only
@@ -171,6 +177,8 @@
 ---
 
 # M3：3 層 retrieval
+
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
 
 > 目標：search（搜尋）輕索引化，不破 `SearchResultEnvelope`（搜尋結果信封）；新增 timeline（時間軸）與 batch get（批次取得）。
 
@@ -216,6 +224,8 @@
 
 # M4：SessionStart injector + discovery_tokens
 
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
+
 > 目標：Recent Activity 輕索引注入，預設 off；每列標 discovery_tokens（載入成本）。
 
 ## 4a：Token estimator acceptance tests
@@ -259,6 +269,8 @@
 
 # M5：refine_delete + governance
 
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
+
 > 目標：只做 delete；promote/merge/edit 延後。
 
 ## 5a：Service tests
@@ -297,6 +309,8 @@
 ---
 
 # M6：Benchmark harness
+
+> 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
 
 > 目標：用資料決定是否停用 claude-mem。對比單位是 rollup；observation 是 drill-down。
 
