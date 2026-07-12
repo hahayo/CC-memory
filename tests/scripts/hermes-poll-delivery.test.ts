@@ -16,8 +16,6 @@ import postgres from 'postgres';
 import http from 'node:http';
 import { connectTestDb, TEST_DB_URL, type Sql } from '../helpers/db.js';
 import { runOneTick } from '../../scripts/hermes-reminder-poll.js';
-import { reminderDeliveryQueue } from '../../src/db/schema.js';
-import { eq } from 'drizzle-orm';
 
 // ---------------------------------------------------------------------------
 // mock Telegram server helpers

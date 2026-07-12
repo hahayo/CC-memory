@@ -1,6 +1,6 @@
 // tests/tools/stats.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getProjectStats, ProjectStats } from '../../src/tools/stats.js';
+import { getProjectStats } from '../../src/tools/stats.js';
 
 describe('getProjectStats', () => {
   const mockSelect = vi.fn();

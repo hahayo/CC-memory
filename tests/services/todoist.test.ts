@@ -10,7 +10,7 @@
 //   5. completed：預設近 7 天視窗（注入 now）、>3 個月拒絕
 //   6. 錯誤映射：401→FORBIDDEN、429→RATE_LIMIT(retry_after)、timeout→逾時、空頁→空陣列
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   addTask,
   listProjects,

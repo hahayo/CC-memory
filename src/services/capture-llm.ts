@@ -159,15 +159,6 @@ function optionalString(value: unknown, field: string): string | undefined {
   return value;
 }
 
-function positiveInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || (value as number) <= 0) {
-    throw new CaptureLlmValidationError('LLM_SCHEMA_INVALID', `${field} must be positive integer`, {
-      field,
-    });
-  }
-  return value as number;
-}
-
 function parseObservation(value: unknown, index: number): CaptureLlmObservation {
   if (!isRecord(value)) {
     throw new CaptureLlmValidationError('LLM_SCHEMA_INVALID', 'observation must be object', {
