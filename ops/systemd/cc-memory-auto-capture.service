@@ -1,0 +1,23 @@
+[Unit]
+Description=CC-memory auto-capture supervisor
+Documentation=%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.ccm-project-url
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+WorkingDirectory=%h/CC_project/CC-memory
+Environment=CC_CAPTURE_LLM=claude-cli
+Environment=CC_CAPTURE_CLAUDE_MODEL=haiku
+# 75s 與 hermes wrapper 一致：每 call 75s × 最壞 2 call < tick budget 240s < supervisor 270s < TimeoutStartSec 300s
+Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=75000
+Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=1
+Environment=CC_MEMORY_PROJECT_URL_FILE=%h/.ccm-project-url
+Environment=CC_MEMORY_ALERT_ENV_FILE=%h/.ccm-memory-alert.env
+Environment=CC_MEMORY_ALERT_STATE_FILE=%h/.local/state/cc-memory/auto-capture-alert-state.json
+Environment=PATH=/home/haha/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/flock -n /home/haha/.cache/cc-memory/auto-capture-run.lock /usr/bin/env node %h/CC_project/CC-memory/node_modules/tsx/dist/cli.mjs %h/CC_project/CC-memory/scripts/run-auto-capture-supervisor.ts
+StandardOutput=journal
+StandardError=journal
