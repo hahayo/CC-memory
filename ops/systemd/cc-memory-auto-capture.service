@@ -1,9 +1,10 @@
 [Unit]
 Description=CC-memory auto-capture supervisor
-Documentation=%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
+Documentation=file:%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=%h/.ccm-project-url
+ConditionPathExists=%h/.ccm-memory-alert.env
 
 [Service]
 Type=oneshot
@@ -11,7 +12,7 @@ TimeoutStartSec=300
 WorkingDirectory=%h/CC_project/CC-memory
 Environment=CC_CAPTURE_LLM=claude-cli
 Environment=CC_CAPTURE_CLAUDE_MODEL=haiku
-# 75s 與 hermes wrapper 一致：每 call 75s × 最壞 2 call < tick budget 240s < supervisor 270s < TimeoutStartSec 300s
+# 每 call 75s × 最壞 2 call < tick budget 240s < supervisor 270s < TimeoutStartSec 300s
 Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=75000
 Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=1
 Environment=CC_MEMORY_PROJECT_URL_FILE=%h/.ccm-project-url

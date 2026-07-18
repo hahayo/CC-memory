@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,7 +28,11 @@ import {
   resolveCaptureSpoolPath,
   sanitizeSpoolSegment,
 } from '../../src/services/capture-spool.js';
-import { runCaptureWorkerOnce } from '../../src/services/capture-worker.js';
+import {
+  runCaptureWorkerOnce,
+  writeCaptureStateAtomically,
+  type CaptureStateV2,
+} from '../../src/services/capture-worker.js';
 import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
@@ -62,6 +67,7 @@ interface CaptureMetadata {
   observation_ids?: string[];
   model?: string;
   spool_offsets?: Array<Record<string, number>>;
+  transcript_sources?: Array<{ path_hash: string; start: number; end: number }>;
   summarize_count?: number;
   discovery_tokens?: number;
 }
@@ -156,6 +162,25 @@ function hwmPath(harness: TestHarness): string {
     sanitizeSpoolSegment(harness.projectId),
     `${sanitizeSpoolSegment(harness.sessionId)}.hwm`
   );
+}
+
+function statePath(harness: TestHarness): string {
+  return join(
+    harness.spoolDir,
+    sanitizeSpoolSegment(harness.projectId),
+    `${sanitizeSpoolSegment(harness.sessionId)}.capture-state.json`
+  );
+}
+
+function readState(harness: TestHarness): CaptureStateV2 {
+  return JSON.parse(readFileSync(statePath(harness), 'utf8')) as CaptureStateV2;
+}
+
+function resetStateForReplay(harness: TestHarness): void {
+  const state = readState(harness);
+  state.spool.cursor = 0;
+  for (const checkpoint of Object.values(state.transcripts)) checkpoint.checkpoint = 0;
+  writeFileSync(statePath(harness), JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 function spoolPath(harness: TestHarness): string {
@@ -262,7 +287,10 @@ async function runWorker(
     db: unknown;
     llm: CaptureLlmAdapter;
     now?: Date;
+    nowMs?: () => number;
     dbHealthCheck?: () => Promise<boolean>;
+    stateWriter?: (path: string, state: CaptureStateV2) => Promise<void>;
+    stdout?: { write(chunk: string): unknown };
   }
 ) {
   return runCaptureWorkerOnce({
@@ -270,9 +298,12 @@ async function runWorker(
     env: harness.env,
     llm: input.llm,
     now: () => input.now ?? new Date('2026-07-06T10:00:00.000Z'),
+    nowMs: input.nowMs,
     writerHost: TEST_WRITER,
     dbHealthCheck: input.dbHealthCheck,
     generateEmbedding: async () => null,
+    stateWriter: input.stateWriter,
+    stdout: input.stdout,
   });
 }
 
@@ -337,7 +368,7 @@ describe('capture worker failure contracts without DB', () => {
 
     expect(llm.calls).toHaveLength(0);
     expect(existsSync(deadDir(harness))).toBe(false);
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+    expect(readState(harness).spool.cursor).toBe(spoolEnd);
   });
 
   it('does not call LLM when the injectable DB health check fails', async () => {
@@ -420,7 +451,7 @@ describe('capture worker failure contracts without DB', () => {
     });
     expect(llm1.calls).toHaveLength(2);
     expect(existsSync(deadDir(harness))).toBe(false);
-    expect(existsSync(hwmPath(harness))).toBe(false);
+    expect(readState(harness).spool.cursor).toBe(0);
 
     // Ticks 2-4: keep failing
     for (let tick = 2; tick <= 4; tick += 1) {
@@ -443,8 +474,9 @@ describe('capture worker failure contracts without DB', () => {
     expect(existsSync(deadDir(harness))).toBe(true);
     const deadLetter = readOnlyDeadLetter(harness);
     expect(JSON.stringify(deadLetter)).not.toContain(SECRET_TRANSCRIPT_TEXT);
-    // HWM advanced past the window
-    expect(existsSync(hwmPath(harness))).toBe(true);
+    // Failed chunk checkpoint advances, while the spool cursor waits for a clean snapshot pass.
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(transcriptEnd);
+    expect(readState(harness).spool.cursor).toBe(0);
   });
 
   it('treats runtime LLM disabled errors as a skip without dead-lettering', async () => {
@@ -479,7 +511,7 @@ describe('capture worker failure contracts without DB', () => {
       })
     ).resolves.toMatchObject({ processed: 0, skipped: 1, deadLettered: 0 });
     expect(existsSync(deadDir(harness))).toBe(false);
-    expect(existsSync(hwmPath(harness))).toBe(false);
+    expect(readState(harness).spool.cursor).toBe(0);
   });
 
   it('treats Claude CLI 429 rate limits as transient without dead-lettering or counting attempts', async () => {
@@ -507,7 +539,7 @@ describe('capture worker failure contracts without DB', () => {
     });
 
     expect(existsSync(deadDir(harness))).toBe(false);
-    expect(existsSync(hwmPath(harness))).toBe(false);
+    expect(readState(harness).spool.cursor).toBe(0);
   });
 
   it('reclaims stale spool locks so killed workers do not block a session forever', async () => {
@@ -528,7 +560,7 @@ describe('capture worker failure contracts without DB', () => {
       deadLettered: 0,
     });
 
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+    expect(readState(harness).spool.cursor).toBe(spoolEnd);
     expect(existsSync(lockPath(harness))).toBe(false);
   });
 
@@ -548,7 +580,7 @@ describe('capture worker failure contracts without DB', () => {
       deadLettered: 0,
     });
 
-    expect(existsSync(hwmPath(harness))).toBe(false);
+    expect(existsSync(statePath(harness))).toBe(false);
     expect(existsSync(lockPath(harness))).toBe(true);
   });
 
@@ -583,8 +615,8 @@ describe('capture worker failure contracts without DB', () => {
       deadLettered: 0,
     });
 
-    expect(readFileSync(hwmPath(first), 'utf8')).toBe(String(firstEnd));
-    expect(existsSync(hwmPath(second))).toBe(false);
+    expect(readState(first).spool.cursor).toBe(firstEnd);
+    expect(existsSync(statePath(second))).toBe(false);
   });
 
   it('parks after 5 tick attempts via retry sidecar, then EEXIST dedup on replay', async () => {
@@ -613,7 +645,7 @@ describe('capture worker failure contracts without DB', () => {
       const llm = mockLlm([repeatedError, repeatedError]);
       const r = await runWorker(harness, { db: {}, llm });
       expect(r.deadLettered).toBe(0);
-      expect(existsSync(hwmPath(harness))).toBe(false);
+      expect(readState(harness).spool.cursor).toBe(0);
     }
 
     // Tick 5: park — dead-letter + HWM advance
@@ -625,9 +657,7 @@ describe('capture worker failure contracts without DB', () => {
     });
 
     expect(readDeadLetters(harness)).toHaveLength(1);
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(
-      String(statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env })).size)
-    );
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(transcriptEnd);
   });
 
   it('splits a prompt-too-long chunk into smaller retries before dead-lettering', async () => {
@@ -736,7 +766,705 @@ describe('capture worker failure contracts without DB', () => {
     });
     expect(llm.calls).toHaveLength(0);
     expect(existsSync(deadDir(harness))).toBe(false);
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(String(spoolEnd));
+    expect(readState(harness).spool.cursor).toBe(spoolEnd);
+  });
+
+  it('yields between raw-byte chunks without incrementing retry state, then resumes at the saved checkpoint', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 160,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '5';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:10:00.000Z',
+    });
+    const firstLlm = mockLlm([
+      rawExtraction({ summary: 'first chunk', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const first = await runWorker(harness, {
+      db: fakeDb,
+      llm: firstLlm,
+      nowMs: () => (firstLlm.calls.length > 0 ? 10 : 0),
+    });
+
+    expect(first).toMatchObject({ processed: 1, yielded: 1, parked: 0, deadLettered: 0 });
+    expect(firstLlm.calls.map((call) => call.transcript)).toEqual([lines[0]]);
+    expect(Object.keys(readState(harness).retries)).toHaveLength(0);
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(
+      Buffer.byteLength(lines[0], 'utf8')
+    );
+    expect(readState(harness).spool.cursor).toBe(0);
+
+    const secondLlm = mockLlm([
+      rawExtraction({ summary: 'second chunk', observations: [] }),
+    ]);
+    const second = await runWorker(harness, {
+      db: fakeDb,
+      llm: secondLlm,
+      nowMs: () => 0,
+    });
+
+    expect(second).toMatchObject({ processed: 1, yielded: 0, parked: 0 });
+    expect(secondLlm.calls.map((call) => call.transcript)).toEqual([lines[1]]);
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('splits a timed-out large chunk without counting it as a terminal retry', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const timeout = new CaptureLlmValidationError(
+      'CLAUDE_CLI_TIMEOUT',
+      'claude-cli timed out after 75000ms',
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+    );
+    const llm = mockLlm([
+      timeout,
+      rawExtraction({ summary: 'timeout split one', observations: [] }),
+      rawExtraction({ summary: 'timeout split two', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 2, deadLettered: 0, parked: 0 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      originalTranscript,
+      lines[0],
+      lines[1],
+    ]);
+    expect(readState(harness).retries).toEqual({});
+  });
+
+  it('persists timeout split hints when the tick budget yields before child chunks run', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '1';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.500Z',
+    });
+    const calls: CaptureLlmRequest[] = [];
+    let elapsed = 0;
+    const firstLlm: MockCaptureLlm = {
+      model: TEST_MODEL,
+      calls,
+      async extract(input): Promise<CaptureLlmRawResponse> {
+        calls.push(input);
+        elapsed = 2;
+        throw new CaptureLlmValidationError(
+          'CLAUDE_CLI_TIMEOUT',
+          'claude-cli timed out after 75000ms',
+          { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+        );
+      },
+    };
+
+    const first = await runWorker(harness, {
+      db: {},
+      llm: firstLlm,
+      nowMs: () => elapsed,
+    });
+    const yieldedState = readState(harness);
+
+    expect(first).toMatchObject({ processed: 0, yielded: 1, parked: 0, deadLettered: 0 });
+    expect(firstLlm.calls.map((call) => call.transcript)).toEqual([originalTranscript]);
+    expect(yieldedState.retries).toEqual({});
+    expect(Object.keys(yieldedState.splitHints)).toHaveLength(1);
+
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '0';
+    const secondLlm = mockLlm([
+      rawExtraction({ summary: 'persisted split one', observations: [] }),
+      rawExtraction({ summary: 'persisted split two', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+    const second = await runWorker(harness, { db: fakeDb, llm: secondLlm });
+
+    expect(second).toMatchObject({ processed: 2, yielded: 0, parked: 0, deadLettered: 0 });
+    expect(secondLlm.calls.map((call) => call.transcript)).toEqual(lines);
+    expect(readState(harness).splitHints).toEqual({});
+  });
+
+  it('prioritizes a nested split hint after the checkpoint changes the next parent range', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 3,
+      messageBytes: 1_400,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap * 2);
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '1';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.625Z',
+    });
+    const timeout = new CaptureLlmValidationError(
+      'CLAUDE_CLI_TIMEOUT',
+      'claude-cli timed out after 75000ms',
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+    );
+    const firstLlm = mockLlm([
+      timeout,
+      rawExtraction({ summary: 'first child committed', observations: [] }),
+      timeout,
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const first = await runWorker(harness, {
+      db: fakeDb,
+      llm: firstLlm,
+      nowMs: () => (firstLlm.calls.length >= 3 ? 2 : 0),
+    });
+    const yieldedState = readState(harness);
+    const checkpoint = Object.values(yieldedState.transcripts)[0]?.checkpoint;
+    const nestedHint = Object.values(yieldedState.splitHints).find(
+      (hint) => hint.start === checkpoint && hint.end < transcriptEnd
+    );
+
+    expect(first).toMatchObject({ processed: 1, yielded: 1, parked: 0, deadLettered: 0 });
+    expect(checkpoint).toBe(Buffer.byteLength(lines[0], 'utf8'));
+    expect(nestedHint).toBeDefined();
+
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '0';
+    const secondLlm = mockLlm([
+      rawExtraction({ summary: 'nested split one', observations: [] }),
+      rawExtraction({ summary: 'nested split two', observations: [] }),
+      rawExtraction({ summary: 'remaining line', observations: [] }),
+    ]);
+    const second = await runWorker(harness, { db: fakeDb, llm: secondLlm });
+
+    expect(second).toMatchObject({ processed: 3, yielded: 0, parked: 0, deadLettered: 0 });
+    expect(secondLlm.calls).toHaveLength(3);
+    expect(secondLlm.calls[0]?.transcript).not.toContain('chunk-3:');
+    expect(Buffer.byteLength(secondLlm.calls[0]?.transcript ?? '', 'utf8')).toBeLessThan(
+      Buffer.byteLength(lines[1], 'utf8')
+    );
+    expect(secondLlm.calls.map((call) => call.transcript).join('')).toBe(lines[1] + lines[2]);
+    expect(readState(harness).splitHints).toEqual({});
+  });
+
+  it('uses an ancestor split boundary after committed children move the checkpoint', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 3,
+      messageBytes: 2_600,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap * 2);
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '1';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.700Z',
+    });
+    const timeout = new CaptureLlmValidationError(
+      'CLAUDE_CLI_TIMEOUT',
+      'claude-cli timed out after 75000ms',
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+    );
+    const firstLlm = mockLlm([
+      timeout,
+      timeout,
+      rawExtraction({ summary: 'first grandchild', observations: [] }),
+      rawExtraction({ summary: 'second grandchild', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const first = await runWorker(harness, {
+      db: fakeDb,
+      llm: firstLlm,
+      nowMs: () => (firstLlm.calls.length >= 4 ? 2 : 0),
+    });
+    const yieldedState = readState(harness);
+    const checkpoint = Object.values(yieldedState.transcripts)[0]?.checkpoint;
+    const ancestorHint = Object.values(yieldedState.splitHints).find(
+      (hint) => hint.start < (checkpoint ?? 0) && hint.end > (checkpoint ?? 0)
+    );
+
+    expect(first).toMatchObject({ processed: 2, yielded: 1, parked: 0, deadLettered: 0 });
+    expect(checkpoint).toBe(Buffer.byteLength(lines[0], 'utf8'));
+    expect(ancestorHint?.end).toBe(Buffer.byteLength(lines[0] + lines[1], 'utf8'));
+
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '0';
+    const secondLlm = mockLlm([
+      rawExtraction({ summary: 'ancestor sibling', observations: [] }),
+      rawExtraction({ summary: 'remaining line', observations: [] }),
+    ]);
+    const second = await runWorker(harness, { db: fakeDb, llm: secondLlm });
+
+    expect(second).toMatchObject({ processed: 2, yielded: 0, parked: 0, deadLettered: 0 });
+    expect(secondLlm.calls.map((call) => call.transcript)).toEqual([lines[1], lines[2]]);
+    expect(readState(harness).splitHints).toEqual({});
+  });
+
+  it('yields before starting a Claude call that cannot fit inside the remaining tick budget', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'do not start a call that can outlive the worker budget' },
+    ]);
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '100000';
+    harness.env.CC_CAPTURE_CLAUDE_TIMEOUT_MS = '75000';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.750Z',
+    });
+    const baseLlm = mockLlm([
+      rawExtraction({ summary: 'must not run', observations: [] }),
+    ]);
+    const llm: MockCaptureLlm = { ...baseLlm, provider: 'claude-cli' };
+    let firstClockRead = true;
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        if (firstClockRead) {
+          firstClockRead = false;
+          return 0;
+        }
+        return 20_000;
+      },
+    });
+
+    expect(result).toMatchObject({ processed: 0, yielded: 1, parked: 0, deadLettered: 0 });
+    expect(llm.calls).toHaveLength(0);
+    expect(readState(harness).retries).toEqual({});
+    expect(readState(harness).spool.cursor).toBe(0);
+  });
+
+  it('removes a legacy larger retry after smaller successful chunks cover its range', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:34.000Z',
+    });
+
+    await runWorker(harness, { db: {}, llm: mockLlm([new Error('legacy large retry')]) });
+    expect(Object.values(readState(harness).retries)).toHaveLength(1);
+    expect(Object.values(readState(harness).retries)[0]).toMatchObject({
+      start: 0,
+      end: transcriptEnd,
+    });
+
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    const llm = mockLlm([
+      rawExtraction({ summary: 'covered one', observations: [] }),
+      rawExtraction({ summary: 'covered two', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 2, deadLettered: 0, parked: 0 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual(lines);
+    expect(readState(harness).retries).toEqual({});
+  });
+
+  it('uses a 32 KiB default chunk for the Claude CLI provider', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'x'.repeat(70 * 1024) },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:35.000Z',
+    });
+    const baseLlm = mockLlm(
+      Array.from({ length: 3 }, (_, index) =>
+        rawExtraction({ summary: `claude default chunk ${index}`, observations: [] })
+      )
+    );
+    const llm: MockCaptureLlm = { ...baseLlm, provider: 'claude-cli' };
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 3, deadLettered: 0, parked: 0 });
+    expect(llm.calls).toHaveLength(3);
+    for (const call of llm.calls) {
+      expect(Buffer.byteLength(call.transcript)).toBeLessThanOrEqual(32 * 1024);
+    }
+  });
+
+  it('advances independent transcript checkpoints in spool order while retaining the parent session id', async () => {
+    const harness = makeHarness();
+    const childPath = join(harness.root, 'child-agent.transcript.jsonl');
+    writeFileSync(childPath, '', { mode: 0o600 });
+    const parentEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'parent transcript range' },
+    ]);
+    const childEnd = appendTranscriptEntries(childPath, [
+      { message: 'child transcript range without stop sentinel' },
+    ]);
+    for (const [path, offset, timestamp] of [
+      [harness.transcriptPath, 0, '2026-07-06T10:11:00.000Z'],
+      [childPath, 0, '2026-07-06T10:11:01.000Z'],
+      [harness.transcriptPath, parentEnd, '2026-07-06T10:11:02.000Z'],
+      [childPath, childEnd, '2026-07-06T10:11:03.000Z'],
+    ] as const) {
+      await appendCaptureEvent({
+        session_id: harness.sessionId,
+        project_id: harness.projectId,
+        tool_name: 'Bash',
+        timestamp,
+        transcript_path: path,
+        transcript_offset: offset,
+      }, { env: harness.env });
+    }
+    const llm = mockLlm([
+      rawExtraction({ summary: 'parent range', observations: [] }),
+      rawExtraction({ summary: 'child range', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 2, yielded: 0, parked: 0 });
+    expect(llm.calls.map((call) => call.sessionId)).toEqual([
+      harness.sessionId,
+      harness.sessionId,
+    ]);
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(harness.transcriptPath, 'utf8'),
+      readFileSync(childPath, 'utf8'),
+    ]);
+    expect(Object.values(readState(harness).transcripts).map((entry) => entry.checkpoint).sort((a, b) => a - b))
+      .toEqual([parentEnd, childEnd].sort((a, b) => a - b));
+  });
+
+  it('keeps the same stable retry key when new spool records are appended', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'stable retry source bytes' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:00.000Z',
+    });
+    const terminal = new Error('stable retry failure');
+    const output: string[] = [];
+    const stdout = { write: (chunk: string) => output.push(chunk) };
+
+    await runWorker(harness, { db: {}, llm: mockLlm([terminal]), stdout });
+    const firstKeys = Object.keys(readState(harness).retries);
+    expect(firstKeys).toHaveLength(1);
+    expect(output.join('')).toContain('auto-capture warning: retry-pending');
+    expect(output.join('')).toContain('error=LLM_EXTRACT_FAILED attempts=1/5');
+    expect(output.join('')).not.toContain(harness.transcriptPath);
+    expect(output.join('')).not.toContain('stable retry source bytes');
+
+    await appendCaptureEvent({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      timestamp: '2026-07-06T10:12:01.000Z',
+      transcript_path: harness.transcriptPath,
+      transcript_offset: transcriptEnd,
+    }, { env: harness.env });
+    await runWorker(harness, { db: {}, llm: mockLlm([terminal]), stdout });
+
+    expect(Object.keys(readState(harness).retries)).toEqual(firstKeys);
+    expect(readState(harness).retries[firstKeys[0]].attempts).toBe(2);
+    expect(output.join('')).toContain('error=LLM_EXTRACT_FAILED attempts=2/5');
+  });
+
+  it('parks a permanently missing transcript range after five attempts and resumes a later path next tick', async () => {
+    const harness = makeHarness();
+    const childPath = join(harness.root, 'available-child.transcript.jsonl');
+    writeFileSync(childPath, '', { mode: 0o600 });
+    const parentEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: SECRET_TRANSCRIPT_TEXT },
+    ]);
+    const childEnd = appendTranscriptEntries(childPath, [
+      { message: 'later child range remains recoverable' },
+    ]);
+    for (const [path, offset, timestamp] of [
+      [harness.transcriptPath, 0, '2026-07-06T10:12:10.000Z'],
+      [harness.transcriptPath, parentEnd, '2026-07-06T10:12:11.000Z'],
+      [childPath, 0, '2026-07-06T10:12:12.000Z'],
+      [childPath, childEnd, '2026-07-06T10:12:13.000Z'],
+    ] as const) {
+      await appendCaptureEvent({
+        session_id: harness.sessionId,
+        project_id: harness.projectId,
+        tool_name: 'Bash',
+        timestamp,
+        transcript_path: path,
+        transcript_offset: offset,
+      }, { env: harness.env });
+    }
+    unlinkSync(harness.transcriptPath);
+    const output: string[] = [];
+    const stdout = { write: (chunk: string) => output.push(chunk) };
+    let retryKey = '';
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const result = await runWorker(harness, { db: {}, llm: mockLlm([]), stdout });
+      expect(result).toMatchObject({ transcriptMissing: 1, parked: 0, deadLettered: 0 });
+      const state = readState(harness);
+      const keys = Object.keys(state.retries);
+      expect(keys).toHaveLength(1);
+      retryKey ||= keys[0];
+      expect(keys[0]).toBe(retryKey);
+      expect(state.retries[retryKey].attempts).toBe(tick);
+      expect(state.spool.cursor).toBe(0);
+    }
+
+    const fifth = await runWorker(harness, { db: {}, llm: mockLlm([]), stdout });
+    expect(fifth).toMatchObject({ transcriptMissing: 1, parked: 1, deadLettered: 1 });
+    const parkedState = readState(harness);
+    expect(parkedState.retries).toEqual({});
+    expect(Object.values(parkedState.transcripts).map((entry) => entry.checkpoint))
+      .toContain(parentEnd);
+    expect(parkedState.spool.cursor).toBe(0);
+    expect(output.join('')).toContain('transcript-source-unavailable');
+    expect(output.join('')).not.toContain(harness.transcriptPath);
+    const deadLetter = readOnlyDeadLetter(harness);
+    expect(deadLetter.metadata).toMatchObject({
+      error_code: 'TRANSCRIPT_SOURCE_UNAVAILABLE',
+      model: 'none',
+      source: {
+        path_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        start: 0,
+        end: parentEnd,
+        content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(JSON.stringify(deadLetter)).not.toContain(SECRET_TRANSCRIPT_TEXT);
+    expect(JSON.stringify(deadLetter)).not.toContain(harness.transcriptPath);
+
+    const sixthLlm = mockLlm([
+      rawExtraction({ summary: 'later child path recovered', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const sixth = await runWorker(harness, { db: fakeDb, llm: sixthLlm, stdout });
+    expect(sixth).toMatchObject({ processed: 1, parked: 0, deadLettered: 0 });
+    expect(sixthLlm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(childPath, 'utf8'),
+    ]);
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('clears a missing-source retry only after the full captured boundary becomes readable', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'temporarily unavailable source returns intact' },
+    ]);
+    const original = readFileSync(harness.transcriptPath);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:20.000Z',
+    });
+    unlinkSync(harness.transcriptPath);
+
+    const first = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    expect(first).toMatchObject({ transcriptMissing: 1, parked: 0 });
+    expect(Object.values(readState(harness).retries)).toHaveLength(1);
+
+    writeFileSync(harness.transcriptPath, original, { mode: 0o600 });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'source returned before isolation', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const second = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(second).toMatchObject({ processed: 1, transcriptMissing: 0, parked: 0 });
+    expect(readState(harness).retries).toEqual({});
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(transcriptEnd);
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('counts a readable but permanently short transcript toward the same five-attempt isolation', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'captured boundary is longer than the replacement file' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:25.000Z',
+    });
+    writeFileSync(harness.transcriptPath, 'x', { mode: 0o600 });
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const result = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+      expect(result).toMatchObject({ transcriptMissing: 1, parked: 0, deadLettered: 0 });
+      expect(Object.values(readState(harness).retries)[0]?.attempts).toBe(tick);
+    }
+    const fifth = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    expect(fifth).toMatchObject({ transcriptMissing: 1, parked: 1, deadLettered: 1 });
+    expect(readState(harness).retries).toEqual({});
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(transcriptEnd);
+  });
+
+  it('parks only the fifth-failing chunk and resumes the later chunk on the next tick', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 140,
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:30.000Z',
+    });
+    const terminal = new Error('chunk-specific failure');
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const llm = mockLlm([terminal]);
+      const result = await runWorker(harness, { db: {}, llm });
+      expect(result).toMatchObject({ parked: 0, deadLettered: 0 });
+      expect(llm.calls.map((call) => call.transcript)).toEqual([lines[0]]);
+    }
+    const fifthLlm = mockLlm([terminal]);
+    const fifth = await runWorker(harness, { db: {}, llm: fifthLlm });
+    expect(fifth).toMatchObject({ parked: 1, deadLettered: 1, yielded: 0 });
+    expect(fifthLlm.calls.map((call) => call.transcript)).toEqual([lines[0]]);
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(
+      Buffer.byteLength(lines[0], 'utf8')
+    );
+
+    const sixthLlm = mockLlm([
+      rawExtraction({ summary: 'later chunk recovered', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const sixth = await runWorker(harness, { db: fakeDb, llm: sixthLlm });
+    expect(sixth).toMatchObject({ processed: 1, parked: 0, deadLettered: 0 });
+    expect(sixthLlm.calls.map((call) => call.transcript)).toEqual([lines[1]]);
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('fails closed on a corrupt version-2 state without calling the LLM or advancing the spool', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'must not be consumed with corrupt state' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:13:00.000Z',
+    });
+    writeFileSync(statePath(harness), '{"version":2,"spool":', { mode: 0o600 });
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+
+    expect(result).toMatchObject({ processed: 0, failed: 1, yielded: 0 });
+    expect(llm.calls).toHaveLength(0);
+    expect(readFileSync(statePath(harness), 'utf8')).toBe('{"version":2,"spool":');
+  });
+
+  it('writes state as 0600 and seals state with its spool generation during rotation', async () => {
+    const harness = makeHarness();
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd: 0,
+      timestamp: '2026-07-06T10:14:00.000Z',
+    });
+    const oldTime = new Date('2000-01-01T00:00:00.000Z');
+    utimesSync(spoolPath(harness), oldTime, oldTime);
+    const nowMs = Date.parse('2026-07-06T10:14:01.000Z');
+
+    await runWorker(harness, { db: {}, llm: mockLlm([]), nowMs: () => nowMs });
+
+    const projectDir = join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId));
+    const files = readdirSync(projectDir);
+    const sealedSpool = files.find((name) => name.includes('.jsonl.') && name.endsWith('.sealed'));
+    const sealedState = files.find((name) => name.includes('.capture-state.json.') && name.endsWith('.sealed'));
+    expect(sealedSpool).toBeDefined();
+    expect(sealedState).toBeDefined();
+    expect(existsSync(spoolPath(harness))).toBe(false);
+    expect(existsSync(statePath(harness))).toBe(false);
+    if (!sealedState) return;
+    expect(statSync(join(projectDir, sealedState)).mode & 0o777).toBe(0o600);
+    const oldGeneration = (JSON.parse(
+      readFileSync(join(projectDir, sealedState), 'utf8')
+    ) as CaptureStateV2).spool.generation;
+
+    await appendCaptureEvent({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      timestamp: '2026-07-06T10:15:00.000Z',
+      transcript_path: harness.transcriptPath,
+      transcript_offset: 0,
+    }, { env: harness.env });
+    expect(existsSync(statePath(harness))).toBe(false);
+    await runWorker(harness, { db: {}, llm: mockLlm([]), nowMs: () => nowMs + 1 });
+    expect(statSync(statePath(harness)).mode & 0o777).toBe(0o600);
+    expect(readState(harness).spool.generation).not.toBe(oldGeneration);
+  });
+
+  it('does not rotate a large active spool whose final record is not a Stop sentinel', async () => {
+    const harness = makeHarness();
+    const sp = spoolPath(harness);
+    const projectDir = join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId));
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(projectDir, { recursive: true });
+    const baseline = JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      transcript_path: harness.transcriptPath,
+      transcript_offset: 0,
+      padding: 'x'.repeat(10 * 1024 * 1024),
+    });
+    writeFileSync(sp, `${baseline}\n`, { mode: 0o600 });
+
+    const result = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+
+    expect(result).toMatchObject({ failed: 0, deadLettered: 0, parked: 0 });
+    expect(existsSync(sp)).toBe(true);
+    expect(existsSync(statePath(harness))).toBe(true);
+    expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
+    expect(readdirSync(projectDir).some((name) => name.endsWith('.sealed'))).toBe(false);
   });
 });
 
@@ -759,10 +1487,10 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     const result = await runWorker(harness, { db: {}, llm });
     // The valid lines are processed (empty transcript = skip+advance)
     expect(result.skipped).toBe(1);
-    // HWM is at the last complete newline boundary, not at total file size
-    const hwmVal = Number.parseInt(readFileSync(hwmPath(harness), 'utf8'), 10);
-    expect(hwmVal).toBe(sizeBeforePartial);
-    expect(hwmVal).toBeLessThan(totalSize);
+    // State cursor is at the last complete newline boundary, not at total file size.
+    const cursor = readState(harness).spool.cursor;
+    expect(cursor).toBe(sizeBeforePartial);
+    expect(cursor).toBeLessThan(totalSize);
   });
 
   it('malformed spool lines are skipped and counted, HWM advances past them', async () => {
@@ -791,8 +1519,7 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
 
     const result = await runWorker(harness, { db: {}, llm });
     expect(result.malformed).toBe(1);
-    // HWM advanced (empty transcript since hwm_offset=0)
-    expect(existsSync(hwmPath(harness))).toBe(true);
+    expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
   });
 
   it('tick budget stops processing before timeout, preserving HWM at last completed window', async () => {
@@ -855,41 +1582,40 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(existsSync(deadDir(harness))).toBe(false);
   });
 
-  it('retry sidecar cleans up entries below HWM on next processing pass', async () => {
+  it('migrates a legacy HWM prefix and archives retry attempts without carrying them into state v2', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
-      { timestamp: '2026-01-01T00:00:00.000Z', message: 'stale retry cleanup window one' },
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'legacy migration window' },
     ]);
-    const firstSpoolEnd = await appendWindow(harness, {
+    await appendWindow(harness, {
       transcriptStart: 0,
       transcriptEnd,
       timestamp: '2026-07-06T10:00:00.000Z',
     });
-
-    // Fail the first tick to create a retry entry
-    const errorLlm = mockLlm([
-      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'fail', { model: 'haiku', rawOutput: 'err' }),
-      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'fail', { model: 'haiku', rawOutput: 'err' }),
-    ]);
-    await runWorker(harness, { db: {}, llm: errorLlm });
     const sp = spoolPath(harness);
     const retryPath = sp.replace(/\.jsonl$/, '.retry.json');
+    const firstLineEnd = readFileSync(sp).indexOf(0x0a) + 1;
+    writeFileSync(hwmPath(harness), String(firstLineEnd), { mode: 0o600 });
+    writeFileSync(retryPath, JSON.stringify({ '0-999999': {
+      attempts: 5,
+      lastErrorClass: 'TICK_BUDGET_EXCEEDED',
+      firstSeenIso: '2026-07-01T00:00:00.000Z',
+      lastAttemptIso: '2026-07-01T00:01:00.000Z',
+    } }), { mode: 0o600 });
     expect(existsSync(retryPath)).toBe(true);
-    expect(existsSync(hwmPath(harness))).toBe(false);
+    const llm = mockLlm([rawExtraction({ summary: 'migrated', observations: [] })]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
 
-    // Now manually advance HWM past the window (simulating park or external fix)
-    writeFileSync(hwmPath(harness), String(firstSpoolEnd), { mode: 0o600 });
+    await runWorker(harness, { db: fakeDb, llm });
 
-    // Append new spool data with EMPTY transcript so it skip+advances without LLM
-    await appendWindow(harness, {
-      transcriptStart: 0,
-      transcriptEnd: 0,
-      timestamp: '2026-07-06T10:01:00.000Z',
-    });
-    const llm2 = mockLlm([]);
-    await runWorker(harness, { db: {}, llm: llm2 });
-    // Retry file cleaned since old entry is below new HWM
+    expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(transcriptEnd);
+    expect(readState(harness).retries).toEqual({});
     expect(existsSync(retryPath)).toBe(false);
+    expect(existsSync(hwmPath(harness))).toBe(false);
+    const archived = readdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)));
+    expect(archived.some((name) => name.includes('.hwm.v1-') && name.endsWith('.legacy'))).toBe(true);
+    expect(archived.some((name) => name.includes('.retry.json.v1-') && name.endsWith('.legacy'))).toBe(true);
   });
 
   it('lock release does not unlink when token does not match (anti-steal)', async () => {
@@ -943,8 +1669,7 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
 
     const result = await runWorker(harness, { db: {}, llm });
     expect(result.transcriptMissing).toBe(1);
-    // HWM still advances (skip + advance per existing semantics)
-    expect(existsSync(hwmPath(harness))).toBe(true);
+    expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
   });
 
   it('summary line includes all new fields', async () => {
@@ -952,7 +1677,7 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     const { assessAutoCaptureExecution } = await import('../../src/services/auto-capture-alerts.js');
     const assessment = assessAutoCaptureExecution({
       exitCode: 0,
-      stdout: '[cc-memory] auto-capture summary: processed=2 skipped=1 dead-letter=0 failed=0 rate-limited=3 malformed=1 transcript-missing=2\n',
+      stdout: '[cc-memory] auto-capture summary: processed=2 skipped=1 dead-letter=0 failed=0 rate-limited=3 malformed=1 transcript-missing=2 parked=0 yielded=4\n',
       stderr: '',
     });
     // rate-limited > 0 makes it not ok
@@ -961,6 +1686,8 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(assessment.malformedCount).toBe(1);
     expect(assessment.transcriptMissingCount).toBe(2);
     expect(assessment.failedCount).toBe(0);
+    expect(assessment.parkedCount).toBe(0);
+    expect(assessment.yieldedCount).toBe(4);
   });
 
   it('assessor synthesizes problemLine when rateLimited > 0 but no stdout problem', async () => {
@@ -1011,8 +1738,7 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
 
     const result = await runWorker(harness, { db: {}, llm });
     expect(result.malformed).toBe(2);
-    // HWM advanced to file end (terminal discard)
-    expect(Number.parseInt(readFileSync(hwmPath(harness), 'utf8'), 10)).toBe(fileSize);
+    expect(readState(harness).spool.cursor).toBe(fileSize);
 
     // Second tick: nothing to process (HWM at end)
     const result2 = await runWorker(harness, { db: {}, llm });
@@ -1088,9 +1814,8 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
 
     // Tick 2: cursor rotates, processes session B
     await runWorker(sessionA, { db: {}, llm });
-    // Both sessions should have HWM files now
-    expect(existsSync(hwmPath(sessionA))).toBe(true);
-    expect(existsSync(hwmPath(sessionB))).toBe(true);
+    expect(existsSync(statePath(sessionA))).toBe(true);
+    expect(existsSync(statePath(sessionB))).toBe(true);
   });
 });
 
@@ -1266,9 +1991,7 @@ describe('capture worker DB-backed RED contracts', () => {
       new Date(processingTime.getTime() + 1).toISOString(),
       new Date(processingTime.getTime() + 2).toISOString(),
     ]);
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe(
-      String(statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env })).size)
-    );
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
   });
 
   it('holds HWM when a chunk within a single oversized window fails (retry sidecar)', async () => {
@@ -1301,8 +2024,8 @@ describe('capture worker DB-backed RED contracts', () => {
       llmRetries: 1,
     });
 
-    // HWM held
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe('0');
+    expect(readState(harness).spool.cursor).toBe(0);
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(cap);
   });
 
   it('does not split UTF-8 characters when chunking cuts through a multibyte boundary', async () => {
@@ -1397,7 +2120,7 @@ describe('capture worker DB-backed RED contracts', () => {
       processed: 0,
       failed: 1,
     });
-    expect(readFileSync(hwmPath(harness), 'utf8')).toBe('0');
+    expect(readState(harness).spool.cursor).toBe(0);
   });
 
   it('does not duplicate observations when the same spool window is replayed', async () => {
@@ -1420,7 +2143,7 @@ describe('capture worker DB-backed RED contracts', () => {
       processed: 1,
       observationsWritten: 1,
     });
-    writeFileSync(hwmPath(harness), '0', { mode: 0o600 });
+    resetStateForReplay(harness);
     await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({
       processed: 1,
       observationsWritten: 0,
@@ -1455,7 +2178,7 @@ describe('capture worker DB-backed RED contracts', () => {
     const llm = mockLlm([response, response]);
 
     await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({ processed: 1 });
-    writeFileSync(hwmPath(harness), '0', { mode: 0o600 });
+    resetStateForReplay(harness);
     await expect(runWorker(harness, { db, llm })).resolves.toMatchObject({ processed: 1 });
 
     const rollupRows = await rollups(sql, harness.projectId, harness.sessionId);
@@ -1463,6 +2186,55 @@ describe('capture worker DB-backed RED contracts', () => {
     const capture = rollupRows[0].metadata.capture;
     expect(capture?.summarize_count).toBe(1);
     expect(capture?.spool_offsets).toHaveLength(1);
+    expect(capture?.transcript_sources).toHaveLength(1);
+  });
+
+  it('skips every DB write when a committed source range replays after state persistence fails', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'commit before state failure' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:05:30.000Z',
+    });
+    const firstResponse = rawExtraction({
+      summary: 'first committed summary',
+      observations: [observation('first committed', 'first committed narrative')],
+    });
+    let failCheckpointSave = true;
+    const first = await runWorker(harness, {
+      db,
+      llm: mockLlm([firstResponse]),
+      stateWriter: async (path, state) => {
+        const advanced = Object.values(state.transcripts).some(
+          (checkpoint) => checkpoint.checkpoint === transcriptEnd
+        );
+        if (failCheckpointSave && advanced) {
+          failCheckpointSave = false;
+          throw new Error('synthetic state persistence failure');
+        }
+        await writeCaptureStateAtomically(path, state);
+      },
+    });
+    expect(first).toMatchObject({ processed: 1, failed: 1 });
+    expect(Object.values(readState(harness).transcripts)[0]?.checkpoint).toBe(0);
+
+    const replayResponse = rawExtraction({
+      summary: 'non-deterministic replay must not overwrite',
+      observations: [observation('replayed variant', 'replayed variant narrative')],
+    });
+    const replay = await runWorker(harness, { db, llm: mockLlm([replayResponse]) });
+    expect(replay).toMatchObject({ processed: 1, observationsWritten: 0, rollupsWritten: 0 });
+
+    const rollupRows = await rollups(sql, harness.projectId, harness.sessionId);
+    const observationRows = await observations(sql, harness.projectId, harness.sessionId);
+    expect(rollupRows).toHaveLength(1);
+    expect(rollupRows[0].metadata.capture?.summarize_count).toBe(1);
+    expect(rollupRows[0].metadata.capture?.transcript_sources).toHaveLength(1);
+    expect(observationRows.map((row) => row.narrative)).toEqual(['first committed narrative']);
+    expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
   });
 
   it('continues processing remaining sessions when one spool file is corrupt', async () => {
@@ -1497,25 +2269,18 @@ describe('capture worker DB-backed RED contracts', () => {
     ]);
 
     const result = await runWorker(badHarness, { db, llm });
-    // Under new semantics: malformed lines are tolerated (skipped + counted),
-    // bad session's valid records have empty transcript → skip+advance.
+    // The missing bad transcript fails closed for that session, while the next session proceeds.
     expect(result).toMatchObject({
       processed: 1,
       failed: 0,
       malformed: 1,
+      transcriptMissing: 1,
     });
     expect(await countRows(sql, goodHarness.projectId, goodHarness.sessionId)).toMatchObject({
       observations: 1,
       rollups: 1,
     });
-    // Bad session HWM advanced past the malformed lines (terminal discard)
-    const badHwmPath = join(
-      badHarness.spoolDir,
-      sanitizeSpoolSegment(badHarness.projectId),
-      `${sanitizeSpoolSegment(badHarness.sessionId)}.hwm`
-    );
-    const badHwmVal = Number.parseInt(readFileSync(badHwmPath, 'utf8'), 10);
-    expect(badHwmVal).toBe(statSync(resolveCaptureSpoolPath(badHarness.projectId, badHarness.sessionId, { env: badHarness.env })).size);
+    expect(readState(badHarness).spool.cursor).toBe(0);
   });
 
   it('keeps one active rollup for two harvest windows in the same session', async () => {

@@ -1,6 +1,8 @@
 # CC-memory v0.5 auto-capture Spec
 
-> **狀態（2026-07-12）**：Delivered（M1-M6 已交付 2026-07-08；行為契約以 2026-07-12 修訂為準）。本檔是 SDD（Spec-Driven Development，規格驅動開發）三件套之一，與 [plan.md](plan.md)、[task.md](task.md) 共同取代 v0.4 Phase C auto-capture（自動採集）休眠設計。
+> **狀態（2026-07-15）**：Delivered（M1-M6 已交付 2026-07-08；auto-capture 可靠性契約於 2026-07-15 修訂）。本檔是 SDD（Spec-Driven Development，規格驅動開發）三件套之一，與 [plan.md](plan.md)、[task.md](task.md) 共同取代 v0.4 Phase C auto-capture（自動採集）休眠設計。
+>
+> **2026-07-16 執行語意修訂**：依正式決策卡 `DEC-20260716T092938Z-cross-client-hook-driven-memory-flow`，Claude Code 與 Codex 共用 hooks；PostToolUse 只 append spool，Stop／SessionStart quick-kick systemd oneshot（快速啟動單次服務）。auto-capture 不設 timer；reminder／Todoist 才使用 systemd timers（定時器）。
 >
 > **資料來源**：`CLAUDE.md`、`docs/INDEX.md`、`docs/spec.md`、`docs/superpowers/specs/2026-04-22-auto-capture-design.md`、`docs/superpowers/plans/2026-04-23-v04-phase-c-implementation.md`、`docs/personal-hub/*`、`src/db/schema.ts`、`sql/migrations/0000-0010*.sql`、`scripts/test-db-setup.ts`、`src/services/{delivery-queue,scope-policy,tool-policy,memories,feedback}.ts`、`src/utils/embedding.ts`。
 >
@@ -35,7 +37,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | 判斷 | v0.4 | v0.5 |
 |---|---|---|
 | 設計地基 | `session_summaries` 單表 | `observations` + `project_memories(type='session')` rollup（彙總） |
-| 採集入口 | Stop hook 同步 Claude CLI subprocess（子程序） | PostToolUse/Stop hook 只 append（附加）本地 spool（緩衝暫存區），cron worker（排程工作程序）批次處理 |
+| 採集入口 | Stop hook 同步 Claude CLI subprocess（子程序） | PostToolUse 只 append（附加）本地 spool（緩衝暫存區）；Stop append sentinel 後 quick-kick systemd worker；SessionStart quick-kick backlog |
 | LLM（大型語言模型） | Claude CLI，吃 subscription（訂閱） | 遠端 Gemini Flash，`CC_CAPTURE_LLM` 可切，無 key 靜默停用（**2026-07-07 使用者拍板改回 claude-cli 預設**：成本前提反轉——訂閱已付、Gemini 需另付 API 費；worker cron 內短暫 subprocess 無 v0.4 hook 同步問題。見 Constraints 紅線 3） |
 | 注入 | 固定 N+M 筆全文 | Recent Activity（近期活動）輕索引，每列標 `discovery_tokens` |
 | 檢索 | `cc_memory_search` 單層回全文 | search 輕索引 → timeline（時間軸）→ batch get observations（批次取觀察紀錄） |
@@ -47,7 +49,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 |---|---|---|---|---|
 | `session_summaries` 是 auto-capture 主表 | 新增 `observations` 主表；session rollup 寫進既有 `project_memories(type='session')` | 細粒度 observation 是 PostToolUse worker 與 3 層 retrieval 的地基 | `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model、§Non-goals；`docs/plan.md` §Data Model；`docs/task.md` M1 | M1 schema 改寫；M3 search 結果單位改 rollup；M4 注入改 rollup index；benchmark 對比單位重定 |
 | `observations` 是 Stage 2 non-goal | v0.5 M1 必做 `observations` | 四大 gap 中 #3/#4 直接缺地基 | 舊 design §Non-goals/Future Roadmap；`docs/INDEX.md` 長期目標 | v0.4 舊 SDD 標 superseded；v0.5 不再稱 Stage 2 |
-| Stop hook 同步跑 capture-runner + Claude CLI | hook 僅 O(1) local append，不走網路、不 spawn LLM；cron worker 批次抽取 | RAM 紅線與 RTT（來回延遲）風險；不能讓每次 tool use（工具呼叫）受遠端 DB/LLM 牽制 | 舊 design §Capture Pipeline；`docs/plan.md` §Phase C 新增 services；舊 plan M2 | M2 拆 M2a hook 與 M2b worker；新增 spool 可靠性 Gate |
+| Stop hook 同步跑 capture-runner + Claude CLI | PostToolUse 僅 O(1) local append；Stop append sentinel 後 fail-open quick-kick；SessionStart quick-kick backlog；systemd worker 批次抽取 | RAM 紅線與 RTT（來回延遲）風險；不能讓 tool use（工具呼叫）或 session 結束等待遠端 DB/LLM | 舊 design §Capture Pipeline；`docs/plan.md` §Phase C 新增 services；舊 plan M2；正式 decision card | M2 拆 hook 與 worker；新增 spool 可靠性 Gate；Claude Code/Codex 共用語意 |
 | Claude CLI subprocess 摘要 | Gemini Flash 預設，`CC_CAPTURE_LLM` 可切；缺 key 靜默停用（**後記 2026-07-07**：預設改回 `claude-cli`——使用者拍板不為 Gemini 另付 API 費；當年否定 Claude CLI 的 RAM/延遲顧慮針對 hook 同步 spawn，v0.5 的 cron worker 批次架構已消解；gemini-flash 降為可切選項） | 本機不跑重型子程序；成本與 RAM 可控；對齊批量任務用便宜模型規則 | 舊 design §Claude CLI 呼叫；`docs/plan.md` env `CC_MEMORY_CLAUDE_MODEL` | env 全改；品質閘要記模型名；LLM 驗證失敗進 dead-letter（死信） |
 | 固定 N summary + M manual 全文注入 | Recent Activity 輕索引 + `discovery_tokens` | token 經濟學：先低成本看索引，再按需展開 | 舊 design §SessionStart Re-inject；`docs/task.md` M4 | M4 增 token budget（預算）硬上限、截斷測試、污染防線 |
 | `cc_memory_search` 跨表加權後回全文 | `cc_memory_search` 回輕索引，不破 `SearchResultEnvelope`（搜尋結果信封）；新增 `cc_memory_timeline`、`cc_memory_get_observations` | 3 層 retrieval 才能同時省 token 與保細節 | 舊 design §Retrieval；`src/services/types.ts`；`src/services/feedback.ts` | M3 新工具；`search_feedback` 寫入形狀相容性 Gate |
@@ -58,7 +60,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 
 ## Goals
 
-1. **取代 claude-mem 的自動記憶核心**：PostToolUse/Stop hook 無感側錄，cron worker 批次產 session rollup + observations。
+1. **取代 claude-mem 的自動記憶核心**：Claude Code／Codex 的 PostToolUse/Stop/SessionStart hooks 無感側錄並 quick-kick systemd worker，批次產 session rollup + observations。
 2. **維持 CC-memory 既有優勢**：PostgreSQL + pgvector（向量擴充模組）+ Gemini embedding（向量嵌入）+ cross-device（跨裝置）同步，不退回本機 SQLite/Chroma。
 3. **把 RAM 成本壓到本機近零常駐**：不新增常駐 daemon，不新增本機 DB sidecar（旁掛服務）；RAM 量測摘要中的 claude-mem 常駐成本是停用後的回收目標。
 4. **提供 token 經濟學**：SessionStart 注入與 search 都先給輕索引與 `discovery_tokens`，讓 agent 按需付費展開。
@@ -73,8 +75,9 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 
 驗收條件：
 - PostToolUse hook 對非 skip 類工具 append 一行 thin JSONL（薄 JSON Lines）到本地 spool，hook 目標 <20ms。
-- Stop hook append session sentinel（哨兵） `{transcript_path, hwm_offset}`，不呼叫遠端服務。
-- cron worker 下一輪批次處理 spool，產出 1 筆 rollup + N 筆 observations。
+- Stop hook append session sentinel（哨兵） `{transcript_path, hwm_offset}` 後 quick-kick service；hook 本身不呼叫遠端服務或 LLM。
+- SessionStart quick-kick backlog；是否注入 Recent Activity 由獨立 flag 控制。
+- systemd oneshot worker 批次處理 spool，產出 1 筆 rollup + N 筆 observations，跑完即退。
 
 ### US-V5-2：worker 故障不阻塞 Claude Code
 
@@ -83,7 +86,11 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 驗收條件：
 - hook 永不 throw；任何錯誤只寫本地 debug log（除錯紀錄）或略過。
 - worker 起手 health check（健康檢查）DB/SSH tunnel；失敗只累積 spool 並 stdout 告警，不在 stderr 無限刷重試。
-- LLM schema 驗證失敗：retry sidecar（`<session>.retry.json`）跨 tick 累計 attempts；第 1-4 次 hold（HWM hold、不寫 DB）；第 5 次 park（dead-letter + HWM 前進越過該窗）；內容本身不落 DB。429 不計 attempts，HWM hold。
+- LLM schema 驗證失敗：version 2 capture state（第二版擷取狀態）以 path hash、原始 transcript byte range 與內容 hash 組成穩定 retry key；第 1-4 次 hold（保留 checkpoint、不寫 DB），第 5 次只 park 該 chunk（寫 dead-letter、越過該 chunk 並停止該 session 本 tick）。429 與 tick budget yield 不計 attempts；後續區間於下一個 tick 繼續。
+- Claude CLI 抽取子程序必須使用 `--safe-mode --effort low`、停用 tools（工具）與 session persistence（工作階段持久化）、以 `--system-prompt` 取代預設 Claude Code 上下文，並用原生 JSON Schema（JSON 結構綱要）限制欄位與最多 8 個可合併 observations。抽取屬 bounded transformation（有界轉換），不得繼承互動式 coding agent（程式代理）的高思考強度。Claude 預設 chunk 為 32 KiB；chunk 發生 timeout 或 prompt-too-long 時立即二分，將 split hint（分割提示）原子保存於 v2 state，不增加 terminal retry attempt。若本 tick budget 先用完，下輪必須依內容 hash 驗證過的最小 nested／ancestor hint boundary（巢狀／祖先提示邊界）從較小 leaf 或下一個 sibling 繼續；checkpoint 改變父區間後也不得重試已知過大的父 chunk。維持 production Haiku 與 75 秒 timeout，不以加長 timeout 掩蓋上下文與輸出無上限問題。不得使用會停用訂閱登入的 `--bare`。
+- 真實 LLM 終局錯誤每次保存 retry state 後，都輸出只含母 session ID、path hash prefix、byte range、錯誤類別與 attempts 的 `retry-pending` warning；不得輸出逐字稿或完整本機路徑。第一次 warning 即為告警事件，第 5 次另輸出 `parked-window`。
+- worker 啟動 Claude call 前必須預留 `CC_CAPTURE_CLAUDE_TIMEOUT_MS + 15s` 的 call/DB/state 收尾時間；剩餘 tick budget 不足時直接 `yielded`，不得啟動可能越過 270 秒 wrapper hard timeout 的新 call。這個 yield 不增加 retry 或 split hint。
+- spool 記錄含有效 transcript path、但來源檔不可讀或短於已記錄 boundary 時，以 path hash、原始 range 與固定 `TRANSCRIPT_SOURCE_UNAVAILABLE` hash 組成穩定 retry key；第 1-4 次 hold 並輸出不含完整路徑的 warning，第 5 次寫 `model=none` 的 metadata-only dead-letter、只越過該 range 並停止該 session 本 tick。只有來源可讀且長度達 boundary 才清除重試。空字串或 null path 維持既有 informational count（資訊性計數），不套用此告警／隔離流程。
 
 ### US-V5-3：細粒度 observation 可下鑽
 
@@ -155,25 +162,25 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 |---|---|---|
 | Schema | `observations` 新表；必要 index；rollup 用既有 `project_memories` | migration 0011-0013 起 |
 | Capture hook | PostToolUse/Stop thin spool append | hook 不走網路 |
-| Worker | hermes cron 批次 harvest（收割）+ LLM extract（抽取）+ DB write | 不做 daemon |
+| Worker | Stop／SessionStart 驅動 systemd oneshot，批次 harvest（收割）+ LLM extract（抽取）+ DB write | 不做 daemon、不設 auto-capture timer |
 | LLM | `claude-cli` 預設（訂閱額度、`CC_CAPTURE_CLAUDE_MODEL` 預設 haiku）；`CC_CAPTURE_LLM` 可切 gemini-flash；provider 不可用靜默停用 | 仿 `src/utils/embedding.ts` 降級 |
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
 | Benchmark | 對 claude-mem 10.5.2 觀察級行為 | 併用 2 週 |
 
-> 2026-07-12 註：排程端已規劃自 hermes cron（定時任務）遷移至 systemd user timer（見 memory-ops-cutover.md）；本段保留原文為歷史紀錄，「跑完即退」的非常駐要求不變。
+> 2026-07-16 註：先前 hermes cron／systemd user timer 路線已由 hook-driven systemd oneshot 正式取代（見 `memory-ops-cutover.md`）；「跑完即退」的非常駐要求不變。
 
 ## Constraints
 
 ### RAM 三紅線
 
-1. **不做常駐 daemon**：worker 走 hermes cron，跑完即退；不得常駐 worker-service。
+1. **不做常駐 daemon**：worker 由 Stop／SessionStart quick-kick systemd oneshot，跑完即退；不得常駐 worker-service，也不得建立 auto-capture timer。
 
-> 2026-07-12 註：排程端已規劃自 hermes cron 遷移至 systemd user timer（見 memory-ops-cutover.md）；本段保留原文為歷史紀錄，「跑完即退」的非常駐要求不變。
+> reminder 與 Todoist 屬 task flow（任務流程），可各自使用 systemd timer；不得因此讓 auto-capture 回到定時輪詢。
 
-2. **hook 只做 O(1) 輕量寫入且不走網路**：PostToolUse 只 append thin JSONL；Stop 只 append sentinel；hook 內不 INSERT 遠端 DB、不 spawn LLM。
-3. **observation 抽取用便宜模型**（2026-07-07 使用者拍板改版）：預設 `claude-cli`（`claude -p` 子程序吃 Claude Code 訂閱額度，模型 `CC_CAPTURE_CLAUDE_MODEL` 預設 `haiku`；只在 cron worker 內短暫存在、跑完即退，不違反紅線 1/2）；`CC_CAPTURE_LLM` 可切 `gemini-flash`（遠端 API，需 `GEMINI_API_KEY`）。provider 不可用（CLI 不存在／key 缺）時靜默停用並告警。**hook 內不 spawn LLM 的紅線不變**。
+2. **hook 不走網路、不等待 worker**：PostToolUse 只 append thin JSONL；Stop append sentinel 後以 `systemctl --no-block` quick-kick；SessionStart 同樣 quick-kick backlog。hook 內不 INSERT 遠端 DB、不 spawn LLM。
+3. **observation 抽取用便宜模型**（2026-07-07 使用者拍板改版）：預設 `claude-cli`（`claude -p` 子程序吃 Claude Code 訂閱額度，模型 `CC_CAPTURE_CLAUDE_MODEL` 預設 `haiku`；只在 systemd worker 內短暫存在、跑完即退，不違反紅線 1/2）；`CC_CAPTURE_LLM` 可切 `gemini-flash`（遠端 API，需 `GEMINI_API_KEY`）。provider 不可用（CLI 不存在／key 缺）時靜默停用並告警。**hook 內不 spawn LLM 的紅線不變**。
 
 ### 資料與部署
 
@@ -218,6 +225,20 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | `observations_personal_only_check`（0013） | 不適用 | 有 | personal test DB 有 | 只准 `project_id='__personal__'`；不放共用 schema |
 | legacy 0007/0008 CHECK | 既有表由 0008 保護 | 既有表由 0007 保護 | 0008 沿用既有 e2e 自套自清模式 | 不等同於 observations 路由 CHECK |
 | `pending_observations` | 不建 | 不建 | 不建 | 預設不建遠端佇列表 |
+
+## Capture State v2（第二版擷取狀態）
+
+- 每個 active spool 使用同名 `.capture-state.json`，以 0600 權限原子保存 spool generation（暫存佇列世代）、spool cursor（讀取游標）、每個 transcript path hash 的 checkpoint，以及 chunk retry entries（分塊重試項目）。損壞或不合規 state 必須 fail closed，不可回退成 0 猜測。
+- 首次升級以舊 `.hwm` 指向的已消費 spool 前綴重建各 path checkpoint；舊 `.hwm` 與 `.retry.json` 只改名封存。舊 attempts 不帶入 v2，避免把 `TICK_BUDGET_EXCEEDED` 當成內容失敗。
+- worker 依 spool byte order（位元組順序）處理 record；同一路徑第一個 offset 建 baseline，後續 PostToolUse offset 或 Stop sentinel 才形成增量區間。多 transcript 路徑各自單調前進，但 observation 與 canonical rollup 都使用母 session ID。
+- chunk 必須先按原始 transcript bytes 的 UTF-8 安全邊界切分，再移除 injection marker；checkpoint、retry key 與 source coverage 一律使用未過濾的原始 byte range。
+- 每個 chunk 的 DB transaction 成功後立即原子保存 checkpoint；整個已讀 spool snapshot 完成後才推進 spool cursor。tick budget 用盡是正常 `yielded`，不增加 retry、不寫 dead-letter。
+- 第 5 次真實 LLM 終局失敗只 dead-letter 該 chunk，保存越過該 chunk 的 checkpoint，停止該 session 本 tick；下一個 tick 從後續 range 繼續。
+- Claude CLI extraction 使用隔離且有界的 non-agentic（非代理迴圈）呼叫：不載入 repo/user instructions、plugins（外掛）、hooks 或 tools，原生 JSON Schema 同時約束結構與輸出大小；CLI envelope（信封）優先讀 `structured_output`，僅為相容舊 CLI 才回退 `result` 字串。
+- v2 state 的 `splitHints` 對舊檔為 optional（選填），讀取時缺省為空；新寫入固定包含此欄。state 載入與 checkpoint 前進時，必須清除同 path 且 `entry.end <= checkpoint` 的已覆蓋舊 retry 與 split hint；chunk policy（分塊策略）變更不得留下永遠不會再命中的舊 key。
+- 有效 path 的 transcript 來源不可讀或短於 boundary 時，使用固定內容 hash 的獨立 retry entry；每次 attempt 原子保存，第 5 次只 dead-letter 該來源 range 並保存 checkpoint。dead-letter 與 warning 不得包含完整本機 path 或 transcript；來源恢復判定必須同時滿足「可讀」與「byte length 大於等於 boundary」。
+- rotation 只允許在 spool 最後一筆完整 record 是 Stop sentinel 時進行，並須一併封存該 generation 的 state；同 session 後續新 spool 沒有 active state，從 cursor 0 建立新 generation。仍在寫入、末筆不是 Stop 的大 spool 不得因 size threshold 被封存。
+- 歷史 dead-letter 復原只允許執行 `scripts/audit-auto-capture-recovery.ts` 產生 `/tmp` dry-run manifest（演練清單）；該腳本固定輸出 `would_replay: false`，不得自動重播或修改 DB。
 
 ## Observation Taxonomy（觀察紀錄分類法）
 
@@ -264,6 +285,7 @@ Rollup 的載入成本不新增 `project_memories` 欄位，統一存 `metadata.
 
 - 每個 project/session 只有一筆 active canonical rollup；`idempotency_key` 固定為 `capture:v05:<project>:<session>`。
 - 每個 harvest window 都 update 同一筆 rollup：summary 可重生成或合併，embedding 重算，`metadata.capture.observation_ids` 與 `metadata.capture.spool_offsets` append，`metadata.capture.summarize_count` 遞增。
+- `metadata.capture.transcript_sources` 保存可合併的 `{path_hash,start,end}` source coverage（來源覆蓋區間）；若整個 chunk 已被覆蓋，重播必須跳過所有 DB 寫入。`spool_offsets` 保留既有相容語意，不再作為重試或冪等鍵。
 - observations 維持 append-only；每筆 observation 的 `rollupMemoryId` 指向該 canonical rollup。
 - 若某次 batch 無高價值 observation，`observations[]` 可為空，但 worker 必須記錄原因並仍可更新 rollup metadata。
 - Benchmark（基準測試）以 rollup 作 Top-5 對比單位；observation 只用來判斷該 rollup 是否可解釋命中。
@@ -278,8 +300,8 @@ worker 對 LLM output 採 all-or-nothing（全有或全無）策略：
 2. 必須含 `session_summary` 與 `observations`。
 3. `session_summary.summary` 不可空白，且要能映射到 `project_memories.summary`。
 4. `observations` 每筆必須通過 type/concepts/facts/files/narrative 驗證。`discovery_tokens` 由 worker 寫入時以 estimator 計算，不採信 LLM 輸出（2026-07-07 真 tick 實證：haiku 常給 0/null，整批炸 schema——對齊上方欄位契約「寫入時計算」）。
-5. 任一筆 observation 壞掉，整包進 hold/park 分流：第 1-4 次 hold（跨 tick retry sidecar，HWM hold）；第 5 次 park（寫 dead-letter + HWM 前進越過該窗）；不半吞。
-6. dead-letter metadata 必須可追查 session id、hwm offset、模型名、錯誤碼、content hash。
+5. 任一筆 observation 壞掉，該 chunk 進 hold/park 分流：第 1-4 次以穩定 retry key hold；第 5 次只 park 該 chunk，保存 checkpoint 後停止該 session 本 tick；已成功 chunk 不回滾，後續 chunk 留待下一 tick。
+6. dead-letter metadata 必須可追查母 session id、path hash、原始 transcript byte range、模型名、錯誤碼與 content hash；來源不可用的非 LLM dead-letter 使用 `model=none` 與 `TRANSCRIPT_SOURCE_UNAVAILABLE`。
 7. dead-letter 不把 transcript 全文或 LLM 原文落 DB。
 
 ## Cross-System Mapping（跨系統對比口徑）
@@ -326,11 +348,11 @@ No-Go：保留 claude-mem，回 Phase 2 補強 query/taxonomy/worker。
 - [ ] PostToolUse hook append thin JSONL，內容含 session/project/tool metadata 且權限 0600。
 - [ ] Stop hook append sentinel；worker 讀 transcript 增量窗口並更新 hwm_offset。
 - [ ] DB tunnel 關閉時 worker 不呼叫 LLM、不寫 DB，只累積 spool 並告警。
-- [ ] LLM 回 malformed JSON（格式錯誤 JSON）時整包進 hold/park 分流（第 1-4 次 hold、第 5 次 park dead-letter）；DB 無半包資料；429 不計 attempts，HWM hold。
+- [ ] LLM 回 malformed JSON（格式錯誤 JSON）時該 chunk 進 hold/park 分流（第 1-4 次 hold、第 5 次只 park 該 chunk）；DB 無半包資料；429 與 budget yield 不計 attempts、不前進 checkpoint。
 - [ ] `cc_memory_search` 回 rollup/observation index；`recordSearchQuery` 仍能寫既有欄位。
 - [ ] `cc_memory_timeline` 對 anchor observation 回同 project 且同 session 前後 N 筆；anchor rollup 先展開 linked observations。
 - [ ] `cc_memory_get_observations` 批次 ids 回全文與總 `discovery_tokens`。
-- [ ] SessionStart 注入 flag off 無輸出；flag on 有截斷與 token budget 測試。
+- [ ] SessionStart 注入 flag off 無輸出但仍 quick-kick backlog；flag on 有截斷與 token budget 測試。
 - [ ] `CC_READ_ONLY=1` 時 `cc_memory_refine_delete` 不出現在 ListTools，直呼也拒絕。
 
 ## Open Questions
@@ -338,7 +360,7 @@ No-Go：保留 claude-mem，回 Phase 2 補強 query/taxonomy/worker。
 1. **PostToolUse payload 與 transcript offset 穩定性**：M2a 動工前實測 gate。實測項：hook stdin shape、tool name 欄位、transcript_path 來源、append 後 offset 是否 byte-stable（位元組穩定）、Stop sentinel 的 offset 是否能讓 worker 重讀同一窗口。判準：3 種 tool（Read/Edit/Bash）+ 1 次 `/clear` + 1 次 compact 後 offset 皆可重現；否則 fallback 為 worker 只讀 transcript tail 並用 content hash 去重。
    **✅ RESOLVED 2026-07-06（gate PASS，M2a 解鎖，無需 fallback）**：五項實測全數 CONFIRMED，報告見 `docs/auto-capture-v0.5/oq1-gate-report.json`（Claude Code 2.1.201 實測）。要點：`tool_name`/`transcript_path`/`session_id` 皆為 payload 頂層欄位；transcript append-only（sha256 前綴兩輪 + resume 跨程序驗證）；/clear 與 compact 皆同檔續寫不重寫（歷史實例結構性驗證，deviation 已記於報告）；**timestamp 不可當寫入順序信號（attachment/isMeta entry 帶產生時間，最大觀察倒退 62min），worker 一律用 byte offset**。連帶影響（Codex 對審 P2 採納）：`cc_memory_timeline` 依 `observed_at` 排鄰接的前提是 M2b worker 賦值保證 session 內單調——**已定案（2026-07-06 M2b 開工）**：worker 賦 `observed_at` = harvest window 處理時間 + 窗口內序號毫秒微增量，禁止抄 transcript entry timestamp；不加 offset 欄位（observation 級 byte offset 無可靠來源，window 級與窗口時間等價）。細節見 task.md M3 3b 註記。
 2. **`discovery_tokens` CJK-aware 估算**：提案公式為 CJK 字元 ×1.0 + ASCII word ×1.3 + punctuation/line break ×0.3，向上取整並加 12 token metadata buffer。M4 Gate 用 20 筆真實中英混合 rollup/observation 對實際 tokenizer（若可用）或 Claude context 估算抽樣，誤差目標 ±20%；若超標，調整係數但不引入 `tiktoken` 依賴。
-3. **是否建 `pending_observations` 遠端佇列表**：結論：v0.5 不建。理由：hook 不能走網路；跨機重試語義由各機 spool + 各機 cron worker 承擔；遠端 queue 會增加 DB 寫入風險。M1 只新增 `observations` 結構與分側路由 CHECK：0011 建表/索引，0012 project-only CHECK，0013 personal-only CHECK；不建遠端 pending queue。
+3. **是否建 `pending_observations` 遠端佇列表**：結論：v0.5 不建。理由：hook 不能走網路；跨機重試語義由各機 spool + Stop／SessionStart 驅動的本機 systemd worker 承擔；遠端 queue 會增加 DB 寫入風險。M1 只新增 `observations` 結構與分側路由 CHECK：0011 建表/索引，0012 project-only CHECK，0013 personal-only CHECK；不建遠端 pending queue。
 
 ## References
 

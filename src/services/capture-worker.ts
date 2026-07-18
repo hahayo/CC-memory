@@ -2,13 +2,14 @@
 //
 // CC-memory v0.5 M2b capture worker.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
 import {
   DEFAULT_CAPTURE_LLM_PROVIDER,
+  DEFAULT_CLAUDE_CLI_TIMEOUT_MS,
   CaptureLlmValidationError,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
@@ -26,8 +27,9 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
 const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
-const DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES = 96 * 1024;
+const DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES = 32 * 1024;
 const PROMPT_TOO_LONG_RETRY_MIN_BYTES = 1024;
+const LLM_CALL_SETTLE_RESERVE_MS = 15_000;
 // 注入污染防線 marker：SessionStart 注入內容帶 `source=cc-memory-inject`，
 // 其字串子集為此常數；transcript 內含此字串的行整行排除，不送 LLM 抽取。
 const INJECTION_MARKER = 'cc-memory-inject';
@@ -35,8 +37,19 @@ const RAW_LLM_OUTPUT_LIMIT = 2048;
 const ROTATE_SIZE_BYTES = 10 * 1024 * 1024;
 const ROTATE_IDLE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SPOOL_LOCK_STALE_MS = 10 * 60 * 1000;
+const TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = 'TRANSCRIPT_SOURCE_UNAVAILABLE';
+const TRANSCRIPT_SOURCE_UNAVAILABLE_HASH = sha256(TRANSCRIPT_SOURCE_UNAVAILABLE_CODE);
 const MALFORMED_JSON_RETRY_PROMPT_PREFIX =
   'Previous output was not valid JSON. Output JSON only; the first character must be `{` and the last character must be `}`. Do not include markdown, code fences, or commentary.';
+
+class CaptureSourceUnavailableError extends Error {
+  readonly code = TRANSCRIPT_SOURCE_UNAVAILABLE_CODE;
+
+  constructor() {
+    super('transcript source unavailable or shorter than captured boundary');
+    this.name = 'CaptureSourceUnavailableError';
+  }
+}
 
 export interface CaptureWorkerResult {
   processed: number;
@@ -46,6 +59,7 @@ export interface CaptureWorkerResult {
   rateLimited: number;
   malformed: number;
   parked: number;
+  yielded: number;
   transcriptMissing: number;
   llmRetries: number;
   observationsWritten: number;
@@ -62,6 +76,7 @@ export interface CaptureWorkerOptions {
   writerHost?: string;
   generateEmbedding?: (text: string) => Promise<number[] | null>;
   stdout?: { write(chunk: string): unknown };
+  stateWriter?: CaptureStateWriter;
 }
 
 interface SpoolSession {
@@ -102,6 +117,7 @@ interface CaptureMetadata {
   observation_ids: string[];
   model: string;
   spool_offsets: Array<{ start: number; end: number }>;
+  transcript_sources: TranscriptSourceRange[];
   summarize_count: number;
   discovery_tokens: number;
 }
@@ -114,6 +130,7 @@ interface RollupRow {
 interface WriteWindowResult {
   observationsWritten: number;
   rollupsWritten: number;
+  replayed?: boolean;
 }
 
 const DEFAULT_TICK_BUDGET_MS = 240_000;
@@ -127,6 +144,80 @@ export interface RetryEntry {
 }
 
 export type RetryState = Record<string, RetryEntry>;
+
+export interface TranscriptCheckpoint {
+  checkpoint: number;
+}
+
+export interface CaptureRetryEntry extends RetryEntry {
+  pathHash: string;
+  start: number;
+  end: number;
+  contentHash: string;
+}
+
+export interface CaptureSplitHint {
+  pathHash: string;
+  start: number;
+  end: number;
+  contentHash: string;
+}
+
+export interface CaptureStateV2 {
+  version: 2;
+  spool: {
+    generation: string;
+    cursor: number;
+  };
+  transcripts: Record<string, TranscriptCheckpoint>;
+  retries: Record<string, CaptureRetryEntry>;
+  splitHints: Record<string, CaptureSplitHint>;
+}
+
+export type CaptureStateWriter = (path: string, state: CaptureStateV2) => Promise<void>;
+
+function clearCoveredEntries(
+  state: CaptureStateV2,
+  pathHash: string,
+  checkpoint: number
+): boolean {
+  let changed = false;
+  for (const [key, retry] of Object.entries(state.retries)) {
+    if (retry.pathHash === pathHash && retry.end <= checkpoint) {
+      delete state.retries[key];
+      changed = true;
+    }
+  }
+  for (const [key, hint] of Object.entries(state.splitHints)) {
+    if (hint.pathHash === pathHash && hint.end <= checkpoint) {
+      delete state.splitHints[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function clearAllCoveredEntries(state: CaptureStateV2): boolean {
+  let changed = false;
+  for (const [pathHash, transcript] of Object.entries(state.transcripts)) {
+    changed = clearCoveredEntries(state, pathHash, transcript.checkpoint) || changed;
+  }
+  return changed;
+}
+
+interface TranscriptSourceRange {
+  path_hash: string;
+  start: number;
+  end: number;
+}
+
+interface TranscriptChunk {
+  path: string;
+  pathHash: string;
+  start: number;
+  end: number;
+  raw: Buffer;
+}
 
 interface ParsedSpoolResult {
   records: SpoolRecord[];
@@ -143,6 +234,7 @@ function emptyResult(): CaptureWorkerResult {
     rateLimited: 0,
     malformed: 0,
     parked: 0,
+    yielded: 0,
     transcriptMissing: 0,
     llmRetries: 0,
     observationsWritten: 0,
@@ -157,6 +249,10 @@ function spoolRoot(env: Record<string, string | undefined>): string {
 
 function hwmPathFor(spoolPath: string): string {
   return spoolPath.replace(/\.jsonl$/, '.hwm');
+}
+
+function statePathFor(spoolPath: string): string {
+  return spoolPath.replace(/\.jsonl$/, '.capture-state.json');
 }
 
 function lockPathFor(spoolPath: string): string {
@@ -174,7 +270,7 @@ function vectorLiteral(embedding: number[] | null): string | null {
   return `[${embedding.join(',')}]`;
 }
 
-function sha256(input: string): string {
+function sha256(input: string | Buffer): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
@@ -201,13 +297,205 @@ async function readHwm(path: string): Promise<number> {
   }
 }
 
-async function writeHwmAtomically(path: string, value: number): Promise<void> {
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function parseCaptureState(raw: string, path: string): CaptureStateV2 {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`CAPTURE_STATE_CORRUPT: invalid JSON at ${basename(path)}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`CAPTURE_STATE_CORRUPT: invalid root at ${basename(path)}`);
+  }
+  const record = value as Partial<CaptureStateV2>;
+  if (
+    record.version !== 2 ||
+    !record.spool ||
+    typeof record.spool !== 'object' ||
+    typeof record.spool.generation !== 'string' ||
+    record.spool.generation.length === 0 ||
+    !isNonNegativeInteger(record.spool.cursor) ||
+    !record.transcripts ||
+    typeof record.transcripts !== 'object' ||
+    Array.isArray(record.transcripts) ||
+    !record.retries ||
+    typeof record.retries !== 'object' ||
+    Array.isArray(record.retries)
+  ) {
+    throw new Error(`CAPTURE_STATE_CORRUPT: invalid shape at ${basename(path)}`);
+  }
+
+  const transcripts: Record<string, TranscriptCheckpoint> = {};
+  for (const [pathHash, checkpoint] of Object.entries(record.transcripts)) {
+    if (
+      !/^[a-f0-9]{64}$/.test(pathHash) ||
+      !checkpoint ||
+      typeof checkpoint !== 'object' ||
+      !isNonNegativeInteger((checkpoint as TranscriptCheckpoint).checkpoint)
+    ) {
+      throw new Error(`CAPTURE_STATE_CORRUPT: invalid checkpoint at ${basename(path)}`);
+    }
+    transcripts[pathHash] = { checkpoint: (checkpoint as TranscriptCheckpoint).checkpoint };
+  }
+
+  const retries: Record<string, CaptureRetryEntry> = {};
+  for (const [key, retry] of Object.entries(record.retries)) {
+    if (
+      !retry ||
+      typeof retry !== 'object' ||
+      !isNonNegativeInteger((retry as CaptureRetryEntry).attempts) ||
+      typeof (retry as CaptureRetryEntry).lastErrorClass !== 'string' ||
+      typeof (retry as CaptureRetryEntry).firstSeenIso !== 'string' ||
+      typeof (retry as CaptureRetryEntry).lastAttemptIso !== 'string' ||
+      !/^[a-f0-9]{64}$/.test((retry as CaptureRetryEntry).pathHash) ||
+      !isNonNegativeInteger((retry as CaptureRetryEntry).start) ||
+      !isNonNegativeInteger((retry as CaptureRetryEntry).end) ||
+      (retry as CaptureRetryEntry).end < (retry as CaptureRetryEntry).start ||
+      !/^[a-f0-9]{64}$/.test((retry as CaptureRetryEntry).contentHash)
+    ) {
+      throw new Error(`CAPTURE_STATE_CORRUPT: invalid retry entry at ${basename(path)}`);
+    }
+    retries[key] = { ...(retry as CaptureRetryEntry) };
+  }
+
+  const splitHints: Record<string, CaptureSplitHint> = {};
+  if (record.splitHints !== undefined) {
+    if (typeof record.splitHints !== 'object' || Array.isArray(record.splitHints)) {
+      throw new Error(`CAPTURE_STATE_CORRUPT: invalid split hints at ${basename(path)}`);
+    }
+    for (const [key, hint] of Object.entries(record.splitHints)) {
+      if (
+        !hint ||
+        typeof hint !== 'object' ||
+        !/^[a-f0-9]{64}$/.test((hint as CaptureSplitHint).pathHash) ||
+        !isNonNegativeInteger((hint as CaptureSplitHint).start) ||
+        !isNonNegativeInteger((hint as CaptureSplitHint).end) ||
+        (hint as CaptureSplitHint).end < (hint as CaptureSplitHint).start ||
+        !/^[a-f0-9]{64}$/.test((hint as CaptureSplitHint).contentHash)
+      ) {
+        throw new Error(`CAPTURE_STATE_CORRUPT: invalid split hint at ${basename(path)}`);
+      }
+      splitHints[key] = { ...(hint as CaptureSplitHint) };
+    }
+  }
+
+  return {
+    version: 2,
+    spool: {
+      generation: record.spool.generation,
+      cursor: record.spool.cursor,
+    },
+    transcripts,
+    retries,
+    splitHints,
+  };
+}
+
+export async function writeCaptureStateAtomically(
+  path: string,
+  state: CaptureStateV2
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp`;
-  await writeFile(tmp, String(value), { mode: 0o600 });
+  await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await chmod(tmp, 0o600);
   await rename(tmp, path);
   await chmod(path, 0o600);
+}
+
+async function archiveLegacyFile(path: string, suffix: string): Promise<void> {
+  let target = `${path}.${suffix}.legacy`;
+  if (await stat(target).then(() => true).catch(() => false)) {
+    target = `${target}.${randomUUID()}`;
+  }
+  try {
+    await rename(path, target);
+  } catch (error) {
+    if (error && typeof error === 'object' && (error as { code?: string }).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function archiveLegacySidecars(root: string, nowMs: number): Promise<void> {
+  const projects = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const project of projects) {
+    if (!project.isDirectory() || project.name === '.dead') continue;
+    const projectDir = join(root, project.name);
+    const files = await readdir(projectDir, { withFileTypes: true }).catch(() => []);
+    const names = new Set(files.filter((file) => file.isFile()).map((file) => file.name));
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      if (file.name.endsWith('.retry.json')) {
+        await archiveLegacyFile(join(projectDir, file.name), `v1-${nowMs}`);
+      } else if (
+        file.name.endsWith('.hwm') &&
+        !names.has(file.name.replace(/\.hwm$/, '.jsonl'))
+      ) {
+        await archiveLegacyFile(join(projectDir, file.name), `orphan-v1-${nowMs}`);
+      }
+    }
+  }
+}
+
+function transcriptBoundary(record: SpoolRecord): number | null {
+  if (isNonNegativeInteger(record.transcript_offset)) return record.transcript_offset;
+  if (isNonNegativeInteger(record.hwm_offset)) return record.hwm_offset;
+  return null;
+}
+
+async function loadOrMigrateCaptureState(input: {
+  spool: SpoolSession;
+  buffer: Buffer;
+  snapshotSize: number;
+  nowMs: number;
+  writer: CaptureStateWriter;
+}): Promise<CaptureStateV2> {
+  const statePath = statePathFor(input.spool.path);
+  try {
+    const state = parseCaptureState(await readFile(statePath, 'utf8'), statePath);
+    const suffix = `v1-${input.nowMs}`;
+    await archiveLegacyFile(hwmPathFor(input.spool.path), suffix);
+    await archiveLegacyFile(retryPathFor(input.spool.path), suffix);
+    return state;
+  } catch (error) {
+    if (!error || typeof error !== 'object' || (error as { code?: string }).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const legacyHwm = Math.min(await readHwm(hwmPathFor(input.spool.path)), input.snapshotSize);
+  const transcripts: Record<string, TranscriptCheckpoint> = {};
+  const consumed = readSpoolBuffer(input.buffer, 0, legacyHwm);
+  if (consumed) {
+    for (const record of consumed.records) {
+      if (typeof record.transcript_path !== 'string' || record.transcript_path.length === 0) continue;
+      const boundary = transcriptBoundary(record);
+      if (boundary === null) continue;
+      transcripts[sha256(record.transcript_path)] = { checkpoint: boundary };
+    }
+  }
+
+  const state: CaptureStateV2 = {
+    version: 2,
+    spool: {
+      generation: randomUUID(),
+      cursor: consumed?.safeEnd ?? 0,
+    },
+    transcripts,
+    retries: {},
+    splitHints: {},
+  };
+  await input.writer(statePath, state);
+  const suffix = `v1-${input.nowMs}`;
+  await archiveLegacyFile(hwmPathFor(input.spool.path), suffix);
+  await archiveLegacyFile(retryPathFor(input.spool.path), suffix);
+  return state;
 }
 
 function spoolLockStaleMs(env: Record<string, string | undefined>): number {
@@ -322,6 +610,18 @@ function captureMaxSessionsPerTick(env: Record<string, string | undefined>): num
   return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_SESSIONS_PER_TICK, Number.MAX_SAFE_INTEGER);
 }
 
+function llmCallBudgetReserveMs(
+  env: Record<string, string | undefined>,
+  llm: Pick<CaptureLlmAdapter, 'provider'>
+): number {
+  if (llm.provider !== DEFAULT_CAPTURE_LLM_PROVIDER) return 0;
+  const timeoutMs = parsePositiveIntegerEnv(
+    env.CC_CAPTURE_CLAUDE_TIMEOUT_MS,
+    DEFAULT_CLAUDE_CLI_TIMEOUT_MS
+  );
+  return timeoutMs + LLM_CALL_SETTLE_RESERVE_MS;
+}
+
 async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
   let projectDirs;
   try {
@@ -382,20 +682,6 @@ function firstString(records: SpoolRecord[], key: keyof SpoolRecord): string | n
   return null;
 }
 
-function minNumber(records: SpoolRecord[], key: keyof SpoolRecord, fallback: number): number {
-  const values = records
-    .map((record) => record[key])
-    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-  return values.length > 0 ? Math.min(...values) : fallback;
-}
-
-function maxNumber(records: SpoolRecord[], key: keyof SpoolRecord, fallback: number): number {
-  const values = records
-    .map((record) => record[key])
-    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-  return values.length > 0 ? Math.max(...values) : fallback;
-}
-
 // 注入污染防線：transcript 是 JSONL，逐行過濾——整行含 INJECTION_MARKER 即丟棄，
 // 避免 SessionStart 注入的 Recent Activity 索引被 LLM 再抽成 observation
 // （見 docs/auto-capture-v0.5/plan.md §Injection Pollution Defense）。
@@ -411,16 +697,123 @@ function stripInjectionMarkerLines(transcript: string): string {
     .join('\n');
 }
 
-async function readTranscriptSlice(path: string | null, start: number, end: number): Promise<string> {
-  if (!path) return '';
+async function readTranscriptBuffer(path: string): Promise<Buffer | null> {
   try {
-    const buffer = await readFile(path);
-    const safeStart = Math.max(0, Math.min(start, buffer.length));
-    const safeEnd = Math.max(safeStart, Math.min(end, buffer.length));
-    return buffer.subarray(safeStart, safeEnd).toString('utf8');
+    return await readFile(path);
   } catch {
-    return '';
+    return null;
   }
+}
+
+function utf8SafeEnd(buffer: Buffer, start: number, proposedEnd: number, hardEnd: number): number {
+  let end = Math.max(start, Math.min(proposedEnd, hardEnd));
+  if (end >= hardEnd) return hardEnd;
+  while (end > start && (buffer[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  if (end > start) return end;
+  end = Math.min(proposedEnd, hardEnd);
+  while (end < hardEnd && (buffer[end] & 0xc0) === 0x80) {
+    end += 1;
+  }
+  return Math.max(start + 1, Math.min(end, hardEnd));
+}
+
+function splitTranscriptRange(
+  path: string,
+  pathHash: string,
+  buffer: Buffer,
+  start: number,
+  end: number,
+  maxBytes: number
+): TranscriptChunk[] {
+  const safeStart = Math.max(0, Math.min(start, buffer.length));
+  const safeEnd = Math.max(safeStart, Math.min(end, buffer.length));
+  const chunks: TranscriptChunk[] = [];
+  let cursor = safeStart;
+  while (cursor < safeEnd) {
+    const proposedEnd = Math.min(cursor + maxBytes, safeEnd);
+    let chunkEnd = proposedEnd;
+    if (proposedEnd < safeEnd) {
+      const newline = buffer.lastIndexOf(0x0a, proposedEnd - 1);
+      if (newline >= cursor) {
+        chunkEnd = newline + 1;
+      } else {
+        chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd, safeEnd);
+      }
+    }
+    if (chunkEnd <= cursor) {
+      chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd + 1, safeEnd);
+    }
+    chunks.push({
+      path,
+      pathHash,
+      start: cursor,
+      end: chunkEnd,
+      raw: buffer.subarray(cursor, chunkEnd),
+    });
+    cursor = chunkEnd;
+  }
+  return chunks;
+}
+
+function splitTranscriptChunk(chunk: TranscriptChunk): TranscriptChunk[] | null {
+  if (chunk.raw.length <= PROMPT_TOO_LONG_RETRY_MIN_BYTES) return null;
+  const maxBytes = Math.max(PROMPT_TOO_LONG_RETRY_MIN_BYTES, Math.floor(chunk.raw.length / 2));
+  const chunks = splitTranscriptRange(
+    chunk.path,
+    chunk.pathHash,
+    chunk.raw,
+    0,
+    chunk.raw.length,
+    maxBytes
+  ).map((part) => ({
+    ...part,
+    start: chunk.start + part.start,
+    end: chunk.start + part.end,
+  }));
+  return chunks.length > 1 ? chunks : null;
+}
+
+function prioritizePersistedSplitBoundary(
+  chunk: TranscriptChunk,
+  splitHints: Record<string, CaptureSplitHint>,
+  sourceBuffer: Buffer
+): TranscriptChunk[] | null {
+  const candidates = Object.values(splitHints)
+    .filter(
+      (hint) =>
+        hint.pathHash === chunk.pathHash &&
+        hint.start >= 0 &&
+        hint.start <= chunk.start &&
+        hint.end > chunk.start &&
+        hint.end < chunk.end
+    )
+    .sort((left, right) => left.end - right.end);
+
+  for (const hint of candidates) {
+    const relativeEnd = hint.end - chunk.start;
+    const hintedRaw = chunk.raw.subarray(0, relativeEnd);
+    if (
+      hint.end > sourceBuffer.length ||
+      sha256(sourceBuffer.subarray(hint.start, hint.end)) !== hint.contentHash
+    ) {
+      continue;
+    }
+    return [
+      {
+        ...chunk,
+        end: hint.end,
+        raw: hintedRaw,
+      },
+      {
+        ...chunk,
+        start: hint.end,
+        raw: chunk.raw.subarray(relativeEnd),
+      },
+    ];
+  }
+  return null;
 }
 
 interface ReadSpoolResult {
@@ -447,59 +840,6 @@ function readSpoolBuffer(buffer: Buffer, start: number, end: number): ReadSpoolR
   return { records, malformedCount, lineOffsets, safeEnd };
 }
 
-
-function splitCaptureWindow(window: CaptureWindow, maxBytes: number): CaptureWindow[] {
-  if (Buffer.byteLength(window.transcript, 'utf8') <= maxBytes) {
-    return [{ ...window, observedAtOffset: 0 }];
-  }
-
-  const chunks: CaptureWindow[] = [];
-  let startIndex = 0;
-  let hwmOffsetStart = window.hwmOffsetStart;
-
-  while (startIndex < window.transcript.length) {
-    let endIndex = startIndex;
-    let byteLength = 0;
-    let newlineEndIndex = -1;
-    let newlineByteLength = 0;
-
-    for (let index = startIndex; index < window.transcript.length;) {
-      const codePoint = window.transcript.codePointAt(index);
-      if (codePoint === undefined) break;
-      const char = String.fromCodePoint(codePoint);
-      const charBytes = Buffer.byteLength(char, 'utf8');
-      if (byteLength > 0 && byteLength + charBytes > maxBytes) break;
-
-      byteLength += charBytes;
-      index += char.length;
-      endIndex = index;
-
-      if (char === '\n') {
-        newlineEndIndex = index;
-        newlineByteLength = byteLength;
-      }
-    }
-
-    if (newlineEndIndex > startIndex && endIndex < window.transcript.length) {
-      endIndex = newlineEndIndex;
-      byteLength = newlineByteLength;
-    }
-
-    const transcript = window.transcript.slice(startIndex, endIndex);
-    const hwmOffsetEnd = hwmOffsetStart + byteLength;
-    chunks.push({
-      ...window,
-      transcript,
-      hwmOffsetStart,
-      hwmOffsetEnd,
-      observedAtOffset: 0,
-    });
-    startIndex = endIndex;
-    hwmOffsetStart = hwmOffsetEnd;
-  }
-
-  return chunks;
-}
 
 function captureTextForTokenEstimate(extraction: CaptureLlmExtraction): string {
   return [
@@ -539,6 +879,16 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
             typeof (offset as { end?: unknown }).end === 'number'
         )
       : [],
+    transcript_sources: Array.isArray(record.transcript_sources)
+      ? record.transcript_sources.filter(
+          (source): source is TranscriptSourceRange =>
+            Boolean(source) &&
+            typeof source === 'object' &&
+            typeof (source as { path_hash?: unknown }).path_hash === 'string' &&
+            typeof (source as { start?: unknown }).start === 'number' &&
+            typeof (source as { end?: unknown }).end === 'number'
+        )
+      : [],
     summarize_count:
       typeof record.summarize_count === 'number' && Number.isFinite(record.summarize_count)
         ? record.summarize_count
@@ -548,6 +898,40 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
         ? record.discovery_tokens
         : 0,
   };
+}
+
+function normalizeTranscriptSources(sources: TranscriptSourceRange[]): TranscriptSourceRange[] {
+  const sorted = [...sources]
+    .filter((source) => source.end > source.start)
+    .sort((a, b) =>
+      a.path_hash.localeCompare(b.path_hash) || a.start - b.start || a.end - b.end
+    );
+  const merged: TranscriptSourceRange[] = [];
+  for (const source of sorted) {
+    const previous = merged[merged.length - 1];
+    if (
+      previous &&
+      previous.path_hash === source.path_hash &&
+      source.start <= previous.end
+    ) {
+      previous.end = Math.max(previous.end, source.end);
+    } else {
+      merged.push({ ...source });
+    }
+  }
+  return merged;
+}
+
+function transcriptSourceCovered(
+  sources: TranscriptSourceRange[],
+  candidate: TranscriptSourceRange
+): boolean {
+  return normalizeTranscriptSources(sources).some(
+    (source) =>
+      source.path_hash === candidate.path_hash &&
+      source.start <= candidate.start &&
+      source.end >= candidate.end
+  );
 }
 
 function mergeMetadata(metadata: unknown, capture: CaptureMetadata): Record<string, unknown> {
@@ -698,6 +1082,7 @@ async function insertObservation(
     writerHost: string;
     observedAt: Date;
     embedding: number[] | null;
+    source: TranscriptSourceRange;
   }
 ): Promise<string | null> {
   const hash = observationHash(input.window, input.observation);
@@ -725,6 +1110,7 @@ async function insertObservation(
         start: input.window.hwmOffsetStart,
         end: input.window.hwmOffsetEnd,
       },
+      transcript_source: input.source,
     },
   };
   const rows = await executeRows<{ id: string }>(
@@ -781,10 +1167,16 @@ async function writeCaptureWindow(
   window: CaptureWindow,
   extraction: CaptureLlmExtraction,
   rawResponse: CaptureLlmRawResponse,
+  source: TranscriptSourceRange,
   options: Required<Pick<CaptureWorkerOptions, 'writerHost' | 'generateEmbedding'>>
 ): Promise<WriteWindowResult> {
   const summary = extraction.session_summary;
   const idempotencyKey = `capture:v05:${window.projectId}:${window.sessionId}`;
+  const existing = await selectRollup(tx, window.projectId, idempotencyKey);
+  const previousCapture = existingCaptureMetadata(existing?.metadata);
+  if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
+    return { observationsWritten: 0, rollupsWritten: 0, replayed: true };
+  }
   const rollupContentHash = contentHash([
     window.projectId,
     'session',
@@ -799,8 +1191,6 @@ async function writeCaptureWindow(
     composeEmbeddingText(summary.summary, summary.keywords, summary.decisions)
   );
 
-  const existing = await selectRollup(tx, window.projectId, idempotencyKey);
-  const previousCapture = existingCaptureMetadata(existing?.metadata);
   // at-least-once 重放守衛：transaction commit 後 HWM 寫入若失敗，同 window 會重跑；
   // 已見過的 spool offset 區間不重複 append、summarize_count 不重複遞增。
   const previousOffsets = previousCapture?.spool_offsets ?? [];
@@ -815,7 +1205,11 @@ async function writeCaptureWindow(
     spool_offsets: isReplayedWindow
       ? previousOffsets
       : [...previousOffsets, { start: window.spoolOffsetStart, end: window.spoolOffsetEnd }],
-    summarize_count: (previousCapture?.summarize_count ?? 0) + (isReplayedWindow ? 0 : 1),
+    transcript_sources: normalizeTranscriptSources([
+      ...(previousCapture?.transcript_sources ?? []),
+      source,
+    ]),
+    summarize_count: (previousCapture?.summarize_count ?? 0) + 1,
     discovery_tokens: discoveryTokens,
   };
 
@@ -851,6 +1245,7 @@ async function writeCaptureWindow(
       writerHost: options.writerHost,
       observedAt,
       embedding: observationEmbedding,
+      source,
     });
     if (insertedId) insertedObservationIds.push(insertedId);
   }
@@ -877,6 +1272,7 @@ async function writeCaptureWindow(
 }
 
 function llmErrorCode(error: unknown): string {
+  if (error instanceof CaptureSourceUnavailableError) return error.code;
   if (error instanceof CaptureLlmValidationError) return error.code;
   return 'LLM_EXTRACT_FAILED';
 }
@@ -912,14 +1308,8 @@ function isPromptTooLongLlmError(error: unknown): boolean {
   return combined.includes('prompt is too long') || combined.includes('prompt_too_long');
 }
 
-function splitChunkForPromptTooLong(window: CaptureWindow): CaptureWindow[] | null {
-  const currentBytes = Buffer.byteLength(window.transcript, 'utf8');
-  if (currentBytes <= PROMPT_TOO_LONG_RETRY_MIN_BYTES) return null;
-  const smallerChunks = splitCaptureWindow(
-    window,
-    Math.max(PROMPT_TOO_LONG_RETRY_MIN_BYTES, Math.floor(currentBytes / 2))
-  );
-  return smallerChunks.length > 1 ? smallerChunks : null;
+function isClaudeCliTimeoutError(error: unknown): boolean {
+  return error instanceof CaptureLlmValidationError && error.code === 'CLAUDE_CLI_TIMEOUT';
 }
 
 function truncateLlmRawOutput(rawOutput: string | null | undefined): string | null {
@@ -935,6 +1325,8 @@ async function writeDeadLetter(
     error: unknown;
     legacyRawText?: string;
     llmRawOutput?: string | null;
+    pathHash?: string;
+    sourceContentHash?: string;
   }
 ): Promise<boolean> {
   const llmRawOutput = truncateLlmRawOutput(input.llmRawOutput);
@@ -943,6 +1335,8 @@ async function writeDeadLetter(
     window.sessionId,
     window.spoolOffsetStart,
     window.spoolOffsetEnd,
+    input.pathHash ?? null,
+    input.sourceContentHash ?? null,
     llmErrorCode(input.error),
     input.model,
     llmRawOutput ?? input.legacyRawText ?? llmErrorMessage(input.error),
@@ -962,6 +1356,14 @@ async function writeDeadLetter(
         start: window.hwmOffsetStart,
         end: window.hwmOffsetEnd,
       },
+      source: input.pathHash
+        ? {
+            path_hash: input.pathHash,
+            start: window.hwmOffsetStart,
+            end: window.hwmOffsetEnd,
+            content_hash: input.sourceContentHash ?? null,
+          }
+        : undefined,
       error_code: llmErrorCode(input.error),
       model: input.model,
       content_hash: hash,
@@ -985,56 +1387,36 @@ async function writeDeadLetter(
   }
 }
 
-async function maybeRotateSpool(spool: SpoolSession, hwm: number, hasStopSentinel: boolean, nowMs: number): Promise<void> {
+async function maybeRotateCaptureSpool(
+  spool: SpoolSession,
+  state: CaptureStateV2,
+  hasStopSentinel: boolean,
+  nowMs: number
+): Promise<boolean> {
   const info = await stat(spool.path).catch(() => null);
-  if (!info) return;
-  const freshSize = info.size;
-  if (hwm < freshSize) return;
-  const shouldRotateBySize = freshSize > ROTATE_SIZE_BYTES;
+  if (!info || state.spool.cursor < info.size) return false;
+  const shouldRotateBySize = hasStopSentinel && info.size > ROTATE_SIZE_BYTES;
   const shouldRotateByAge = hasStopSentinel && nowMs - info.mtimeMs > ROTATE_IDLE_MS;
-  if (!shouldRotateBySize && !shouldRotateByAge) return;
+  if (!shouldRotateBySize && !shouldRotateByAge) return false;
 
-  const sealed = `${spool.path}.${nowMs}.sealed`;
-  await rename(spool.path, sealed).catch(() => undefined);
+  const suffix = `${nowMs}.${state.spool.generation}.sealed`;
+  const statePath = statePathFor(spool.path);
+  const sealedState = `${statePath}.${suffix}`;
+  const sealedSpool = `${spool.path}.${suffix}`;
+  await rename(statePath, sealedState);
+  try {
+    await archiveLegacyFile(hwmPathFor(spool.path), `rotation-${nowMs}`);
+    await archiveLegacyFile(retryPathFor(spool.path), `rotation-${nowMs}`);
+    await rename(spool.path, sealedSpool);
+  } catch (error) {
+    await rename(sealedState, statePath).catch(() => undefined);
+    throw error;
+  }
+  return true;
 }
 
 function retryPathFor(spoolPath: string): string {
   return spoolPath.replace(/\.jsonl$/, '.retry.json');
-}
-
-async function loadRetryState(spoolPath: string, currentHwm: number): Promise<{ state: RetryState; cleaned: boolean }> {
-  const rPath = retryPathFor(spoolPath);
-  try {
-    const raw = await readFile(rPath, 'utf8');
-    const state = JSON.parse(raw) as RetryState;
-    const cleaned: RetryState = {};
-    let removedAny = false;
-    for (const [key, entry] of Object.entries(state)) {
-      const parts = key.split('-');
-      const endOffset = Number.parseInt(parts[1] ?? '', 10);
-      if (Number.isFinite(endOffset) && endOffset > currentHwm) {
-        cleaned[key] = entry;
-      } else {
-        removedAny = true;
-      }
-    }
-    return { state: cleaned, cleaned: removedAny };
-  } catch {
-    return { state: {}, cleaned: false };
-  }
-}
-
-async function saveRetryState(spoolPath: string, state: RetryState): Promise<void> {
-  const rPath = retryPathFor(spoolPath);
-  if (Object.keys(state).length === 0) {
-    await unlink(rPath).catch(() => undefined);
-    return;
-  }
-  const tmp = `${rPath}.tmp`;
-  await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-  await chmod(tmp, 0o600);
-  await rename(tmp, rPath);
-  await chmod(rPath, 0o600);
 }
 
 function tickBudgetMs(env: Record<string, string | undefined>): number {
@@ -1073,116 +1455,15 @@ function rotateSessionsAfterCursor(sessions: SpoolSession[], cursorPath: string 
   return [...sessions.slice(idx + 1), ...sessions.slice(0, idx + 1)];
 }
 
-async function spoolHasStopSentinel(spoolPath: string): Promise<boolean> {
+async function spoolEndsWithStopSentinel(spoolPath: string): Promise<boolean> {
   try {
-    return (await readFile(spoolPath, 'utf8')).includes('"hwm_offset"');
+    const buffer = await readFile(spoolPath);
+    const parsed = readSpoolBuffer(buffer, 0, buffer.length);
+    const lastRecord = parsed?.records.at(-1);
+    return isNonNegativeInteger(lastRecord?.hwm_offset);
   } catch {
     return false;
   }
-}
-
-function formWindows(
-  buffer: Buffer,
-  hwm: number,
-  currentSize: number,
-  maxWindowBytes: number,
-  spool: SpoolSession,
-  now: Date,
-): Array<{ window: CaptureWindow; spoolEnd: number; malformedCount: number }> | null {
-  const readResult = readSpoolBuffer(buffer, hwm, currentSize);
-  if (!readResult || readResult.records.length === 0) return null;
-  const { records, malformedCount, lineOffsets, safeEnd: readableEnd } = readResult;
-  const baseStart = Math.max(0, Math.min(hwm, buffer.length));
-
-  const projectId = firstString(records, 'project_id') ?? spool.projectIdFromPath;
-  const sessionId = firstString(records, 'session_id') ?? spool.sessionIdFromPath;
-  const transcriptPath = firstString(records, 'transcript_path');
-
-  const windows: Array<{ window: CaptureWindow; spoolEnd: number; malformedCount: number }> = [];
-  let winRecords: SpoolRecord[] = [];
-
-  for (let i = 0; i < records.length; i += 1) {
-    const record = records[i];
-    const tentativeRecords = [...winRecords, record];
-    const tentativeHwmStart = minNumber(tentativeRecords, 'transcript_offset', 0);
-    const tentativeHwmEnd = maxNumber(tentativeRecords, 'hwm_offset', tentativeHwmStart);
-    const transcriptSpan = tentativeHwmEnd - tentativeHwmStart;
-
-    if (winRecords.length > 0 && transcriptSpan > maxWindowBytes) {
-      // Find the last record with hwm_offset in winRecords — that's the true
-      // window boundary. Records after it (trailing events) belong to the next window.
-      let splitIdx = -1;
-      for (let k = winRecords.length - 1; k >= 0; k -= 1) {
-        if (typeof winRecords[k].hwm_offset === 'number') {
-          splitIdx = k;
-          break;
-        }
-      }
-      if (splitIdx >= 0) {
-        const emitRecords = winRecords.slice(0, splitIdx + 1);
-        const carryOver = winRecords.slice(splitIdx + 1);
-        const emitHwmStart = minNumber(emitRecords, 'transcript_offset', 0);
-        const emitHwmEnd = maxNumber(emitRecords, 'hwm_offset', 0);
-        if (emitHwmEnd > emitHwmStart) {
-          const winEnd = lineOffsets[i - 1 - carryOver.length].end;
-          windows.push({
-            window: {
-              spool,
-              records: emitRecords,
-              projectId,
-              sessionId,
-              transcriptPath,
-              transcript: '',
-              spoolOffsetStart: baseStart + (windows.length === 0 ? 0 : windows[windows.length - 1].spoolEnd - baseStart),
-              spoolOffsetEnd: baseStart + winEnd,
-              hwmOffsetStart: emitHwmStart,
-              hwmOffsetEnd: emitHwmEnd,
-              processingTime: now,
-            },
-            spoolEnd: baseStart + winEnd,
-            malformedCount: windows.length === 0 ? malformedCount : 0,
-          });
-          winRecords = [...carryOver, record];
-        } else {
-          winRecords.push(record);
-        }
-      } else {
-        // No hwm_offset in winRecords — keep accumulating (event-only, no meaningful span)
-        winRecords.push(record);
-      }
-    } else {
-      winRecords.push(record);
-    }
-  }
-
-  if (winRecords.length > 0) {
-    // Last window's spoolEnd extends to readableEnd (past any trailing malformed lines)
-    // so that HWM advancement skips over garbage lines (terminal discard per D5).
-    windows.push({
-      window: {
-        spool,
-        records: winRecords,
-        projectId,
-        sessionId,
-        transcriptPath,
-        transcript: '',
-        spoolOffsetStart: windows.length === 0 ? baseStart : windows[windows.length - 1].spoolEnd,
-        spoolOffsetEnd: readableEnd,
-        hwmOffsetStart: minNumber(winRecords, 'transcript_offset', 0),
-        hwmOffsetEnd: maxNumber(winRecords, 'hwm_offset', 0),
-        processingTime: now,
-      },
-      spoolEnd: readableEnd,
-      malformedCount: windows.length === 0 ? malformedCount : 0,
-    });
-  }
-
-  // Fix up spoolOffsetStart for consecutive windows
-  for (let i = 1; i < windows.length; i += 1) {
-    windows[i].window.spoolOffsetStart = windows[i - 1].spoolEnd;
-  }
-
-  return windows.length > 0 ? windows : null;
 }
 
 export async function runCaptureWorkerOnce(
@@ -1208,6 +1489,7 @@ export async function runCaptureWorkerOnce(
 
   const maxBytes = spoolMaxBytes(env);
   const maxWindowBytes = captureMaxWindowBytes(env, options.llm);
+  const llmCallReserveMs = llmCallBudgetReserveMs(env, options.llm);
   const totalBytes = await totalSpoolBytes(root);
   if (totalBytes > maxBytes) {
     stdout.write(
@@ -1218,12 +1500,14 @@ export async function runCaptureWorkerOnce(
 
   const rawSessions = await listSpoolSessions(root);
   if (rawSessions.length === 0) return result;
+  await archiveLegacySidecars(root, getNowMs());
   const cursor = await loadTickCursor(root);
   const sessions = rotateSessionsAfterCursor(rawSessions, cursor);
   const writerHost = options.writerHost ?? resolveWriterHost();
   const generateEmbedding = options.generateEmbedding ?? defaultGenerateEmbedding;
   const maxSessionsPerTick = captureMaxSessionsPerTick(env);
   let handledSessions = 0;
+  const stateWriter = options.stateWriter ?? writeCaptureStateAtomically;
 
   for (const spool of sessions) {
     if (handledSessions >= maxSessionsPerTick) break;
@@ -1237,51 +1521,61 @@ export async function runCaptureWorkerOnce(
 
     try {
       const spoolInfo = await stat(spool.path);
-      const currentSize = spoolInfo.size;
-      const hwmFile = hwmPathFor(spool.path);
-      let hwm = Math.min(await readHwm(hwmFile), currentSize);
-      if (hwm >= currentSize) {
+      const snapshotSize = spoolInfo.size;
+      const buffer = await readFile(spool.path);
+      const statePath = statePathFor(spool.path);
+      const state = await loadOrMigrateCaptureState({
+        spool,
+        buffer,
+        snapshotSize,
+        nowMs,
+        writer: stateWriter,
+      });
+      if (clearAllCoveredEntries(state)) {
+        await stateWriter(statePath, state);
+      }
+      if (state.spool.cursor > snapshotSize) {
+        throw new Error('CAPTURE_STATE_CORRUPT: spool cursor exceeds current generation size');
+      }
+      if (state.spool.cursor >= snapshotSize) {
         result.skipped += 1;
         const oldEnoughToRotate = getNowMs() - spoolInfo.mtimeMs >= ROTATE_IDLE_MS;
         const hasStopSentinel =
-          currentSize >= ROTATE_SIZE_BYTES || oldEnoughToRotate
-            ? await spoolHasStopSentinel(spool.path)
+          snapshotSize >= ROTATE_SIZE_BYTES || oldEnoughToRotate
+            ? await spoolEndsWithStopSentinel(spool.path)
             : false;
-        await maybeRotateSpool(spool, hwm, hasStopSentinel, getNowMs());
+        await maybeRotateCaptureSpool(spool, state, hasStopSentinel, getNowMs());
         continue;
       }
       if (handledSessions >= maxSessionsPerTick) break;
       handledSessions += 1;
       await saveTickCursor(root, spool.path);
 
-      const buffer = await readFile(spool.path);
-
-      // Check for all-malformed terminal discard before forming windows
-      const preCheck = readSpoolBuffer(buffer, hwm, currentSize);
-      if (preCheck && preCheck.records.length === 0 && preCheck.malformedCount > 0) {
-        result.malformed += preCheck.malformedCount;
+      const snapshotCursor = state.spool.cursor;
+      const snapshot = readSpoolBuffer(buffer, snapshotCursor, snapshotSize);
+      if (!snapshot) {
+        result.skipped += 1;
+        continue;
+      }
+      if (snapshot.records.length === 0 && snapshot.malformedCount > 0) {
+        result.malformed += snapshot.malformedCount;
         stdout.write(
-          `[cc-memory] auto-capture warning: malformed-spool-lines=${preCheck.malformedCount} session=${spool.sessionIdFromPath}\n`
+          `[cc-memory] auto-capture warning: malformed-spool-lines=${snapshot.malformedCount} session=${spool.sessionIdFromPath}\n`
         );
-        await writeHwmAtomically(hwmFile, preCheck.safeEnd);
+        state.spool.cursor = snapshot.safeEnd;
+        await stateWriter(statePath, state);
         continue;
       }
 
-      const formedWindows = formWindows(buffer, hwm, currentSize, maxWindowBytes, spool, options.now?.() ?? new Date());
-      if (!formedWindows) {
-        result.skipped += 1;
-        continue;
-      }
+      const projectId = firstString(snapshot.records, 'project_id') ?? spool.projectIdFromPath;
+      const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
+      const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
 
-      const firstWindow = formedWindows[0].window;
-      const hasStopSentinel = formedWindows.some(
-        (fw) => fw.window.records.some((record) => typeof record.hwm_offset === 'number')
-      );
-
-      if (firstWindow.projectId === '__personal__') {
-        await writeHwmAtomically(hwmFile, currentSize);
+      if (projectId === '__personal__') {
+        state.spool.cursor = snapshot.safeEnd;
+        await stateWriter(statePath, state);
         result.skipped += 1;
-        await maybeRotateSpool(spool, currentSize, hasStopSentinel, getNowMs());
+        await maybeRotateCaptureSpool(spool, state, hasStopSentinel, getNowMs());
         continue;
       }
 
@@ -1290,85 +1584,196 @@ export async function runCaptureWorkerOnce(
         continue;
       }
 
-      // Report malformed lines from this session
-      const totalMalformed = formedWindows.reduce((sum, fw) => sum + fw.malformedCount, 0);
-      if (totalMalformed > 0) {
-        result.malformed += totalMalformed;
+      if (snapshot.malformedCount > 0) {
+        result.malformed += snapshot.malformedCount;
         stdout.write(
-          `[cc-memory] auto-capture warning: malformed-spool-lines=${totalMalformed} session=${firstWindow.sessionId}\n`
+          `[cc-memory] auto-capture warning: malformed-spool-lines=${snapshot.malformedCount} session=${sessionId}\n`
         );
       }
 
-      // Load retry state for this session (cleans entries below HWM)
-      const retryLoad = await loadRetryState(spool.path, hwm);
-      const retryState = retryLoad.state;
-      let retryDirty = retryLoad.cleaned;
-
       let observedAtOffset = 0;
-      let sessionAborted = false;
+      let sessionStopped = false;
+      let snapshotCompleted = true;
+      const processingTime = options.now?.() ?? new Date();
+      const spoolRangeStarts: Record<string, number> = {};
+      const outcomeCountBefore =
+        result.processed + result.skipped + result.failed + result.deadLettered +
+        result.rateLimited + result.parked + result.yielded + result.transcriptMissing;
+      let missingPathReported = false;
 
-      for (const { window: rawWin, spoolEnd } of formedWindows) {
-        if (sessionAborted) break;
-        if (budget > 0 && getNowMs() - tickStartMs >= budget) break;
-
-        // Read transcript for this window
-        const transcript = stripInjectionMarkerLines(
-          await readTranscriptSlice(rawWin.transcriptPath, rawWin.hwmOffsetStart, rawWin.hwmOffsetEnd)
-        );
-        const win: CaptureWindow = { ...rawWin, transcript };
-
-        // Empty transcript: advance HWM past this window
-        if (win.transcript.trim().length === 0) {
-          if (!win.transcriptPath && win.hwmOffsetStart === 0 && win.hwmOffsetEnd === 0) {
+      for (let recordIndex = 0; recordIndex < snapshot.records.length; recordIndex += 1) {
+        if (budget > 0 && getNowMs() - tickStartMs >= budget) {
+          result.yielded += 1;
+          sessionStopped = true;
+          snapshotCompleted = false;
+          break;
+        }
+        const record = snapshot.records[recordIndex];
+        const path = typeof record.transcript_path === 'string' ? record.transcript_path : null;
+        const boundary = transcriptBoundary(record);
+        if (boundary === null) continue;
+        if (!path) {
+          if (!missingPathReported) {
             result.transcriptMissing += 1;
+            result.skipped += 1;
+            missingPathReported = true;
           }
-          await writeHwmAtomically(hwmFile, spoolEnd);
-          hwm = spoolEnd;
-          result.skipped += 1;
           continue;
         }
+        const pathHash = sha256(path);
+        const lineOffset = snapshot.lineOffsets[recordIndex] ?? { start: 0, end: 0 };
+        if (typeof record.transcript_offset === 'number') {
+          spoolRangeStarts[pathHash] = snapshotCursor + lineOffset.start;
+        }
+        const checkpoint = state.transcripts[pathHash];
+        if (!checkpoint) {
+          state.transcripts[pathHash] = { checkpoint: boundary };
+          if (spoolRangeStarts[pathHash] === undefined) {
+            spoolRangeStarts[pathHash] = snapshotCursor + lineOffset.start;
+          }
+          await stateWriter(statePath, state);
+          continue;
+        }
+        if (boundary <= checkpoint.checkpoint) continue;
 
-        // Check retry state for this window
-        const windowKey = `${win.spoolOffsetStart}-${win.spoolOffsetEnd}`;
-        const existingRetry = retryState[windowKey];
-        if (existingRetry && existingRetry.attempts >= RETRY_MAX_ATTEMPTS) {
-          // Already at max — park immediately (shouldn't happen since we clean on park, but defensive)
-          await writeDeadLetter(root, win, {
-            model: options.llm.model,
-            error: new Error(existingRetry.lastErrorClass),
-          });
-          result.deadLettered += 1;
-          result.parked += 1;
+        const transcriptBuffer = await readTranscriptBuffer(path);
+        const missingSourceRetryKey =
+          `${pathHash}:${checkpoint.checkpoint}-${boundary}:${TRANSCRIPT_SOURCE_UNAVAILABLE_HASH}`;
+        if (!transcriptBuffer || transcriptBuffer.length < boundary) {
+          const attemptTime = (options.now?.() ?? new Date()).toISOString();
+          const entry = state.retries[missingSourceRetryKey] ?? {
+            attempts: 0,
+            lastErrorClass: TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+            firstSeenIso: attemptTime,
+            lastAttemptIso: '',
+            pathHash,
+            start: checkpoint.checkpoint,
+            end: boundary,
+            contentHash: TRANSCRIPT_SOURCE_UNAVAILABLE_HASH,
+          };
+          entry.attempts += 1;
+          entry.lastErrorClass = TRANSCRIPT_SOURCE_UNAVAILABLE_CODE;
+          entry.lastAttemptIso = attemptTime;
+          state.retries[missingSourceRetryKey] = entry;
+          await stateWriter(statePath, state);
+          result.transcriptMissing += 1;
           stdout.write(
-            `[cc-memory] auto-capture warning: parked-window session=${win.sessionId} offsets=${win.spoolOffsetStart}-${win.spoolOffsetEnd} attempts=${RETRY_MAX_ATTEMPTS}\n`
+            `[cc-memory] auto-capture warning: transcript-source-unavailable session=${sessionId} source=${pathHash.slice(0, 12)}:${checkpoint.checkpoint}-${boundary} attempts=${entry.attempts}/${RETRY_MAX_ATTEMPTS}\n`
           );
-          delete retryState[windowKey];
-          retryDirty = true;
-          await writeHwmAtomically(hwmFile, spoolEnd);
-          hwm = spoolEnd;
-          continue;
+          if (entry.attempts >= RETRY_MAX_ATTEMPTS) {
+            const sourceUnavailableError = new CaptureSourceUnavailableError();
+            const missingWindow: CaptureWindow = {
+              spool,
+              records: [record],
+              projectId,
+              sessionId,
+              transcriptPath: null,
+              transcript: '',
+              spoolOffsetStart: spoolRangeStarts[pathHash] ?? snapshotCursor,
+              spoolOffsetEnd: snapshotCursor + lineOffset.end,
+              hwmOffsetStart: checkpoint.checkpoint,
+              hwmOffsetEnd: boundary,
+              processingTime,
+              observedAtOffset,
+            };
+            const created = await writeDeadLetter(root, missingWindow, {
+              model: 'none',
+              error: sourceUnavailableError,
+              pathHash,
+              sourceContentHash: TRANSCRIPT_SOURCE_UNAVAILABLE_HASH,
+            });
+            if (created) result.deadLettered += 1;
+            result.parked += 1;
+            checkpoint.checkpoint = boundary;
+            clearCoveredEntries(state, pathHash, checkpoint.checkpoint);
+            await stateWriter(statePath, state);
+          }
+          sessionStopped = true;
+          snapshotCompleted = false;
+          break;
+        }
+        if (state.retries[missingSourceRetryKey]) {
+          delete state.retries[missingSourceRetryKey];
+          await stateWriter(statePath, state);
         }
 
-        // Process window (may be split by splitCaptureWindow for single oversized windows)
-        let chunks = splitCaptureWindow(win, maxWindowBytes);
-        let sawWriteFailure = false;
-        let sawRuntimeDisabled = false;
-        let sawTerminalLlmFailure = false;
-        let terminalError: unknown = null;
-        let terminalRawResponse: CaptureLlmRawResponse | null = null;
-
+        let chunks = splitTranscriptRange(
+          path,
+          pathHash,
+          transcriptBuffer,
+          checkpoint.checkpoint,
+          boundary,
+          maxWindowBytes
+        );
         while (chunks.length > 0) {
-          if (chunks.length > 1 && budget > 0 && getNowMs() - tickStartMs >= budget) {
-            sawTerminalLlmFailure = true;
-            terminalError = new Error('TICK_BUDGET_EXCEEDED');
+          if (budget > 0 && getNowMs() - tickStartMs >= budget) {
+            result.yielded += 1;
+            sessionStopped = true;
+            snapshotCompleted = false;
             break;
           }
           const chunk = chunks.shift()!;
-          const chunkWindow = { ...chunk, observedAtOffset };
+          const prioritizedChunks = prioritizePersistedSplitBoundary(
+            chunk,
+            state.splitHints,
+            transcriptBuffer
+          );
+          if (prioritizedChunks) {
+            chunks = [...prioritizedChunks, ...chunks];
+            continue;
+          }
+          const transcript = stripInjectionMarkerLines(chunk.raw.toString('utf8'));
+          const sourceContentHash = sha256(chunk.raw);
+          const retryKey = `${chunk.pathHash}:${chunk.start}-${chunk.end}:${sourceContentHash}`;
+          const existingSplitHint = state.splitHints[retryKey];
+          if (existingSplitHint) {
+            const smallerChunks = splitTranscriptChunk(chunk);
+            if (smallerChunks) {
+              chunks = [...smallerChunks, ...chunks];
+              continue;
+            }
+            delete state.splitHints[retryKey];
+            await stateWriter(statePath, state);
+          }
+          const chunkWindow: CaptureWindow = {
+            spool,
+            records: [record],
+            projectId,
+            sessionId,
+            transcriptPath: chunk.path,
+            transcript,
+            spoolOffsetStart: spoolRangeStarts[pathHash] ?? snapshotCursor,
+            spoolOffsetEnd: snapshotCursor + lineOffset.end,
+            hwmOffsetStart: chunk.start,
+            hwmOffsetEnd: chunk.end,
+            processingTime,
+            observedAtOffset,
+          };
+
+          if (transcript.trim().length === 0) {
+            checkpoint.checkpoint = chunk.end;
+            clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
+            await stateWriter(statePath, state);
+            result.skipped += 1;
+            continue;
+          }
+
           let rawResponse: CaptureLlmRawResponse | null = null;
           let extraction: CaptureLlmExtraction | null = null;
-          let chunkFailed = false;
+          let terminalError: unknown = null;
+          let terminalRawResponse: CaptureLlmRawResponse | null = null;
+          let runtimeStopped = false;
+          let promptSplit = false;
           for (let attempt = 0; attempt < 2; attempt += 1) {
+            if (
+              budget > 0 &&
+              llmCallReserveMs > 0 &&
+              getNowMs() - tickStartMs + llmCallReserveMs > budget
+            ) {
+              result.yielded += 1;
+              runtimeStopped = true;
+              break;
+            }
             const retryPromptPrefix =
               attempt === 0 ? undefined : MALFORMED_JSON_RETRY_PROMPT_PREFIX;
             let attemptRawResponse: CaptureLlmRawResponse | null = null;
@@ -1400,35 +1805,102 @@ export async function runCaptureWorkerOnce(
                   )
                 );
                 result.skipped += 1;
-                sawRuntimeDisabled = true;
+                runtimeStopped = true;
                 break;
               }
               if (error instanceof CaptureLlmValidationError && error.code === 'CLAUDE_CLI_RATE_LIMITED') {
                 result.rateLimited += 1;
-                sawRuntimeDisabled = true;
+                runtimeStopped = true;
                 break;
               }
-              if (isPromptTooLongLlmError(error)) {
-                const smallerChunks = splitChunkForPromptTooLong(chunkWindow);
+              if (isPromptTooLongLlmError(error) || isClaudeCliTimeoutError(error)) {
+                const smallerChunks = splitTranscriptChunk(chunk);
                 if (smallerChunks) {
+                  state.splitHints[retryKey] = {
+                    pathHash: chunk.pathHash,
+                    start: chunk.start,
+                    end: chunk.end,
+                    contentHash: sourceContentHash,
+                  };
+                  await stateWriter(statePath, state);
                   chunks = [...smallerChunks, ...chunks];
+                  promptSplit = true;
                   break;
                 }
               }
-              // Terminal LLM failure — defer to retry sidecar
-              sawTerminalLlmFailure = true;
               terminalError = error;
               terminalRawResponse = attemptRawResponse;
-              chunkFailed = true;
               break;
             }
           }
-          if (sawRuntimeDisabled || sawTerminalLlmFailure) break;
-          if (chunkFailed || !rawResponse || !extraction) continue;
+          if (promptSplit) continue;
+          if (runtimeStopped) {
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
+
+          if (terminalError) {
+            const attemptTime = (options.now?.() ?? new Date()).toISOString();
+            const entry = state.retries[retryKey] ?? {
+              attempts: 0,
+              lastErrorClass: '',
+              firstSeenIso: attemptTime,
+              lastAttemptIso: '',
+              pathHash: chunk.pathHash,
+              start: chunk.start,
+              end: chunk.end,
+              contentHash: sourceContentHash,
+            };
+            entry.attempts += 1;
+            entry.lastErrorClass = llmErrorCode(terminalError);
+            entry.lastAttemptIso = attemptTime;
+            state.retries[retryKey] = entry;
+            await stateWriter(statePath, state);
+            stdout.write(
+              `[cc-memory] auto-capture warning: retry-pending session=${sessionId} ` +
+                `source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} ` +
+                `error=${entry.lastErrorClass} attempts=${entry.attempts}/${RETRY_MAX_ATTEMPTS}\n`
+            );
+
+            if (entry.attempts >= RETRY_MAX_ATTEMPTS) {
+              const created = await writeDeadLetter(root, chunkWindow, {
+                model: terminalError instanceof CaptureLlmValidationError && typeof terminalError.details.model === 'string'
+                  ? terminalError.details.model
+                  : terminalRawResponse?.model ?? options.llm.model,
+                error: terminalError,
+                legacyRawText: (terminalError as { text?: string }).text,
+                llmRawOutput: terminalRawResponse?.text ?? llmRawOutputFromError(terminalError),
+                pathHash: chunk.pathHash,
+                sourceContentHash,
+              });
+              if (created) result.deadLettered += 1;
+              result.parked += 1;
+              checkpoint.checkpoint = chunk.end;
+              clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
+              await stateWriter(statePath, state);
+              stdout.write(
+                `[cc-memory] auto-capture warning: parked-window session=${sessionId} source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} attempts=${RETRY_MAX_ATTEMPTS}\n`
+              );
+            }
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
+
+          if (!rawResponse || !extraction) {
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
 
           try {
             const writeResult = await options.db.transaction((tx: DbClient) =>
               writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {
+                path_hash: chunk.pathHash,
+                start: chunk.start,
+                end: chunk.end,
+              }, {
                 writerHost,
                 generateEmbedding,
               })
@@ -1437,80 +1909,34 @@ export async function runCaptureWorkerOnce(
             result.observationsWritten += writeResult.observationsWritten;
             result.rollupsWritten += writeResult.rollupsWritten;
             observedAtOffset += extraction.observations.length;
+            checkpoint.checkpoint = chunk.end;
+            clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
+            await stateWriter(statePath, state);
           } catch {
             result.failed += 1;
-            sawWriteFailure = true;
+            sessionStopped = true;
+            snapshotCompleted = false;
             break;
           }
         }
-
-        if (sawRuntimeDisabled) {
-          // Rate limit / disabled: hold HWM, stop this session
-          sessionAborted = true;
-          break;
-        }
-
-        if (sawWriteFailure) {
-          // DB failure: hold HWM, stop this session
-          sessionAborted = true;
-          break;
-        }
-
-        if (sawTerminalLlmFailure) {
-          // Count retry attempts via sidecar
-          const entry = retryState[windowKey] ?? {
-            attempts: 0,
-            lastErrorClass: '',
-            firstSeenIso: new Date().toISOString(),
-            lastAttemptIso: '',
-          };
-          entry.attempts += 1;
-          entry.lastErrorClass = llmErrorCode(terminalError);
-          entry.lastAttemptIso = new Date().toISOString();
-          retryState[windowKey] = entry;
-          retryDirty = true;
-
-          if (entry.attempts >= RETRY_MAX_ATTEMPTS) {
-            // Park: write dead-letter, advance HWM, clean entry
-            const created = await writeDeadLetter(root, win, {
-              model: terminalError instanceof CaptureLlmValidationError && typeof terminalError.details.model === 'string'
-                ? terminalError.details.model
-                : terminalRawResponse?.model ?? options.llm.model,
-              error: terminalError,
-              legacyRawText: (terminalError as { text?: string }).text,
-              llmRawOutput: terminalRawResponse?.text ?? llmRawOutputFromError(terminalError),
-            });
-            if (created) {
-              result.deadLettered += 1;
-            }
-            result.parked += 1;
-            stdout.write(
-              `[cc-memory] auto-capture warning: parked-window session=${win.sessionId} offsets=${win.spoolOffsetStart}-${win.spoolOffsetEnd} attempts=${RETRY_MAX_ATTEMPTS}\n`
-            );
-            delete retryState[windowKey];
-            await writeHwmAtomically(hwmFile, spoolEnd);
-            hwm = spoolEnd;
-          } else {
-            // Hold: stop this session for this tick
-            sessionAborted = true;
-          }
-          continue;
-        }
-
-        // All chunks succeeded for this window — advance HWM
-        await writeHwmAtomically(hwmFile, spoolEnd);
-        hwm = spoolEnd;
+        if (sessionStopped) break;
       }
 
-      if (retryDirty) {
-        await saveRetryState(spool.path, retryState);
+      if (snapshotCompleted && !sessionStopped) {
+        const outcomeCountAfter =
+          result.processed + result.skipped + result.failed + result.deadLettered +
+          result.rateLimited + result.parked + result.yielded + result.transcriptMissing;
+        if (outcomeCountAfter === outcomeCountBefore) result.skipped += 1;
+        state.spool.cursor = snapshot.safeEnd;
+        await stateWriter(statePath, state);
+        await maybeRotateCaptureSpool(spool, state, hasStopSentinel, getNowMs());
       }
-
-      if (!sessionAborted) {
-        await maybeRotateSpool(spool, hwm, hasStopSentinel, getNowMs());
-      }
-    } catch {
+    } catch (error) {
       result.failed += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      stdout.write(
+        `[cc-memory] auto-capture warning: worker-session-failed session=${spool.sessionIdFromPath} error=${message}\n`
+      );
     } finally {
       await release();
     }

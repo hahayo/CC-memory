@@ -1,4 +1,4 @@
-// scripts/hermes-reminder-poll.ts — hermes `--no-agent` reminder poller v2。
+// scripts/hermes-reminder-poll.ts — reminder delivery poller v2（保留歷史檔名；不依賴 Hermes runtime）。
 //
 // at-least-once durable delivery：
 //   1. getDueReminders：撈 + 認領到期提醒（同時寫 reminder_log，DB tx 內）
@@ -9,18 +9,15 @@
 //      - 失敗（非 200 / 網路錯）→ markFailed；回 'dead' → stdout 印 ⚠️ 告警
 //   5. 回傳 {dead: string[]}（dead-letter task 標題清單）
 //
-// backward compat：
-//   - stdout 只剩 dead-letter 告警（⚠️ 提醒投遞失敗 5 次已放棄: <title>）
-//   - 正常訊息改由本 poller 直接送 Telegram，不再靠 hermes --deliver 投遞
-//   - dead-letter 仍走 stdout，hermes cron admin alert 靠這
-//
-// prod 步驟備注（需手動執行）：
-//   hermes cron edit 8cca281df423 移除 --deliver telegram（改 --no-agent）
+// stdout contract：
+//   - stdout 只輸出 dead-letter 告警（⚠️ 提醒投遞失敗 5 次已放棄: <title>）
+//   - 正常訊息由本 poller 直接送 Telegram
+//   - systemd 將 stdout/stderr 收進 journal
 //
 // 環境變數：
 //   TELEGRAM_API_BASE   mock 時可覆寫（預設 https://api.telegram.org）
-//   TELEGRAM_BOT_TOKEN  由 cc-reminders.sh 注入
-//   TELEGRAM_CHAT_ID    由 cc-reminders.sh 注入
+//   TELEGRAM_BOT_TOKEN  由 systemd EnvironmentFile 注入
+//   TELEGRAM_CHAT_ID    由 systemd EnvironmentFile 注入
 //
 // ⚠️ 不要用 process.exit() 在 stdout.write 之後：
 //   Node 對 pipe 的 stdout 是 async，process.exit() 會跳過 flush 造成截斷。
@@ -82,7 +79,7 @@ export async function runOneTick(
   // 若 outer tx 因 enqueueDue 例外 rollback：reminder_log 寫入也一併撤銷，下一 tick 重撈（at-least-once）。
   // enqueueDue 冪等確保重撈不會建出重複 queue 列（UNIQUE(task_id, scheduled_for)）。
   await db.transaction(async (tx: DbClient) => {
-    const due = await getDueReminders(tx, { projectId, channel: 'hermes' });
+    const due = await getDueReminders(tx, { projectId, channel: 'telegram' });
     if (due.length > 0) {
       const queueItems = due.map(({ task, slot }) => {
         const recur =
@@ -171,8 +168,7 @@ const isMain =
 
 if (isMain) {
   main().catch((err) => {
-    // 錯誤走 stderr（hermes --no-agent 只投遞 stdout）→ 不打擾使用者
-    console.error('[hermes-reminder-poll] 失敗:', err);
+    console.error('[cc-memory-reminder-poll] 失敗:', err);
     process.exit(1);
   });
 }

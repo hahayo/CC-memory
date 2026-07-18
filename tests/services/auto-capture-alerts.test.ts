@@ -27,6 +27,25 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.fingerprint).toBeNull()
   })
 
+  it('treats yielded progress as healthy and parked chunks as alertable', () => {
+    const yielded = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=1\n',
+      stderr: '',
+    })
+    expect(yielded.ok).toBe(true)
+    expect(yielded.yieldedCount).toBe(1)
+
+    const parked = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=1 yielded=0\n',
+      stderr: '',
+    })
+    expect(parked.ok).toBe(false)
+    expect(parked.parkedCount).toBe(1)
+    expect(parked.problemLine).toBe('parked=1')
+  })
+
   it('flags non-summary stdout and dead-letter as alertable', () => {
     const assessment = assessAutoCaptureExecution({
       exitCode: 0,
@@ -40,6 +59,41 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.deadLetterCount).toBe(2)
     expect(assessment.problemLine).toContain('DB health check failed')
     expect(assessment.fingerprint).toMatch(/^[0-9a-f]{12}$/)
+  })
+
+  it('alerts on a sanitized first-attempt retry warning', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: retry-pending session=session-1 source=0123456789ab:100-200 error=CLAUDE_CLI_TIMEOUT attempts=1/5\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=0\n',
+      stderr: '',
+    })
+
+    expect(assessment.ok).toBe(false)
+    expect(assessment.problemLine).toContain('retry-pending')
+    expect(assessment.problemLine).toContain('CLAUDE_CLI_TIMEOUT')
+  })
+
+  it('keeps summary-only transcript-missing informational but alerts on a sanitized source warning', () => {
+    const informational = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=0 skipped=1 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=1 parked=0 yielded=0\n',
+      stderr: '',
+    })
+    expect(informational.ok).toBe(true)
+    expect(informational.transcriptMissingCount).toBe(1)
+
+    const alertable = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: transcript-source-unavailable session=session-1 source=0123456789ab:0-120 attempts=1/5\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=1 parked=0 yielded=0\n',
+      stderr: '',
+    })
+    expect(alertable.ok).toBe(false)
+    expect(alertable.transcriptMissingCount).toBe(1)
+    expect(alertable.problemLine).toContain('transcript-source-unavailable')
   })
 })
 

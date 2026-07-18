@@ -156,13 +156,13 @@
 - [ ] embedding（向量嵌入）走 `src/utils/embedding.ts`；失敗可 NULL
 - [ ] writer_host 走既有 `resolveWriterHost()`
 
-## 2b-4：Cron script
+## 2b-4：Worker entrypoint（歷史交付清單）
 
 - [ ] 新增 `scripts/run-auto-capture.ts`
 - [ ] 起手 health check SSH tunnel/project DB
 - [ ] spool lock + HWM + rotation
 - [ ] stdout summary：processed/skipped/dead-letter counts
-- [ ] hermes cron draft：`cc-memory-auto-capture` */5min（hermes cron draft 已降級為歷史/替代機器參考）
+- [x] hermes cron draft 已退役；現行由 Stop／SessionStart quick-kick systemd oneshot，auto-capture 不設 timer（2026-07-16 decision）
 
 ## M2b Gate
 
@@ -173,6 +173,57 @@
 - [ ] 重跑同 batch：不重複 observations
 - [ ] 同 session 多個 batch：仍只有一筆 active rollup，observations append-only
 - [ ] cron draft 經 user review 才落地
+
+## 2b-R：2026-07-15 parked-window／資料遺失可靠性修復
+
+> 狀態：✅ capture state v2 與資料完整性修復完成；⚠️ 後續發現 Claude CLI 抽取仍有 timeout retry，Hermes memory job 已於 2026-07-15 再次暫停，等待 2b-S 根治驗證與獨立 Telegram bot 切換。
+
+- [x] 以 `.capture-state.json` version 2 取代 active `.hwm` 語意，原子保存 generation、spool cursor、per-path checkpoint 與 retry entries
+- [x] legacy `.hwm` 由已消費 spool prefix 重建 checkpoint；`.hwm`/`.retry.json` 改名封存，舊 attempts 歸零
+- [x] 依 spool byte order 處理多 transcript path；無 Stop sentinel 的 child path 只到最後 PostToolUse offset；rollup/observation 維持母 session ID
+- [x] 原始 transcript bytes 先做 UTF-8 安全 chunking，再移除 injection marker
+- [x] chunk transaction commit 後立即保存 checkpoint；完整 snapshot 後才推進 spool cursor
+- [x] tick budget 回 `yielded`，不增加 retry、不寫 dead-letter；summary/alert 將 `yielded` 視為正常、`parked` 視為異常
+- [x] 第 5 次只 dead-letter 失敗 chunk、越過該 chunk 並停止 session 本 tick；後續 range 下輪繼續
+- [x] 有效 transcript path 不可讀／短於 boundary 時，以穩定 key 重試 5 次後只隔離該 range；每次輸出 sanitized warning（去識別警告），來源完整恢復才清除 retry；null/空 path 維持 informational
+- [x] rollup metadata 新增可合併 `transcript_sources`；已覆蓋 range 重播跳過所有 DB 寫入，保留 `spool_offsets`
+- [x] rotation 僅在末筆為 Stop sentinel 時同步 seal generation state；活躍大 spool 不輪替；state 權限 0600、損壞時 fail closed
+- [x] 新增 `scripts/audit-auto-capture-recovery.ts`，只寫 `/tmp` 且固定 `would_replay: false`
+- [x] targeted worker/alert/recovery tests：69 tests PASS（2026-07-15）
+- [x] `npm run typecheck && npm run lint && npm run build && npm run test:ci && npm run decisions:validate`（59 files／851 tests PASS）
+- [x] isolated fake runtime（隔離假執行環境）：worker targeted suite 51 tests、alert/recovery 合計 18 tests PASS
+- [x] 正式 Claude CLI Haiku 多路徑／多 chunk canary：6 chunks／2 paths／9 observations／1 母 session rollup，0 failed/dead-letter/parked/yielded/rate-limit，state 0600（隔離 spool + test DB，2026-07-15）
+- [x] Claude Code `claude-fable-5` 唯讀 review：早期 600s/300s/600s 因 runner 固定 max effort 而逾時；改用 1800s 後首輪找到「有效 transcript 來源遺失會永久卡住 spool」Important，debate 收斂為穩定重試 5 次後只隔離該 range，實作後第 3 輪 targeted re-review 明確 PASS，無 Critical/Important。結果 `/tmp/ai-review-claude-2026-07-15T04-03-14-193Z.md`、`/tmp/ai-review-claude-2026-07-15T04-24-22-735Z.md`、`/tmp/ai-review-claude-2026-07-15T04-43-44-610Z.md`
+- [x] 初次恢復 job 後三次完整 worker tick 無新增同類 parked/dead-letter：三輪既有 `flock` wrapper 均靜默完成，dead-letter 維持 57 筆且檔名集合 hash `d8987f424192f790dfcacd01c4d1e807c7263f86b12d6b947f148f92733e6cf1` 不變，hard-timeout log 未更新；其後因新發現的 timeout retries 與通知通道要求，Hermes job `3fb444d5e112` 已再次 pause（2026-07-15）
+
+## 2b-S：2026-07-15 Claude CLI timeout 根治與告警切離
+
+> 狀態：🚧 repo 內 cross-client（跨客戶端）hooks 與 systemd units 已實作；production cutover（正式切換）等待憑證、設定草稿人審與 user-level 安裝。
+
+- [x] 量化近 360 分鐘 capture child：192 次完成、11 次 75s timeout；timeout transcript 皆只有 user event、零 assistant event／零結構化 API error
+- [x] 確認主要成本為每次約 44K cached input tokens 的 Claude Code 預設上下文，加上未約束的長輸出；排除同一 chunk 無限重試、API 529、MCP 初始化與權限阻擋
+- [x] Claude CLI 改為 `--safe-mode --tools '' --no-session-persistence --strict-mcp-config --system-prompt ... --json-schema ...`；保留 Haiku 與 75s
+- [x] 原生 structured output 優先解析，舊 `result` 字串保留相容；schema 最多 8 個合併 observations 並限制欄位大小
+- [x] 112,450-byte synthetic worker canary 以舊 96 KiB policy 在 24 秒完成；production 首輪仍於第 5 個 96 KiB chunk timeout，據此把 Claude 預設降為 32 KiB，timeout／prompt-too-long 大 chunk 自動二分且不計 terminal attempt
+- [x] state 載入與 checkpoint 前進時清除已覆蓋舊 retry，避免 chunk policy 改變後留下永遠不會再命中的 key
+- [x] timeout／prompt-too-long 的 split tree 持久化在 v2 `splitHints`；budget yield 後下輪直接從較小 leaf 繼續，checkpoint 覆蓋父 range 後清除 hint，避免隱性 livelock
+- [x] 修正 checkpoint 前進後新 parent range 遮蔽舊 leaf 的邊界：內容 hash 驗證後優先最小 nested／ancestor boundary，直接接續 sibling；兩個回歸測試均先重現失敗再通過
+- [x] 找出 240s tick 可在尾端啟動 75s call、被 270s wrapper hard-kill 的 budget 缺口；每次 Claude call 前新增 timeout+15s reserve，不足即正常 yielded 並釋放 lock
+- [x] production split hint 深化到 4 KiB 仍出現 75s call，確認剩餘瓶頸非輸入大小；抽取 CLI 明確指定 `--effort low`，不繼承互動式 coding agent 的高思考成本
+- [x] 每次真實 terminal retry 輸出去識別 `retry-pending` warning，第一次就由 supervisor 視為異常；budget yield 維持正常進度
+- [x] supervisor 新增 `--test-alert`，只測 memory 專用 Telegram bot，不讀 DB、不跑 worker、不改 alert state
+- [x] systemd service 同時要求 `~/.ccm-project-url` 與 `~/.ccm-memory-alert.env`，避免無告警半切換
+- [x] Stop sentinel 落盤後 quick-kick `cc-memory-auto-capture.service`；SessionStart 在 injection flag off 時仍 quick-kick；PostToolUse 維持只 append；Claude Code／Codex 共用相同 wrappers
+- [x] hook contract tests（契約測試）覆蓋 Stop 順序、SessionStart flag off、recursion breaker（遞迴中止）、PostToolUse 不啟動及 systemctl fail-open
+- [x] 移除 `cc-memory-auto-capture.timer`；新增 reminder 5 分鐘與 Todoist 15 分鐘的 systemd services/timers 及獨立 wrappers，不讀 `~/.hermes/.env`
+- [x] `systemd-analyze verify` 驗證 auto-capture service、reminder/Todoist services 與兩個 task timers 通過；targeted tests 5 files／17 tests PASS（含 wrapper runtime 與 Telegram channel；2026-07-17）
+- [ ] memory 專用 bot 憑證寫入 `~/.ccm-memory-alert.env`（0600），執行 `--test-alert` 並確認收件
+- [x] 建立 `~/.ccm-reminders.env`（0600），並確認既有 `~/.ccm-personal-url`、`~/.ccm-todoist-token` 均為 0600（2026-07-17）
+- [x] 人審設定草稿，備份後把 SessionStart hook 追加到 Claude Code 與 Codex；JSON／TOML 解析 PASS（2026-07-17）
+- [ ] Codex 由使用者在 `/hooks` 審閱並信任新增的 SessionStart hook
+- [x] 安裝五個 user systemd units；reminder／Todoist 手動 services PASS。auto-capture 不 enable timer，只由 Stop／SessionStart 驅動（2026-07-17）
+- [x] enable reminder／Todoist timers；17:15 首輪均 PASS，17:17 確認對應 Hermes jobs 已 pause（2026-07-17）
+- [x] 以正式 spool 跑超過三次完整 tick：active retry 由 7 降至 3，目標 checkpoint `446274 → 450314 → 453526 → 455136 → 461156`，舊 attempts 維持 3、dead-letter 維持 57、hard-timeout 最後紀錄仍為 19:29:15；Hermes memory job 保持 pause
 
 ---
 

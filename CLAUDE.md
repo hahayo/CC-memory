@@ -141,8 +141,10 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 ## 決策文件工作流程
 
 - 在進行重大架構、系統行為或 config（設定）決策前，先讀 `docs/decisions/INDEX.md` 與相關決策卡。
+- 使用者或負責人明確拍板後，立即使用 `/save-decision` 建立草稿；不要等到 session（工作階段）結束或 auto compact（自動壓縮）。
 - 只有使用者或負責人明確拍板的決策，才可寫入 `docs/decisions/_draft/`；agent（代理程式）不得自行接受決策。
 - 若新討論只與既有決策卡相似，只能標為「未持久化推測」，不得視為已接受的決策。
 - `supersedes`（取代）、`depends_on`（依賴）、`conflicts_with`（衝突）與 `related_to`（相關）四種持久化關係都須人工確認，不得由 agent 自動判定。
 - 翻案時必須建立新卡，並以 `supersedes` 指向舊卡；不得直接改寫舊卡來掩蓋歷史。
 - 決策接受後，須在同一個 commit（提交）更新 `docs/decisions/INDEX.md`，並執行 `npm run decisions:validate`。
+- 長任務的執行進度、暫時推論與待辦寫入 plan（計畫）、progress（進度）或 handoff（交接），不得冒充正式決策。

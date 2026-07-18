@@ -1,9 +1,45 @@
 import { describe, expect, it, vi } from 'vitest'
 import { assessAutoCaptureExecution, createEmptyAutoCaptureAlertState, type AutoCaptureAlertState } from '../../src/services/auto-capture-alerts.js'
-import { runAutoCaptureSupervisorTick, type RunAutoCaptureWorkerInput } from '../../scripts/run-auto-capture-supervisor.js'
+import {
+  runAutoCaptureSupervisorTick,
+  sendAutoCaptureSupervisorTestAlert,
+  type RunAutoCaptureWorkerInput,
+} from '../../scripts/run-auto-capture-supervisor.js'
 import { maskDsnCredentials } from '../../scripts/run-auto-capture.js'
 
 describe('scripts/run-auto-capture-supervisor', () => {
+  it('sends a standalone bot test without running the worker or mutating alert state', async () => {
+    const sentMessages: string[] = []
+    const runWorker = vi.fn()
+    const saveState = vi.fn()
+
+    await sendAutoCaptureSupervisorTestAlert(
+      {
+        alertTarget: {
+          botToken: 'dedicated-bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        now: () => new Date('2026-07-15T10:00:00.000Z'),
+        hostname: () => 'cc-memory-host',
+        runWorker,
+        saveState,
+        sendTelegram: async (_target, text) => {
+          sentMessages.push(text)
+        },
+      }
+    )
+
+    expect(sentMessages).toHaveLength(1)
+    expect(sentMessages[0]).toContain('CC-memory Telegram alert test')
+    expect(sentMessages[0]).toContain('host=cc-memory-host')
+    expect(runWorker).not.toHaveBeenCalled()
+    expect(saveState).not.toHaveBeenCalled()
+  })
+
   it('sends a failure alert on first failing fingerprint', async () => {
     const sentMessages: string[] = []
     let savedState = createEmptyAutoCaptureAlertState()

@@ -1,0 +1,18 @@
+[Unit]
+Description=CC-memory Todoist incremental sync
+Documentation=file:%h/CC_project/CC-memory/docs/personal-hub/prod-runbook.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.ccm-personal-url
+ConditionPathExists=%h/.ccm-todoist-token
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+WorkingDirectory=%h/CC_project/CC-memory
+Environment=CC_MEMORY_PERSONAL_URL_FILE=%h/.ccm-personal-url
+Environment=CC_MEMORY_TODOIST_TOKEN_FILE=%h/.ccm-todoist-token
+Environment=PATH=/home/haha/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/CC_project/CC-memory/ops/systemd/run-todoist-sync.sh
+StandardOutput=journal
+StandardError=journal

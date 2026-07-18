@@ -30,9 +30,9 @@
 | `INDEX.md`（本檔） | track 導覽 |
 | `decisions/{README,INDEX,_draft/,DEC-*.md}` | Git（版本控制）決策卡：跨 Claude Code／Codex 共用的決策 SSOT（單一真相來源），涵蓋規範、索引、候選草稿與正式決策 |
 | `auto-capture-v0.5/{spec,plan,task}.md` | Track 1 v0.5 auto-capture SDD（Spec-Driven Development，規格驅動開發）三件套；取代 v0.4 Phase C 休眠設計 |
-| `auto-capture-v0.5/memory-ops-cutover.md` | Hermes→systemd 維運遷移手冊（Active） |
+| `auto-capture-v0.5/memory-ops-cutover.md` | Claude Code／Codex hook-driven auto-capture＋reminder/Todoist systemd timers 維運遷移手冊（Active） |
 | `auto-capture-v0.5/benchmark-fixtures.md` | benchmark（基準測試）查詢 fixture（固定資料）集（Active） |
-| `auto-capture-v0.5/m4-settings-draft.md` | M4 SessionStart 注入 settings 草稿（Active；待 user review 後落地） |
+| `auto-capture-v0.5/m4-settings-draft.md` | Claude Code／Codex SessionStart settings 落地紀錄（Active；2026-07-17 applied，Codex trust 待人工完成） |
 | `auto-capture-v0.5/m4-gate-estimator-accuracy.json` | M4 token estimator 精度量測紀錄（Active） |
 | `auto-capture-v0.5/oq1-gate-report.json` | OQ1 PostToolUse payload gate 報告（Active） |
 | `personal-hub/prod-runbook.md` | 維運手冊（2026-07-05 已更新為 Coolify 拓樸） |
@@ -51,7 +51,7 @@
 | 檔案 | 標記 |
 |---|---|
 | `auto-capture-v0.5/m2a-settings-draft.md` | Historical（M2a hook settings 草稿；已由 M4 草稿取代） |
-| `auto-capture-v0.5/m2b-cron-draft.md` | Historical（hermes cron draft；已降級，systemd 路線為主） |
+| `auto-capture-v0.5/m2b-cron-draft.md` | Historical（Hermes cron draft；已由 hook-driven systemd oneshot 取代） |
 | `next-session-handoff.md` | SUPERSEDED（2026-04-23 的交接，主線早已轉向） |
 | `TODO.md` | ARCHIVED（v0.1 checklist，2026-02 後未維護） |
 | `plans/2026-02-01-cc-memory-design.md` | HISTORICAL（v0.1 原始設計） |

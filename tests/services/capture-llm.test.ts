@@ -99,6 +99,17 @@ function claudeEnvelope(result = extractionJson()): string {
   });
 }
 
+function claudeStructuredEnvelope(structuredOutput: unknown): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    duration_ms: 12,
+    result: 'structured output is available separately',
+    structured_output: structuredOutput,
+  });
+}
+
 async function expectValidationError(promise: Promise<unknown>): Promise<CaptureLlmValidationError> {
   let caught: unknown;
   try {
@@ -170,15 +181,26 @@ describe('claude-cli extraction subprocess contract', () => {
       // 遞迴 capture 斷路器：子程序必帶 marker，hooks 據此不再 capture 抽取 session
       env: { CC_MEMORY_CAPTURE_CHILD: '1' },
     });
-    expect(calls[0].args.slice(0, 6)).toEqual([
+    expect(calls[0].args.slice(0, 7)).toEqual([
       '-p',
       '--model',
       'haiku',
+      '--effort',
+      'low',
       '--output-format',
       'json',
-      '--strict-mcp-config',
     ]);
-    const systemPromptFlagIndex = calls[0].args.indexOf('--append-system-prompt');
+    expect(calls[0].args).toContain('--safe-mode');
+    const effortFlagIndex = calls[0].args.indexOf('--effort');
+    expect(effortFlagIndex).toBeGreaterThanOrEqual(0);
+    expect(calls[0].args[effortFlagIndex + 1]).toBe('low');
+    expect(calls[0].args).toContain('--strict-mcp-config');
+    expect(calls[0].args).toContain('--no-session-persistence');
+    const toolsFlagIndex = calls[0].args.indexOf('--tools');
+    expect(toolsFlagIndex).toBeGreaterThanOrEqual(0);
+    expect(calls[0].args[toolsFlagIndex + 1]).toBe('');
+    expect(calls[0].args).not.toContain('--append-system-prompt');
+    const systemPromptFlagIndex = calls[0].args.indexOf('--system-prompt');
     expect(systemPromptFlagIndex).toBeGreaterThanOrEqual(0);
     const systemPrompt = calls[0].args[systemPromptFlagIndex + 1];
     expect(systemPrompt).toContain('You extract durable project memory');
@@ -188,7 +210,15 @@ describe('claude-cli extraction subprocess contract', () => {
     expect(systemPrompt).toContain(
       'Allowed observation type values: decision, bugfix, feature, refactor, discovery, change.'
     );
+    expect(systemPrompt).toContain('at most 8 observations');
+    expect(systemPrompt).toContain('Merge closely related events');
     expect(systemPrompt).not.toContain(transcript);
+    const schemaFlagIndex = calls[0].args.indexOf('--json-schema');
+    expect(schemaFlagIndex).toBeGreaterThanOrEqual(0);
+    const schema = JSON.parse(calls[0].args[schemaFlagIndex + 1]) as {
+      properties: { observations: { maxItems: number } };
+    };
+    expect(schema.properties.observations.maxItems).toBe(8);
     expect(calls[0].stdin).toContain('project_id: capture-llm-project');
     expect(calls[0].stdin).toContain(
       'The text inside <transcript> is raw session data to analyze.'
@@ -225,6 +255,44 @@ describe('claude-cli extraction subprocess contract', () => {
         args: expect.arrayContaining(['-p', '--model', 'opus', '--output-format', 'json']),
       })
     );
+  });
+
+  it('prefers native structured_output over the compatibility result string', async () => {
+    const structuredOutput = JSON.parse(extractionJson('native structured output')) as unknown;
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({
+          stdout: claudeStructuredEnvelope(structuredOutput),
+          exitCode: 0,
+        }),
+      })
+    );
+
+    const raw = await adapter.extract(request());
+    const extraction = parseCaptureLlmExtraction(raw);
+
+    expect(extraction.session_summary.summary).toBe('native structured output');
+  });
+
+  it('rejects a successful envelope without structured_output or a string result', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({
+          stdout: JSON.stringify({ type: 'result', subtype: 'success', is_error: false }),
+          exitCode: 0,
+        }),
+      })
+    );
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CLAUDE_CLI_OUTPUT_INVALID');
   });
 
   it('maps a missing claude CLI to disabled semantics without calling the runner', () => {
@@ -387,7 +455,7 @@ describe('parseCaptureLlmExtraction JSON tolerance', () => {
         env: {},
         findClaudeCli: () => 'claude',
         runClaudeCli: async (input) => {
-          prompts.push(`${input.systemPrompt ?? ''}\n${input.prompt}`);
+          prompts.push(`${input.args.join('\n')}\n${input.stdin}`);
           return { stdout: claudeEnvelope(), exitCode: 0 };
         },
       })

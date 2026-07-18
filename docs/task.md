@@ -13,6 +13,13 @@
 > - v1.3.1（2026-04-21）：Phase 2 Gate 加 idempotency 重複 insert 驗證；feedback.ts 拆 `recordSearchQuery`(A) vs `recordFeedback`(延 5-B)
 > - **v0.4（2026-04-23）**：Phase B 整塊標取消；新增 Phase C M1~M5；端對端驗收加 Phase C 清單
 
+## Security follow-up（2026-07-16，延後、未阻擋 Employee Dashboard 部署）
+
+- [ ] 輪替 DBHub 唯讀憑證，並確認新憑證仍只具查詢權限。
+- [ ] 輪替兩個 GitHub deploy webhook secret，逐一驗證 Coolify 自動部署後再撤銷舊值。
+- [ ] 輪替 CC-memory PostgreSQL 密碼，更新所有合法 client 後撤銷舊密碼。
+- [ ] 建立不含 `read:sensitive` 的日常 Coolify token；高權限 token 僅作 break-glass 並分開保存。權限差異以 Coolify 官方 [API authorization](https://coolify.io/docs/api-reference/authorization) 為準。
+
 ---
 
 # Phase A — 本期交付（MCP only）

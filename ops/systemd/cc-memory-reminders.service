@@ -1,0 +1,18 @@
+[Unit]
+Description=CC-memory reminder delivery poller
+Documentation=file:%h/CC_project/CC-memory/docs/personal-hub/prod-runbook.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.ccm-personal-url
+ConditionPathExists=%h/.ccm-reminders.env
+
+[Service]
+Type=oneshot
+TimeoutStartSec=240
+WorkingDirectory=%h/CC_project/CC-memory
+EnvironmentFile=%h/.ccm-reminders.env
+Environment=CC_MEMORY_PERSONAL_URL_FILE=%h/.ccm-personal-url
+Environment=PATH=/home/haha/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/CC_project/CC-memory/ops/systemd/run-reminders.sh
+StandardOutput=journal
+StandardError=journal

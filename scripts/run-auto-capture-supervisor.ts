@@ -63,6 +63,26 @@ export interface AutoCaptureSupervisorTickResult {
   state: AutoCaptureAlertState
 }
 
+export async function sendAutoCaptureSupervisorTestAlert(
+  options: AutoCaptureSupervisorOptions = {},
+  deps: AutoCaptureSupervisorDeps = {}
+): Promise<void> {
+  const now = deps.now?.() ?? new Date()
+  const hostname = deps.hostname?.() ?? resolveHostname()
+  const readAlertTarget = deps.readAlertTarget ?? (() => resolveAlertTargetFromFile(options))
+  const sendTelegram = deps.sendTelegram ?? sendAutoCaptureTelegramMessage
+  const target = await readAlertTarget()
+  await sendTelegram(
+    target,
+    [
+      'CC-memory Telegram alert test',
+      `host=${hostname}`,
+      `time=${now.toISOString()}`,
+      'source=run-auto-capture-supervisor --test-alert',
+    ].join('\n')
+  )
+}
+
 async function readTrimmedFile(filePath: string, label: string): Promise<string> {
   const content = await readFile(filePath, 'utf8')
   const value = content.trim()
@@ -300,7 +320,10 @@ const isMain =
   path.basename(process.argv[1]).replace(/\.[cm]?[jt]s$/, '') === 'run-auto-capture-supervisor'
 
 if (isMain) {
-  runAutoCaptureSupervisorTick()
+  const operation = process.argv.includes('--test-alert')
+    ? sendAutoCaptureSupervisorTestAlert().then(() => ({ exitCode: 0 }))
+    : runAutoCaptureSupervisorTick()
+  operation
     .then((result) => {
       process.exitCode = result.exitCode
     })

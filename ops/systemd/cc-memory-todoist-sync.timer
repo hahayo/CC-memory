@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CC-memory Todoist sync every 15 minutes
+Documentation=file:%h/CC_project/CC-memory/docs/personal-hub/prod-runbook.md
+
+[Timer]
+Unit=cc-memory-todoist-sync.service
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

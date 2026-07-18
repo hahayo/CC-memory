@@ -11,18 +11,22 @@
 ## Architecture（架構）
 
 ```
-Claude Code session
+Claude Code / Codex session
   │
   ├─ PostToolUse hook（掛鉤）
   │    └─ O(1) append thin JSONL 到本機 spool（緩衝暫存區）
   │
   ├─ Stop hook
-  │    └─ append sentinel（哨兵）{ transcript_path, hwm_offset }
+  │    └─ append sentinel（哨兵）後 quick-kick systemd oneshot（快速啟動單次服務）
+  │
+  ├─ SessionStart hook
+  │    ├─ quick-kick backlog（快速啟動積壓工作）
+  │    └─ feature flag on 時注入 Recent Activity index（近期活動索引）
   │
   ▼
 ~/.cache/cc-memory/spool/<project>/<session>.jsonl
   │
-  └─ hermes cron（排程任務）cc-memory-auto-capture */5min
+  └─ cc-memory-auto-capture.service（hook-driven、無 timer、跑完即退）
        ├─ health check（健康檢查）SSH tunnel（通道）與 project DB（專案資料庫）
        ├─ file lock（檔案鎖）+ rotation（輪替）+ high-water mark（高水位）commit
        ├─ batch harvest（批次收割）transcript 增量窗口
@@ -31,18 +35,18 @@ Claude Code session
        ├─ write rollup → project_memories(type='session')
        └─ write observations → observations
              │
-             ├─ SessionStart injector（注入器）→ Recent Activity index（索引）
+             ├─ SessionStart injector（注入器）→ Recent Activity index
              └─ Retrieval（檢索）→ search → timeline → get_observations
 ```
 
-> 2026-07-12 註：圖中「hermes cron cc-memory-auto-capture」排程路線已規劃遷移至 systemd user timer；遷移手順見 memory-ops-cutover.md。
+> 2026-07-16 決策：auto-capture 由 Stop／SessionStart hooks 驅動 systemd user service（使用者層級服務），不設 timer；reminder／Todoist 才使用 systemd timers。遷移手順見 `memory-ops-cutover.md`。
 
 ### 模組邊界
 
 | 模組 | 責任 | 不做 |
 |---|---|---|
 | hook wrappers（掛鉤包裝） | 解析 hook input（輸入）、SKIP_TOOLS、append local spool | DB 寫入、LLM、重試 |
-| spool service（緩衝服務） | atomic append（原子附加）、lock、HWM、rotation、dead-letter（死信） | 解析 LLM 內容 |
+| spool service（緩衝服務） | atomic append（原子附加）、lock、capture state v2、rotation、dead-letter（死信） | 解析 LLM 內容 |
 | capture worker（擷取工作程序） | claim batch（認領批次）、呼叫 LLM、驗 schema、寫 DB | 常駐 daemon（守護程序） |
 | observation service（觀察紀錄服務） | insert/query/archive observations | personal 自動採集 |
 | retrieval service（檢索服務） | search 輕索引、timeline、batch get | 改破 `SearchResultEnvelope` |
@@ -125,7 +129,7 @@ v0.5 不建遠端 pending queue（待處理佇列）。hook 不走網路是硬�
 ### 新增
 
 ```
-src/services/capture-spool.ts          # spool append/lock/HWM/rotation/dead-letter
+src/services/capture-spool.ts          # spool append；worker 管 lock/state/rotation/dead-letter
 src/services/capture-worker.ts         # harvest + LLM + schema validation + DB write
 src/services/observations.ts           # insert/search-index/timeline/get/archive
 src/services/capture-llm.ts            # capture LLM adapter（claude-cli / gemini-flash）+ schema parser
@@ -133,11 +137,13 @@ src/services/recent-activity.ts        # SessionStart index builder
 src/tools/timeline.ts                  # cc_memory_timeline
 src/tools/get-observations.ts          # cc_memory_get_observations
 src/tools/refine-delete.ts             # cc_memory_refine_delete
-scripts/run-auto-capture.ts            # hermes cron worker
+scripts/run-auto-capture.ts            # 非常駐 capture worker；由 supervisor 啟動
 scripts/run-auto-capture-supervisor.ts # supervisor 模式入口（systemd 路徑；已交付）
 scripts/probe-claude-hooks.ts          # M2a payload/offset gate
 hooks/post-tool-use-capture.sh         # O(1) spool append
-hooks/stop-capture-sentinel.sh         # sentinel append
+hooks/stop-capture-sentinel.sh         # sentinel append 後 quick-kick service
+hooks/session-start-inject.sh          # quick-kick backlog；flag on 才注入索引
+hooks/kick-auto-capture.sh             # systemctl --no-block fail-open helper
 tests/services/*capture*.test.ts       # spool/worker/LLM validation
 tests/services/observations.test.ts    # DB + timeline/get
 tests/mcp-observations.test.ts         # MCP tools
@@ -179,27 +185,27 @@ claude-mem plugin   # 併用期保留
 | permission（權限） | 目錄 0700、檔案 0600 | chmod test |
 | atomic append | `open(O_APPEND)` + 單行 JSON + newline；失敗吞掉 | concurrent append 100 次無破行 |
 | file lock | worker processing（處理）時鎖 session spool；hook append 不等待長鎖 | worker/hook race 測試 |
-| HWM commit | DB transaction（交易）成功後才更新 `.hwm`；LLM 失敗不前進。例外：第 5 次終局失敗（park）時 HWM 前進越過該窗；malformed spool 行 terminal discard（終局丟棄）時 HWM 亦前進 | crash recovery 測試 |
-| empty transcript window | transcript slice 空字串或 `trim()` 後為空時視為 skip：不呼叫 LLM、不寫 dead-letter，直接 HWM commit | empty window 測試 |
-| max window chunking | transcript window 超過 `CC_CAPTURE_MAX_WINDOW_BYTES` 時依 UTF-8 字元邊界切成多個 chunk；各 chunk 共用 canonical rollup，`observed_at` 微增序號跨 chunk 延續；任一 chunk 終局失敗（第 5 次 park）→ 中止該窗口與該 session 本 tick 後續窗；前已成功 chunk 不回滾 | chunk / UTF-8 / partial failure 測試 |
-| idempotency | content hash + DB unique index 擋重複 | 重跑同 spool 不重複 insert |
-| rotation | 單檔 >10MB 或 session 結束 24h 後 rotate `.sealed` | rotation 測試 |
+| capture state commit | 每個 chunk DB transaction（交易）成功後原子保存 path checkpoint；整個 spool snapshot（快照）完成後才推進 spool cursor。state 損壞 fail closed | crash recovery / corrupt state 測試 |
+| empty transcript chunk | 先按原始 bytes 切 chunk，再移除 injection marker；過濾後空白時不呼叫 LLM、不寫 dead-letter，但保存原始 byte range checkpoint | empty chunk / marker 測試 |
+| max window chunking | transcript range 超過 `CC_CAPTURE_MAX_WINDOW_BYTES` 時依原始 bytes 的 UTF-8 安全邊界切 chunk；各 chunk 共用 canonical rollup，`observed_at` 微增序號跨 chunk 延續；前已成功 chunk 即時保存 checkpoint | chunk / UTF-8 / partial failure 測試 |
+| idempotency | rollup metadata 的可合併 transcript source coverage + DB unique index 擋重複；已覆蓋 range 重播跳過所有 DB 寫入 | commit 後 state 寫入失敗的重播測試 |
+| rotation | 單檔 >10MB 或 session 結束 24h 後一併 seal spool 與 generation state；新同名 spool 從 cursor 0 開新 generation | rotation / 0600 測試 |
 | size cap | 全 spool >500MB 時停止 capture 並 stdout 告警 | flood（洪水）測試 |
-| dead-letter | retry sidecar（`<session>.retry.json`）按窗口 key 跨 tick 累計 attempts：第 1-4 次 hold（不寫 dead-letter、HWM hold、中止該 session 本 tick）；第 5 次 park（寫 `.dead/<hash>.json`、HWM 前進越過該窗、stdout parked-window 行）；429 transient skip（不計 attempts、不寫 dead-letter、HWM hold）；malformed spool 行（非 JSON 垃圾行）skip+計數+告警、HWM 允許越過（terminal discard） | metadata 不含敏感全文；含錯誤碼、attempts 計數 |
-| recovery | worker crash 後下輪從 HWM 重讀，最多造成重複不造成遺失 | at-least-once 測試 |
+| dead-letter | v2 state 以 path hash + 原始 range + content hash 穩定 retry key 跨 tick 累計 attempts：第 1-4 次 hold；第 5 次只 park 該 chunk、保存 checkpoint 並停止該 session 本 tick。有效 path 的來源不可讀／短於 boundary 時改用固定 `TRANSCRIPT_SOURCE_UNAVAILABLE` hash；來源可讀且長度達 boundary 才清除該 retry。429 與 budget yield 不計 attempts | metadata 不含敏感全文或完整本機 path；來源不可用時 `model=none`，warning 只含 path hash prefix/range/attempts |
+| recovery | worker crash 後從各 path checkpoint 重讀；DB source coverage 讓 commit 後 state 寫入失敗可安全重播。歷史資料只由 audit script 產生 `would_replay: false` manifest | at-least-once / dry-run audit 測試 |
 
 ### Hook SKIP_TOOLS policy（掛鉤跳過工具政策）
 
 預設 skip 清單沿用 v0.4 frozen 值：`ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion`。`CC_MEMORY_SKIP_TOOLS` 若設定，語義是**整個覆蓋預設清單**，不是 union（聯集）；空字串代表不 skip 任何 tool。hook 端只做這個廉價集合判斷，完整節流與 retry 留給 worker。
 
-### HWM commit 時機
+### Capture state v2 commit 時機
 
-1. worker 讀取 spool window：`[hwm_offset, current_size)`。
-2. 讀 transcript 增量與 hook events 合成 batch。
-3. 呼叫 LLM 並做 schema validation。
-4. DB transaction 內 upsert rollup + insert observations。
-5. transaction commit 成功後，原子寫 `.hwm.tmp` 再 rename（重新命名）成 `.hwm`。
-6. 任一步失敗：HWM 不前進，下輪重試。例外：第 5 次終局失敗（park）時 HWM 前進越過該窗；malformed spool 行 terminal discard 時 HWM 亦前進；空窗 skip 直接 HWM commit（見 empty transcript window 規格）。
+1. worker 固定本輪 spool snapshot 的 complete-line byte end，載入或由 legacy `.hwm` 前綴建立 `.capture-state.json`。
+2. 依 spool record 順序為每個 transcript path 建 baseline／增量 range；多路徑各自讀取 checkpoint。
+3. 先按原始 transcript bytes 切 UTF-8 安全 chunk，再排除 injection marker，呼叫 LLM 並做 schema validation。
+4. DB transaction 內先檢查 `metadata.capture.transcript_sources`；已完整覆蓋則不執行任何寫入，否則 upsert rollup + insert observations。
+5. 每個 transaction commit 成功後立即原子保存該 path checkpoint；第 5 次終局失敗則只越過失敗 chunk 並停止 session 本 tick。有效 path 的來源不可讀或短於 boundary 時，每 tick 保存同一 stable retry entry（穩定重試項目），第 5 次以 metadata-only dead-letter 隔離該 range。
+6. 只有 snapshot 內所有 record 都已處理、略過或由 checkpoint 證明完成，才原子推進 spool cursor。budget 用盡只回 `yielded`；不改 retry state。
 
 ## Search Contract（搜尋契約）
 
@@ -249,7 +255,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 | `CC_MEMORY_SKIP_TOOLS` | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | hook wrapper | 設定後整個覆蓋預設；空字串代表不 skip |
 | `CC_MEMORY_SPOOL_DIR` | `~/.cache/cc-memory/spool` | hook / worker | 缺值用預設；無法建立時 hook 吞錯、worker 告警 |
 | `CC_MEMORY_SPOOL_MAX_MB` | `500` | worker | 超過上限停止 capture 並 stdout 告警 |
-| `CC_CAPTURE_MAX_WINDOW_BYTES` | claude-cli 預設 98304（96 KiB）；其他 provider 262144（256 KiB）；顯式設定則優先 | capture worker | parse 失敗或小於 4 bytes 用 provider 預設；超過上限的 transcript window 依 UTF-8 邊界分塊 |
+| `CC_CAPTURE_MAX_WINDOW_BYTES` | claude-cli 預設 32768（32 KiB）；其他 provider 262144（256 KiB）；顯式設定則優先 | capture worker | parse 失敗或小於 4 bytes 用 provider 預設；超過上限的 transcript window 依 UTF-8 邊界分塊；chunk timeout／prompt-too-long 時原子保存 split hint 並二分，跨 tick 不重試父 chunk |
 | `CC_MEMORY_INCLUDE_OBSERVATIONS` | `on` | search service | `off` 時 search 只回 manual/rollup |
 | `CC_MEMORY_INJECT_RECENT` | `off` | SessionStart injector | off 時 stdout 空 |
 | `CC_MEMORY_INJECT_TOKEN_BUDGET` | `1200` | SessionStart injector | 超過先截 observation ids，再截 summary text |
@@ -311,9 +317,15 @@ Gate：
 - capture LLM adapter（原交付 Gemini Flash；2026-07-07 預設改 claude-cli，見 spec 紅線 3）、JSON schema validation、dead-letter。
 - rollup + observations 寫入 transaction。
 - per-session canonical rollup upsert；同 session 多個 harvest window 只更新同一筆 rollup。
-- hermes cron draft（草稿）註冊說明，draft-first 不直接改使用者 settings（設定）。
+- 2026-07-15 reliability repair（可靠性修復）：capture state v2、多 transcript checkpoint、穩定 chunk retry key、來源遺失第 5 次只隔離該 range、source coverage 冪等、`parked/yielded` summary、只在末筆為 Stop sentinel 時 rotation，以及唯讀 recovery manifest。
+- 2026-07-15 extraction root fix（抽取根治）：Claude CLI 改用 safe mode（安全模式）＋low effort（低思考強度）＋無 tools／無 session persistence＋替換 system prompt＋原生 JSON Schema；最多 8 個合併 observation 並限制欄位大小。維持 Haiku/75s，不增加 timeout。終局失敗第一次 retry 即輸出去識別 warning。
+- split tree 原子保存後，排程必須優先採用內容 hash 仍吻合的最小 nested／ancestor boundary；checkpoint 前進造成下一個 32 KiB parent range 改變時，仍直接處理既有 leaf/sibling，不重新呼叫已知過大的父區間。
+- tick scheduler 在每次 Claude call 前保留 `per-call timeout + 15s`；不足即正常 yield，確保 240s worker budget 可在 270s wrapper hard timeout 前保存 state 並釋放 lock。
+- memory 執行與告警由 Hermes 切至 hook-driven systemd oneshot＋memory 專用 Telegram bot；auto-capture 不設 timer，Hermes memory job 保持 pause。
+- reminder／Todoist 另由 systemd timers 接手；各自手動 service 與一輪 timer 驗證完成後，才 pause 對應 Hermes job。
+- Claude Code／Codex hook settings（掛鉤設定）走 draft-first，不直接覆寫使用者設定。
 
-> 2026-07-12 註：排程推薦路線已改為 systemd（cutover 手順見 memory-ops-cutover.md）；主力機實際切換尚待執行，本段為歷史交付紀錄。
+> 2026-07-16 註：先前 systemd timer 路線已被正式決策取代；現行 cutover 手順見 `memory-ops-cutover.md`。
 
 Gate：
 - 592 tests 不回歸；跑 `npm run build && npm test && npm run lint`。
@@ -321,6 +333,10 @@ Gate：
 - malformed LLM output 不落 DB。
 - 同 spool 重跑不重複 observation。
 - 同 session 兩個 harvest window 只產生一筆 active rollup，`summarize_count/spool_offsets/observation_ids` 更新。
+- budget yield 不增加 retry/dead-letter；多路徑 checkpoint 各自單調前進；LLM 終局失敗或有效 path 來源永久不可用時，第 5 次只隔離該 chunk/range，後續 range 下一 tick 恢復；暫時來源遺失在完整 boundary 恢復後清除 retry 並正常處理。
+- Claude CLI 112,450-byte synthetic worker canary（合成 worker 驗證）以 2 個舊 96 KiB-policy chunks 在 24 秒完成，證明 safe-mode 路徑有效；其後 production 真實內容仍有單一 96 KiB timeout，故最終預設降為 32 KiB並加入 timeout 二分。第一次真實 retry warning 可由獨立 supervisor 判定為 alertable（可告警）。
+- production 受控輪次證據：active retry 由 7 降至 3（皆為既有 `CLAUDE_CLI_TIMEOUT`）；目標 checkpoint `446274 → 450314 → 453526 → 455136 → 461156`，原 retry attempts 維持 3，dead-letter 維持 57，wrapper hard-timeout 最後紀錄停在 2026-07-15 19:29:15。
+- transaction commit 後 state 保存失敗的重播不改 DB；legacy sidecar 只封存不沿用 attempts；rotation 僅封存已 Stop 的 generation state，不封存仍活躍的大 spool。
 
 ### M3：3 層 retrieval（2 天）
 
@@ -417,12 +433,13 @@ v0.5 規則：
 
 ### Phase 2：capture only 併用期
 
-1. hook settings 走 draft-first：產 `.md` 草稿給使用者審，不直接寫 `~/.claude/settings.json`。
-2. hermes cron 新增 `cc-memory-auto-capture` 草稿，對齊既有 `cc-memory-reminders` */5min 與 `todoist-sync` */15min。
-3. `CC_MEMORY_INJECT_RECENT=off`。
-4. 並行 claude-mem 2 週，收 ≥30 筆 auto rollup/observation。
+1. hook settings 走 draft-first：同時產 Claude Code 與 Codex 草稿，不直接寫 `~/.claude/settings.json` 或 `~/.codex/config.toml`。
+2. PostToolUse 只 append；Stop／SessionStart quick-kick `cc-memory-auto-capture.service`，不建立 auto-capture timer。
+3. reminders／Todoist 以 systemd timers 接手，驗證後才逐支 pause Hermes jobs。
+4. `CC_MEMORY_INJECT_RECENT=off`。
+5. 並行 claude-mem 2 週，收 ≥30 筆 auto rollup/observation。
 
-> 2026-07-12 註：排程推薦路線已改為 systemd（cutover 手順見 memory-ops-cutover.md）；主力機實際切換尚待執行，本段為歷史交付紀錄。
+> 2026-07-16 註：現行觸發與切換語意以正式 decision card（決策卡）及 `memory-ops-cutover.md` 為準。
 
 ### Phase 3：quality gate
 
@@ -439,7 +456,7 @@ v0.5 規則：
 | LLM output drift（輸出漂移） | 寫入錯 schema | type guard（型別守門）/JSON schema 驗證，整包 dead-letter |
 | spool flood | 磁碟爆 | 500MB cap + 停止 capture 告警 |
 | PostToolUse payload 改版 | hook 讀不到 tool name | M2a 實測 gate；fallback transcript tail hash |
-| duplicate observations | 檢索污染 | contentHash unique + HWM commit after DB |
+| duplicate observations | 檢索污染 | contentHash unique + transcript source coverage + checkpoint after DB commit |
 | search envelope drift | `search_feedback` 寫壞 | M3 contract tests |
 | injection loop | 注入內容又被摘要 | metadata marker 排除 + 注入不寫 feedback |
 | personal 污染 | 自動採集個人資料 | worker 排除 `__personal__` + observations 0012/0013 CHECK |
@@ -450,12 +467,12 @@ v0.5 規則：
 |---|---|
 | PostToolUse payload/offset 實測 | M2a 前 ✅ **已解除 2026-07-06**（gate PASS，見 `oq1-gate-report.json` 與 spec OQ1 RESOLVED 註記） |
 | 0011-0013 migrations applied to prod project/personal | M2b 前 ✅ **已解除 2026-07-06**（雙側套用 + catalog verify 全綠，紀錄見 `docs/personal-hub/prod-runbook.md` Migration 套用紀錄節） |
-| hermes cron draft review | ✅ closed/historical（systemd cutover 取代，見 memory-ops-cutover.md） |
+| hermes cron draft review | ✅ closed/historical（hook-driven systemd oneshot 取代，見 memory-ops-cutover.md） |
 | Search contract design | M3 前 |
 | CJK token estimate acceptance | M4 前 |
 | ≥30 auto records | M6 品質閘前 |
 
-> 2026-07-12 註：排程推薦路線已改為 systemd（cutover 手順見 memory-ops-cutover.md）；主力機實際切換尚待執行，本段為歷史交付紀錄。
+> 2026-07-16 註：auto-capture 現行路線是 Stop／SessionStart 驅動 systemd oneshot，不設 timer；cutover 手順見 `memory-ops-cutover.md`。
 
 ## Self-Review Checklist
 

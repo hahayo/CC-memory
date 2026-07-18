@@ -6,6 +6,9 @@
 
 | ID | 狀態 | 日期 | 標題 | 決策卡 |
 |---|---|---|---|---|
+| `DEC-20260716T092938Z-cross-client-hook-driven-memory-flow` | active | 2026-07-16 | Claude Code 與 Codex 共用 hooks（掛鉤）驅動記憶流程 | [開啟](./DEC-20260716T092938Z-cross-client-hook-driven-memory-flow.md) |
+| `DEC-20260714T182133Z-keep-parent-session-rollup` | active | 2026-07-15 | 多路徑擷取維持母工作階段彙總 | [開啟](./DEC-20260714T182133Z-keep-parent-session-rollup.md) |
+| `DEC-20260714T170309Z-isolate-only-failed-capture-chunk` | active | 2026-07-15 | 大型語言模型最終失敗僅隔離單一分塊 | [開啟](./DEC-20260714T170309Z-isolate-only-failed-capture-chunk.md) |
 | `DEC-20260711T052245Z-git-first-decision-wiki` | active | 2026-07-11 | 採用 Git-first 決策 Wiki | [開啟](./DEC-20260711T052245Z-git-first-decision-wiki.md) |
 | `ADR-001` | active | 2026-06-09 | Phase 3 隔離策略：RLS → 獨立 Personal DB | [開啟](../personal-hub/decisions/ADR-001-phase3-separate-db.md) |
 

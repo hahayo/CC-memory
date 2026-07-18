@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CC-memory reminder delivery every 5 minutes
+Documentation=file:%h/CC_project/CC-memory/docs/personal-hub/prod-runbook.md
+
+[Timer]
+Unit=cc-memory-reminders.service
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

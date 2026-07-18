@@ -23,6 +23,8 @@ export interface AutoCaptureAssessment {
   rateLimitedCount: number
   malformedCount: number
   transcriptMissingCount: number
+  parkedCount: number
+  yieldedCount: number
   summaryLine: string | null
   problemLine: string | null
   nonSummaryLines: string[]
@@ -127,6 +129,14 @@ function parseTranscriptMissingCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'transcript-missing')
 }
 
+function parseParkedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'parked')
+}
+
+function parseYieldedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'yielded')
+}
+
 function truncateProblemLine(line: string): string {
   if (line.length <= MAX_PROBLEM_LINE_LENGTH) return line
   return `${line.slice(0, MAX_PROBLEM_LINE_LENGTH - 3)}...`
@@ -142,13 +152,16 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const rateLimitedCount = parseRateLimitedCount(summaryLine)
   const malformedCount = parseMalformedCount(summaryLine)
   const transcriptMissingCount = parseTranscriptMissingCount(summaryLine)
+  const parkedCount = parseParkedCount(summaryLine)
+  const yieldedCount = parseYieldedCount(summaryLine)
   const ok =
     result.exitCode === 0 &&
     nonSummaryLines.length === 0 &&
     deadLetterCount === 0 &&
     failedCount === 0 &&
     malformedCount === 0 &&
-    rateLimitedCount === 0
+    rateLimitedCount === 0 &&
+    parkedCount === 0
 
   // Synthesize a problemLine when counts indicate issues but no explicit stdout problem line
   let problemLine: string | null = null
@@ -165,6 +178,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = `malformed=${malformedCount}`
     } else if (deadLetterCount > 0) {
       problemLine = `dead-letter=${deadLetterCount}`
+    } else if (parkedCount > 0) {
+      problemLine = `parked=${parkedCount}`
     } else {
       problemLine = `worker exit=${result.exitCode}`
     }
@@ -189,6 +204,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     rateLimitedCount,
     malformedCount,
     transcriptMissingCount,
+    parkedCount,
+    yieldedCount,
     summaryLine,
     problemLine,
     nonSummaryLines,

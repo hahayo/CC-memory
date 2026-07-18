@@ -54,7 +54,7 @@ rm -rf "$TESTSPOOL"
 
 ## 2. Codex CLI 啟用（hook 端）
 
-Codex（rust CLI ≥ 0.14x）的 hooks 事件與 payload 欄位（`session_id`／`tool_name`／`transcript_path`／`cwd`）與 Claude Code 同構，**同兩支 script 直接可用**。在 `~/.codex/config.toml` 追加：
+Codex 支援 PostToolUse／Stop／SessionStart command hooks（命令掛鉤），本 repo 的 wrappers 已容忍客戶端 payload（承載資料）差異。在 `~/.codex/config.toml` 追加：
 
 ```toml
 [[hooks.PostToolUse]]
@@ -66,44 +66,44 @@ command = "/home/<user>/CC_project/CC-memory/hooks/post-tool-use-capture.sh"
 [[hooks.Stop.hooks]]
 type = "command"
 command = "/home/<user>/CC_project/CC-memory/hooks/stop-capture-sentinel.sh"
+
+[[hooks.SessionStart]]
+matcher = "startup|resume|clear|compact"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/home/<user>/CC_project/CC-memory/hooks/session-start-inject.sh"
+timeout = 10
 ```
 
-（Codex hook command 建議寫**絕對路徑**；`<user>` 換成實際 username。）
+（Codex hook command 建議寫**絕對路徑**；`<user>` 換成實際 username。不要設定 `async = true`，快速返回由 wrapper 內的 `systemctl --no-block` 負責。）
 
-**⚠️ hook trust（信任）**：Codex 的 user hooks 需 trust 過才會執行（依 hook 定義的 sha256）。加完設定後**互動跑一次 `codex`**，在 trust 提示出現時接受；未 trust 前 headless `codex exec` 會**靜默跳過** hooks（不報錯）。驗證是否生效：跑一次 `codex exec "run: echo hi"` 後檢查 `~/.cache/cc-memory/spool/<cwd 專案>/` 是否出現 codex session（uuid v7）的 jsonl。
+**⚠️ hook trust（信任）**：Codex 的非 managed（集中管理）hooks 需信任後才會執行。加完設定後在互動式 Codex 的 `/hooks` 畫面審閱並信任；不要手寫 trust hash（信任雜湊值）。驗證是否生效：完成一次 tool use 並結束 session，檢查 `~/.cache/cc-memory/spool/<cwd 專案>/` 是否出現 Codex session 的 JSONL（逐行 JSON）及 Stop sentinel。
 
-## 3. Worker（排程端）
+## 3. Worker（hook-driven 執行端）
 
-主力機的推薦部署已改成 `systemd` supervisor：見 `docs/auto-capture-v0.5/memory-ops-cutover.md` 與 `ops/systemd/`。Hermes 版 wrapper 只保留作歷史草稿與其他機器的遷移參考。
+每台要執行 auto-capture 的機器都安裝 `cc-memory-auto-capture.service`，並由 Stop／SessionStart hooks quick-kick（快速啟動）。完整手順見 `docs/auto-capture-v0.5/memory-ops-cutover.md` 與 `ops/systemd/`。
 
-（截至 2026-07-12：主力機 PC040200197 尚未執行 systemd 安裝步驟，實際仍由 hermes cron 驅動；遷移手順見 memory-ops-cutover.md §3。）
+auto-capture **不建立 systemd timer、不使用 Hermes cron（定時任務）、也不使用 plain crontab**。PostToolUse 仍只 append spool；Stop 在 sentinel 落盤後啟動 service；SessionStart 啟動 backlog，並由獨立 flag 決定是否注入 Recent Activity。
 
-worker 每 5 分鐘讀本機 spool → claude CLI（haiku）抽取 → 寫 prod DB。若你的機器沒有要裝 `systemd` user timer，也可用 plain crontab；wrapper 範本仍可沿用 `docs/auto-capture-v0.5/m2b-cron-draft.md` 的核心邏輯。
-
-沒有 hermes 的機器用 plain crontab（邏輯相同）：
-
-```cron
-*/5 * * * * /home/<user>/CC_project/CC-memory/scripts/cron-wrapper.sh >> /home/<user>/.cache/cc-memory/worker.log 2>&1
-```
-
-wrapper 核心（自行落地成檔案並 `chmod +x`）：
+安裝該機的 user service：
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-export DATABASE_URL="$(cat "$HOME/.ccm-project-url")"
-export CC_CAPTURE_LLM="${CC_CAPTURE_LLM:-claude-cli}"
-export CC_CAPTURE_CLAUDE_MODEL="${CC_CAPTURE_CLAUDE_MODEL:-haiku}"
-cd "$HOME/CC_project/CC-memory"
-exec npx tsx scripts/run-auto-capture.ts
+install -Dm644 ~/CC_project/CC-memory/ops/systemd/cc-memory-auto-capture.service ~/.config/systemd/user/cc-memory-auto-capture.service
+systemctl --user daemon-reload
+systemctl --user start cc-memory-auto-capture.service
+journalctl --user -u cc-memory-auto-capture.service -n 50 --no-pager
 ```
+
+不要 `enable` 這個 service；它由 hooks 啟動。提醒與 Todoist 的 timers 是 personal-hub 執行責任，依 cutover 手冊另外安裝。
 
 ## 4. 驗證清單
 
 1. `ls ~/.cache/cc-memory/spool/` — 用過 Claude Code／Codex 後有專案目錄
-2. 手動跑一次 wrapper — stdout 出現 `[cc-memory] auto-capture summary: processed=N ...`
+2. 手動 start service — journal 出現 `[cc-memory] auto-capture summary: processed=N ...`
 3. `ls ~/.cache/cc-memory/spool/.dead/ | wc -l` — 應為 0（有 dead 檔時內含 `llm_raw_output` 可診斷）
-4. 到任一 Claude Code session 用 `cc_memory_search` 查該機工作內容 → drill-down `cc_memory_timeline` / `cc_memory_get_observations`
+4. 分別驗證 Claude Code／Codex Stop 與 SessionStart 都會啟動 service，PostToolUse 不會
+5. 到任一 Claude Code session 用 `cc_memory_search` 查該機工作內容 → drill-down `cc_memory_timeline` / `cc_memory_get_observations`
 
 ## 5. 注意事項
 
