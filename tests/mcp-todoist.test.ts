@@ -138,7 +138,7 @@ describe('handler success paths（mock fetch）', () => {
   });
 
   it('cc_todoist_add 映射 priority p1→4 並回 task JSON', async () => {
-    const fn = vi.fn(async () => jsonResponse({ id: 'T1', content: 'x', project_id: null, priority: 4 }));
+    const fn = vi.fn<typeof fetch>(async () => jsonResponse({ id: 'T1', content: 'x', project_id: null, priority: 4 }));
     vi.stubGlobal('fetch', fn);
     const res = await handleToolCall(
       'cc_todoist_add',
@@ -149,13 +149,13 @@ describe('handler success paths（mock fetch）', () => {
       { todoistEnabled: true, todoistToken: 'tok' }
     );
     expect(res.isError).not.toBe(true);
-    const sentBody = JSON.parse(String(fn.mock.calls[0][1].body));
+    const sentBody = JSON.parse(String(fn.mock.calls[0]![1]?.body));
     expect(sentBody.priority).toBe(4);
     expect(okJson(res).id).toBe('T1');
   });
 
   it('cc_todoist_add 用 project_name 單一匹配 → 解析成 id', async () => {
-    const fn = vi.fn();
+    const fn = vi.fn<typeof fetch>();
     fn.mockResolvedValueOnce(jsonResponse({ results: [{ id: 'P7', name: 'Work' }], next_cursor: null }));
     fn.mockResolvedValueOnce(jsonResponse({ id: 'T1', content: 'x', project_id: 'P7' }));
     vi.stubGlobal('fetch', fn);
@@ -167,13 +167,13 @@ describe('handler success paths（mock fetch）', () => {
       OPEN,
       { todoistEnabled: true, todoistToken: 'tok' }
     );
-    const addBody = JSON.parse(String(fn.mock.calls[1][1].body));
+    const addBody = JSON.parse(String(fn.mock.calls[1]![1]?.body));
     expect(addBody.project_id).toBe('P7');
     expect(okJson(res).project_resolution).toBe('name');
   });
 
   it('cc_todoist_add 用 project_name 多重同名 → 不猜、入 Inbox', async () => {
-    const fn = vi.fn();
+    const fn = vi.fn<typeof fetch>();
     fn.mockResolvedValueOnce(
       jsonResponse({ results: [{ id: 'P1', name: 'Work' }, { id: 'P2', name: 'Work' }], next_cursor: null })
     );
@@ -187,13 +187,13 @@ describe('handler success paths（mock fetch）', () => {
       OPEN,
       { todoistEnabled: true, todoistToken: 'tok' }
     );
-    const addBody = JSON.parse(String(fn.mock.calls[1][1].body));
+    const addBody = JSON.parse(String(fn.mock.calls[1]![1]?.body));
     expect(addBody.project_id).toBeUndefined();
     expect(okJson(res).project_resolution).toBe('inbox-ambiguous');
   });
 
   it('cc_todoist_complete → POST /tasks/{id}/close', async () => {
-    const fn = vi.fn(async () => jsonResponse(null));
+    const fn = vi.fn<typeof fetch>(async () => jsonResponse(null));
     vi.stubGlobal('fetch', fn);
     const res = await handleToolCall('cc_todoist_complete', { task_id: 'T9' }, NO_DB, FORCED, OPEN, {
       todoistEnabled: true,
@@ -205,7 +205,7 @@ describe('handler success paths（mock fetch）', () => {
   });
 
   it('cc_todoist_completed 預設近 7 天 + 結構化 JSON', async () => {
-    const fn = vi.fn(async () =>
+    const fn = vi.fn<typeof fetch>(async () =>
       jsonResponse({ results: [{ id: 'C1', content: 'done', completed_at: '2026-06-07T10:00:00Z' }], next_cursor: null })
     );
     vi.stubGlobal('fetch', fn);
@@ -220,7 +220,7 @@ describe('handler success paths（mock fetch）', () => {
   });
 
   it('cc_todoist_list 把 cursor 參數穿到 Todoist 請求（resume 大結果集）', async () => {
-    const fn = vi.fn(async () => jsonResponse({ results: [], next_cursor: null }));
+    const fn = vi.fn<typeof fetch>(async () => jsonResponse({ results: [], next_cursor: null }));
     vi.stubGlobal('fetch', fn);
     const res = await handleToolCall('cc_todoist_list', { cursor: 'page2' }, NO_DB, FORCED, OPEN, {
       todoistEnabled: true,
@@ -231,7 +231,7 @@ describe('handler success paths（mock fetch）', () => {
   });
 
   it('cc_todoist_completed 把 cursor 參數穿到 Todoist 請求', async () => {
-    const fn = vi.fn(async () => jsonResponse({ results: [], next_cursor: null }));
+    const fn = vi.fn<typeof fetch>(async () => jsonResponse({ results: [], next_cursor: null }));
     vi.stubGlobal('fetch', fn);
     const res = await handleToolCall(
       'cc_todoist_completed',

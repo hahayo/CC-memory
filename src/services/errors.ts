@@ -92,16 +92,36 @@ export class TodoistApiError extends BaseServiceError {
 }
 
 /**
- * postgres-js unique violation 偵測。drizzle-orm 對 postgres-js driver 不包裝錯誤，
+ * postgres-js unique violation 偵測。舊版 drizzle-orm 直接拋出 driver error；
+ * 新版會用 DrizzleQueryError 包裝並把原始 PostgresError 放在 `.cause`。
  * 原生 PostgresError 有 `.code` (sqlstate) + `.constraint_name`。
  * @param err - 抓到的錯誤
  * @param constraint - 可選；指定 constraint name 時只配對該 constraint，
  *                     不指定則任何 23505 都算 true
  */
 export function isUniqueViolation(err: unknown, constraint?: string): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: string; constraint_name?: string };
-  if (e.code !== '23505') return false;
-  if (constraint && e.constraint_name && e.constraint_name !== constraint) return false;
-  return true;
+  let current = err;
+  const seen = new Set<object>();
+
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as {
+      code?: string;
+      constraint_name?: string;
+      cause?: unknown;
+    };
+    if (candidate.code === '23505') {
+      if (
+        constraint &&
+        candidate.constraint_name &&
+        candidate.constraint_name !== constraint
+      ) {
+        return false;
+      }
+      return true;
+    }
+    current = candidate.cause;
+  }
+
+  return false;
 }

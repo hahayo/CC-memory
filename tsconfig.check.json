@@ -10,5 +10,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["src/**/*", "scripts/**/*", "tests/**/*"]
+  "include": ["src/**/*", "scripts/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "build"]
 }

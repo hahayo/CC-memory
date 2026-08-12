@@ -9,11 +9,15 @@
     "dev": "tsc --watch",
     "start": "node build/index.js",
     "test": "vitest",
+    "pretest:ci": "npm run build",
     "test:ci": "vitest run",
     "typecheck": "tsc -p tsconfig.check.json",
     "lint": "eslint \"src/**/*.ts\" \"scripts/**/*.ts\" \"tests/**/*.ts\"",
     "clean": "rm -rf build",
     "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts",
+    "archive:capture-backlog": "npx tsx scripts/archive-capture-backlog.ts",
+    "drain:capture": "npx tsx scripts/drain-capture-backlog.ts",
+    "readiness:production": "npx tsx scripts/check-production-readiness.ts",
     "decisions:validate": "node --import tsx scripts/validate-decisions.ts"
   },
   "keywords": [
@@ -31,20 +35,20 @@
     "@google/genai": "^1.39.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "dotenv": "^16.4.0",
-    "drizzle-orm": "^0.38.0",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "@typescript-eslint/eslint-plugin": "^6.13.0",
-    "@typescript-eslint/parser": "^6.13.0",
-    "drizzle-kit": "^0.30.0",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^8.55.0",
     "tsx": "^4.21.0",
     "typescript": "^5.3.0",
-    "vitest": "^1.0.0"
+    "vitest": "^4.1.10"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

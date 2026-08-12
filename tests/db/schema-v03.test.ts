@@ -13,7 +13,7 @@ describe('v0.3 schema: projectMemories new columns', () => {
   it('has idempotencyKey column (text, nullable)', () => {
     const cols = Object.keys(projectMemories);
     expect(cols).toContain('idempotencyKey');
-    const col = (projectMemories as Record<string, unknown>).idempotencyKey as {
+    const col = (projectMemories as unknown as Record<string, unknown>).idempotencyKey as {
       dataType: string;
       notNull?: boolean;
       name?: string;
@@ -26,7 +26,7 @@ describe('v0.3 schema: projectMemories new columns', () => {
   it('has writerHost column (text, nullable)', () => {
     const cols = Object.keys(projectMemories);
     expect(cols).toContain('writerHost');
-    const col = (projectMemories as Record<string, unknown>).writerHost as {
+    const col = (projectMemories as unknown as Record<string, unknown>).writerHost as {
       dataType: string;
       notNull?: boolean;
     };
@@ -38,7 +38,7 @@ describe('v0.3 schema: projectMemories new columns', () => {
   it('has contentHash column (text, nullable) for idempotency payload verification', () => {
     const cols = Object.keys(projectMemories);
     expect(cols).toContain('contentHash');
-    const col = (projectMemories as Record<string, unknown>).contentHash as {
+    const col = (projectMemories as unknown as Record<string, unknown>).contentHash as {
       dataType: string;
       notNull?: boolean;
     };
@@ -52,7 +52,7 @@ describe('v0.3 schema: tasks new columns', () => {
   it('has writerHost column (text, nullable)', () => {
     const cols = Object.keys(tasks);
     expect(cols).toContain('writerHost');
-    const col = (tasks as Record<string, unknown>).writerHost as {
+    const col = (tasks as unknown as Record<string, unknown>).writerHost as {
       dataType: string;
       notNull?: boolean;
     };

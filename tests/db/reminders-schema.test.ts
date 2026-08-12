@@ -26,7 +26,7 @@ describe('Phase 1a schema (unit): tasks reminder columns', () => {
     it(`has ${name} column (timestamptz, nullable)`, () => {
       const cols = Object.keys(tasks);
       expect(cols).toContain(name);
-      const col = (tasks as Record<string, unknown>)[name] as {
+      const col = (tasks as unknown as Record<string, unknown>)[name] as {
         dataType: string;
         notNull?: boolean;
       };
@@ -39,7 +39,7 @@ describe('Phase 1a schema (unit): tasks reminder columns', () => {
   it('has recurrenceIntervalDays column (integer, nullable)', () => {
     const cols = Object.keys(tasks);
     expect(cols).toContain('recurrenceIntervalDays');
-    const col = (tasks as Record<string, unknown>).recurrenceIntervalDays as {
+    const col = (tasks as unknown as Record<string, unknown>).recurrenceIntervalDays as {
       dataType: string;
       notNull?: boolean;
     };
@@ -59,7 +59,7 @@ describe('Phase 1a schema (unit): reminderLog table', () => {
   });
 
   it('scheduledFor / taskId are notNull; writerHost nullable', () => {
-    const r = reminderLog as Record<string, { notNull?: boolean }>;
+    const r = reminderLog as unknown as Record<string, { notNull?: boolean }>;
     expect(r.scheduledFor.notNull).toBe(true);
     expect(r.taskId.notNull).toBe(true);
     expect(r.writerHost.notNull).toBeFalsy();

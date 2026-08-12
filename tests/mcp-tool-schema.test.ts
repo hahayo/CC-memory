@@ -147,13 +147,13 @@ describe('forced-mode relax：只剝 selector，不誤刪其他 top-level 約束
   });
 
   it('property 內層 anyOf 確實存活：cc_task_list.status / cc_task_update.due_date', () => {
-    const list = forcedByName.get('cc_task_list')!.inputSchema as {
+    const list = forcedByName.get('cc_task_list')!.inputSchema as unknown as {
       properties: { status: { anyOf?: unknown[] } };
     };
     expect(Array.isArray(list.properties.status.anyOf)).toBe(true);
     expect(list.properties.status.anyOf!.length).toBe(2);
 
-    const upd = forcedByName.get('cc_task_update')!.inputSchema as {
+    const upd = forcedByName.get('cc_task_update')!.inputSchema as unknown as {
       properties: { due_date: { anyOf?: unknown[] } };
     };
     expect(Array.isArray(upd.properties.due_date.anyOf)).toBe(true);

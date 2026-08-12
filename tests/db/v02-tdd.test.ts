@@ -67,7 +67,7 @@ describe('v0.2 schema TDD (docker test DB)', () => {
     }
     if (createdBotUserIds.length) {
       for (const id of createdBotUserIds) {
-        await sql`DELETE FROM bot_user_state WHERE telegram_user_id = ${id}`;
+        await sql`DELETE FROM bot_user_state WHERE telegram_user_id = ${id.toString()}`;
       }
       createdBotUserIds.length = 0;
     }
@@ -185,22 +185,22 @@ describe('v0.2 schema TDD (docker test DB)', () => {
   describe('bot_user_state', () => {
     it('upserts active_project_id', async () => {
       const userId = BigInt(Date.now());
-      await sql`INSERT INTO bot_user_state (telegram_user_id, active_project_id) VALUES (${userId}, 'proj-a')`;
+      await sql`INSERT INTO bot_user_state (telegram_user_id, active_project_id) VALUES (${userId.toString()}, 'proj-a')`;
       createdBotUserIds.push(userId);
       await sql`UPDATE bot_user_state SET active_project_id = 'proj-b', updated_at = now()
-                WHERE telegram_user_id = ${userId}`;
+                WHERE telegram_user_id = ${userId.toString()}`;
       const rows = await sql<{ active_project_id: string }[]>`
-        SELECT active_project_id FROM bot_user_state WHERE telegram_user_id = ${userId}
+        SELECT active_project_id FROM bot_user_state WHERE telegram_user_id = ${userId.toString()}
       `;
       expect(rows[0].active_project_id).toBe('proj-b');
     });
 
     it('rejects duplicate primary key', async () => {
       const userId = BigInt(Date.now()) + 1n;
-      await sql`INSERT INTO bot_user_state (telegram_user_id) VALUES (${userId})`;
+      await sql`INSERT INTO bot_user_state (telegram_user_id) VALUES (${userId.toString()})`;
       createdBotUserIds.push(userId);
       await expect(
-        sql`INSERT INTO bot_user_state (telegram_user_id) VALUES (${userId})`
+        sql`INSERT INTO bot_user_state (telegram_user_id) VALUES (${userId.toString()})`
       ).rejects.toThrow(/bot_user_state_pkey|duplicate key/);
     });
   });

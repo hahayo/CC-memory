@@ -1,7 +1,7 @@
 // vitest.config.ts
 //
 // CC-memory 測試配置。
-// 關鍵設定：`poolOptions.forks.singleFork: true`
+// 關鍵設定：`fileParallelism: false` + `maxWorkers: 1`
 //
 // 原因：多數 integration tests 共用同一個 test PG（docker cc-memory-test-pg，
 // 單一實例）。Vitest 預設每個 test file 開獨立 worker 並行，會造成：
@@ -20,11 +20,8 @@ export default defineConfig({
     // 防 shell 環境讓 config / scope-policy 啟動期決策走到非測試分支。
     setupFiles: ['tests/setup.ts'],
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        singleFork: true,
-      },
-    },
+    fileParallelism: false,
+    maxWorkers: 1,
     // integration tests 需要等 docker PG 啟動；default 5s 在 CI 偶爾不夠
     testTimeout: 15000,
     hookTimeout: 15000,

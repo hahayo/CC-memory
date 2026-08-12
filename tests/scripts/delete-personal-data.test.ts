@@ -97,7 +97,7 @@ async function countAll(db: Sql): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (const t of ['project_memories', 'tasks', 'reminder_log', 'search_feedback']) {
     const r = await db.unsafe(`SELECT COUNT(*)::int AS n FROM ${t}`);
-    counts[t] = (r[0] as { n: number }).n;
+    counts[t] = (r[0] as unknown as { n: number }).n;
   }
   return counts;
 }
