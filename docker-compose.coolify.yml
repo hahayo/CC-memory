@@ -47,5 +47,41 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
 
+  backup:
+    build:
+      context: .
+      dockerfile: ops/backup/Dockerfile
+    environment:
+      CC_BACKUP_TARGET: ${CC_BACKUP_TARGET}
+      CC_BACKUP_TMP_DIR: /backup-tmp
+      CC_MEMORY_AGE_RECIPIENT: ${CC_MEMORY_AGE_RECIPIENT}
+      CC_MEMORY_R2_BUCKET: ${CC_MEMORY_R2_BUCKET}
+      CC_MEMORY_REQUIRE_ALERTS: "1"
+      CC_MEMORY_ALERT_BOT_TOKEN: ${CC_MEMORY_ALERT_BOT_TOKEN}
+      CC_MEMORY_ALERT_CHAT_ID: ${CC_MEMORY_ALERT_CHAT_ID}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-cc_memory_personal}
+      PGUSER: ${POSTGRES_USER:-cc_memory}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      TZ: Asia/Taipei
+    tmpfs:
+      - /backup-tmp:size=2g,mode=0700,uid=999,gid=999
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -x /app/cc-memory-backup.sh && findmnt -rn -o FSTYPE --target /backup-tmp | grep -qx tmpfs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
 volumes:
   postgres-data:
