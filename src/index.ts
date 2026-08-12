@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CC-memory MCP Server（v0.3 Phase A）
+ * CC-memory MCP Server（v0.5）
  *
  * Phase 2c：改 call `services/*`，不再直接摸 drizzle client 細節。
  * Phase 5-A：`cc_memory_search` 被動 fire-and-forget `recordSearchQuery`。
@@ -13,6 +13,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import packageJson from '../package.json';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -22,7 +23,7 @@ import {
 
 import { isAbsolute } from 'node:path';
 import { statSync } from 'node:fs';
-import { db } from './db/client.js';
+import { closeDb, db } from './db/client.js';
 // alias 避免遮蔽 handleToolCall / buildToolsForMode 的 `config: ScopeConfig` 參數
 // （否則 config.todoistApiToken 取到 ScopeConfig 上不存在的欄位 → Todoist 永遠不啟用）。
 import { config as appConfig } from './config.js';
@@ -880,7 +881,7 @@ export const tools: Tool[] = buildToolsForMode(defaultScopeConfig, defaultToolPo
 // ---------------------------------------------------------------------------
 
 const server = new Server(
-  { name: 'cc-memory', version: '0.3.0' },
+  { name: 'cc-memory', version: packageJson.version },
   { capabilities: { tools: {} } }
 );
 
@@ -1456,10 +1457,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
 // 啟動（被 import 時不跑 main；僅 `node build/index.js` 直接執行時啟動 stdio）
 // ---------------------------------------------------------------------------
 
+const SHUTDOWN_HARD_EXIT_MS = 4_000;
+
 async function main() {
   const transport = new StdioServerTransport();
+  let shuttingDown = false;
+  let signalCount = 0;
+
+  const gracefulShutdown = async (reason: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`[cc-memory] shutdown started: ${reason}`);
+
+    const hardExit = setTimeout(() => {
+      console.error(`[cc-memory] shutdown timed out after ${SHUTDOWN_HARD_EXIT_MS}ms`);
+      process.exit(1);
+    }, SHUTDOWN_HARD_EXIT_MS);
+    hardExit.unref();
+
+    let exitCode = 0;
+    try {
+      await server.close();
+      await closeDb(2);
+    } catch (error) {
+      exitCode = 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[cc-memory] shutdown failed: ${message}`);
+    } finally {
+      clearTimeout(hardExit);
+      process.exitCode = exitCode;
+    }
+  };
+
+  const onSignal = (signal: NodeJS.Signals): void => {
+    signalCount += 1;
+    if (signalCount > 1) {
+      process.exit(1);
+    }
+    void gracefulShutdown(signal);
+  };
+
   await server.connect(transport);
-  console.error('CC-memory MCP server v0.3 started');
+  process.stdin.once('end', () => { void gracefulShutdown('stdin-end'); });
+  process.stdin.once('close', () => { void gracefulShutdown('stdin-close'); });
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+
+  if (process.stdin.readableEnded || process.stdin.destroyed) {
+    void gracefulShutdown('stdin-already-closed');
+  }
+  console.error(`CC-memory MCP server v${packageJson.version} started`);
 }
 
 // 只有「直接被 node 跑」時啟動 stdio server；測試 import 進來不啟。
