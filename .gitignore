@@ -39,3 +39,6 @@ tests/tmp-migrations/
 *.dump
 *.sql.gz
 *.backup
+
+# 正式環境 benchmark（基準測試）報告含真實 query（查詢）／memory title（記憶標題），只保留本機證據
+docs/auto-capture-v0.5/benchmark-[0-9]*.md

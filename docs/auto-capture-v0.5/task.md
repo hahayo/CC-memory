@@ -211,17 +211,35 @@
 - [x] 找出 240s tick 可在尾端啟動 75s call、被 270s wrapper hard-kill 的 budget 缺口；每次 Claude call 前新增 timeout+15s reserve，不足即正常 yielded 並釋放 lock
 - [x] production split hint 深化到 4 KiB 仍出現 75s call，確認剩餘瓶頸非輸入大小；抽取 CLI 明確指定 `--effort low`，不繼承互動式 coding agent 的高思考成本
 - [x] 每次真實 terminal retry 輸出去識別 `retry-pending` warning，第一次就由 supervisor 視為異常；budget yield 維持正常進度
+- [x] retry hold 僅為資訊狀態，不製造 failure／recovery 告警乒乓；跨 tick `held → ok → held` 已有回歸測試（2026-08-12）
+- [x] cap=1 時純 held session 仍推進 round-robin cursor，但不消耗本 tick 唯一處理名額；同 tick 可繼續處理下一個 ready session（2026-08-12）
 - [x] supervisor 新增 `--test-alert`，只測 memory 專用 Telegram bot，不讀 DB、不跑 worker、不改 alert state
-- [x] systemd service 同時要求 `~/.ccm-project-url` 與 `~/.ccm-memory-alert.env`，避免無告警半切換
+- [x] supervisor 直接呼叫時告警缺失預設 soft-disable（軟停用）；repo 正式 systemd service 固定設定 `CC_MEMORY_REQUIRE_ALERTS=1`，缺少或無效告警設定會在 worker 前 hard gate（硬性阻擋）（2026-08-12）
+- [x] production approval guard 改以實際 DB identity 對 canonical production URL，比對時忽略密碼與非 routing query parameters 並正規化 loopback；顯式 URL、自訂 URL 檔或常見等值複本皆須 marker，multihost／encoded hostname／空 database path／`?database=` override fail-closed。marker 同 descriptor 驗 regular file／`0600`／`O_NOFOLLOW`；supervisor 移除 inherited `CC_FORCE_PROJECT_ID`／`DATABASE_URL_PERSONAL` 與 PG 連線目標環境，避免 worker 改走未經 gate 的 DB。focused tests 39/39 PASS（2026-08-12）
+- [x] Gemini embedding 憑證與 capture provider（擷取供應者）解耦；缺 key 明確警告但不阻斷 capture（2026-08-12）
+- [x] 已載入 embedding key 但 rollup／observation 產生向量失敗時，capture 仍寫 `NULL`，同時累加 `embedding-failed` summary 並由 supervisor 視為可告警異常；刻意無 key 的降級不誤計（2026-08-12）
+- [x] embedding backfill 支援 observations、預設 dry-run、鍵集分頁、RPM 節流與連續失敗斷路；dry-run 預設 batch 1000、execute 維持 10，正式 DB 4.59 秒掃描 14,202 筆且零 API／零寫入（2026-08-12）
+- [x] embedding backfill execute 強制顯式 `--key-file`，共用 benchmark 的 `O_NOFOLLOW`／regular file／`0600` 憑證載入器，隔離 `.env` 與 ambient `GEMINI_API_KEY`，只輸出非機密 key identity evidence（身份證據）；focused tests 11/11 PASS（2026-08-12）
+- [x] 新增唯讀 `readiness:production` checker，六個 gate 一對一鏡射 cutover runbook；只讀安全 metadata 與正式 benchmark 報告，unit 漂移／Node 版本／檔案權限可自動 FAIL，外部撤銷、異地復原、人工評分、cutoff／canary／觀察不接受檔案存在或自我聲明漂綠（2026-08-12）
+- [x] 以本輪 5 個實際 CC-memory MCP 工作查詢補足近 7 日真實 query 5/5，production `search_feedback` 唯讀複核皆為 `query_surface=mcp`、`query_project_id=CC-memory`；完成 10 題 keyword baseline，並新增 hard gate 讓非純 `hybrid` 報告一律維持 `PARTIAL`（2026-08-12）
+- [x] benchmark 正式證據鏈 fail-closed：real query SQL 強制 `query_surface='mcp'` 並輸出 mode／timestamp provenance 與 self-selection caveat；claude-mem 搜尋候選透過公開 `/api/session/:id` detail 驗 project 後才取 Top-5；production 全部 active 非個人語料 embedding coverage 未達 100%、缺顯式 0600 regular key file identity 或任何 scope 未證明時一律 `PARTIAL`。2026-08-12 唯讀實跑為 27/14,229，待 backfill 14,202（2026-08-12）
+- [x] benchmark legal-empty 三態：spec 合法的 `observations=[]` 只有在 rollup metadata `observation_ids=[]` 與 DB active count=0 一致時不算 drill-down error；metadata/DB 不一致或 timeline 真失敗仍強制 `PARTIAL`。正式 DB 222 個 active capture rollup 中 7 個零 observation（29–103 discovery tokens），spool/dead/retry 唯讀稽核無 pending 兄弟 chunk；不 replay、不 archive、不從搜尋隱藏。新 worker metadata 以 replay-idempotent `empty_observation_windows` 記錄 range 與 `no_high_value_observations` 原因（2026-08-12）
+- [x] foreground backlog drain：預設 dry-run、共用 flock、強制可驗證 backup、30 分鐘 retry gate、failure／429／idle 斷路與 exit code 契約；execute 在任何 side effect 前共用 supervisor 的 production DB identity／approval marker gate，隔離 DB 不誤擋。focused drain＋supervisor tests 50/50 PASS（2026-08-12）
+- [x] 正式 spool 復原點 `spool-2026-08-11T21-42-01.641Z.tar.gz` 已完整解壓到隔離 `/tmp`：17,539 個 JSONL／18,274 個檔案／36,781,770 bytes，tar/gzip 無錯誤；archive 已收緊為 `0600`、backup dir 為 `0700`，後續建立流程亦有權限回歸測試；此證據只涵蓋備份時間點，不宣稱包含後續 hook append（2026-08-12）
+- [x] project／personal DB 新鮮 custom dump 已建立為 `0600`，兩庫均以 PostgreSQL 18.4 `pg_restore --list`＋`--file=/dev/null` 完整走讀，並實際 restore 到一次性本機 PG18＋pgvector 0.8.3 空庫；兩側皆恢復 8 張 public 表，project 224 memories／14,006 observations、personal 10／0，與備份前基線一致，container 已自動刪除（2026-08-12）
 - [x] Stop sentinel 落盤後 quick-kick `cc-memory-auto-capture.service`；SessionStart 在 injection flag off 時仍 quick-kick；PostToolUse 維持只 append；Claude Code／Codex 共用相同 wrappers
 - [x] hook contract tests（契約測試）覆蓋 Stop 順序、SessionStart flag off、recursion breaker（遞迴中止）、PostToolUse 不啟動及 systemctl fail-open
+- [x] PostToolUse／Stop 缺少 `transcript_path` 時不寫入 spool；Stop 只有 sentinel 成功落盤才 quick-kick（2026-08-12）
+- [x] PostToolUse／Stop 缺少 `session_id` 時 fail-open 但不寫入共同 `unknown.jsonl`，避免 payload 漂移把多個 session 合併成同一 rollup；hook contract tests 11/11 PASS（2026-08-12）
 - [x] 移除 `cc-memory-auto-capture.timer`；新增 reminder 5 分鐘與 Todoist 15 分鐘的 systemd services/timers 及獨立 wrappers，不讀 `~/.hermes/.env`
 - [x] `systemd-analyze verify` 驗證 auto-capture service、reminder/Todoist services 與兩個 task timers 通過；targeted tests 5 files／17 tests PASS（含 wrapper runtime 與 Telegram channel；2026-07-17）
 - [ ] memory 專用 bot 憑證寫入 `~/.ccm-memory-alert.env`（0600），執行 `--test-alert` 並確認收件
 - [x] 建立 `~/.ccm-reminders.env`（0600），並確認既有 `~/.ccm-personal-url`、`~/.ccm-todoist-token` 均為 0600（2026-07-17）
 - [x] 人審設定草稿，備份後把 SessionStart hook 追加到 Claude Code 與 Codex；JSON／TOML 解析 PASS（2026-07-17）
-- [ ] Codex 由使用者在 `/hooks` 審閱並信任新增的 SessionStart hook
+- [x] Codex 的 SessionStart／PostToolUse／Stop hooks 已在 `~/.codex/hooks.json` 安裝，對應 `hooks.state` 均為 enabled 且有 trusted hash（2026-08-12 唯讀複核）
 - [x] 安裝五個 user systemd units；reminder／Todoist 手動 services PASS。auto-capture 不 enable timer，只由 Stop／SessionStart 驅動（2026-07-17）
+- [x] auto-capture installed unit 更新為 repo 審查版並保留舊版備份；daemon-reload、逐位元比對與 marker 缺失 start-skip 實測 PASS（inactive/dead、ConditionResult=no、journal 明列 unmet condition），Fable 5 維運複審 NO BLOCKERS（2026-08-12）
+- [x] 三個 user service 移除 `/home/haha`，改用 `%h`；auto-capture lock 與 archive/drain CLI 同源，fresh home 先建 cache dir，lock-busy exit 75 視為正常不製造 failed unit。三個 installed units 已在 runtime pause 與 marker 缺失下同步、daemon-reload、逐位元比對 PASS；auto-capture 維持 inactive/dead，Fable 5 targeted re-review `FIXED / NO BLOCKERS`（2026-08-12）
 - [x] enable reminder／Todoist timers；17:15 首輪均 PASS，17:17 確認對應 Hermes jobs 已 pause（2026-07-17）
 - [x] 以正式 spool 跑超過三次完整 tick：active retry 由 7 降至 3，目標 checkpoint `446274 → 450314 → 453526 → 455136 → 461156`，舊 attempts 維持 3、dead-letter 維持 57、hard-timeout 最後紀錄仍為 19:29:15；Hermes memory job 保持 pause
 
@@ -364,6 +382,8 @@
 > 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
 
 > 目標：用資料決定是否停用 claude-mem。對比單位是 rollup；observation 是 drill-down。
+
+> **2026-08-12 readiness audit**：正式資料時間與數量門檻已達標，近 7 日真實 MCP query 已為 5/5。最新 `benchmark-2026-08-12.md` 完成固定 5＋真實 5 的 keyword baseline，並以 claude-mem 公開 session detail 對 10/10 題補證 project scope；production active 非個人語料 embedding coverage 為 27/14,229，尚缺 14,202。報告因此是 `PARTIAL`／No-Go 證據，不是正式 Go/No-Go 報告。claude-mem 既有 project metadata 可能包含內容上屬於其他工作的 session，人工標註仍須按結果內容判斷，不能只信 project label（專案標籤）。
 
 ## 6a：Fixture + parser
 
