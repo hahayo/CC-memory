@@ -12,6 +12,7 @@ describe('CC-memory systemd scheduling contracts', () => {
   it('keeps user service paths portable and the capture lock aligned with CLI defaults', () => {
     for (const name of [
       'cc-memory-auto-capture.service',
+      'cc-memory-backup-freshness.service',
       'cc-memory-reminders.service',
       'cc-memory-todoist-sync.service',
     ]) {
@@ -24,6 +25,27 @@ describe('CC-memory systemd scheduling contracts', () => {
       '/usr/bin/flock -n -E 75 %h/.cache/cc-memory/auto-capture-run.lock'
     );
     expect(readUnit('cc-memory-auto-capture.service')).toContain('SuccessExitStatus=75');
+  });
+
+  it('checks committed R2 backup freshness hourly without embedding secrets in units', () => {
+    const service = readUnit('cc-memory-backup-freshness.service');
+    const timer = readUnit('cc-memory-backup-freshness.timer');
+    const wrapper = readUnit('run-backup-freshness.sh');
+
+    expect(service).toContain('Type=oneshot');
+    expect(service).not.toContain('ConditionPathExists=');
+    expect(service).toContain('EnvironmentFile=%h/.ccm-r2.env');
+    expect(service).toContain('EnvironmentFile=%h/.ccm-memory-alert.env');
+    expect(service).toContain(
+      'ExecStart=%h/CC_project/CC-memory/ops/systemd/run-backup-freshness.sh',
+    );
+    expect(service).not.toMatch(/(SECRET_ACCESS_KEY|BOT_TOKEN)=\S+/);
+    expect(timer).toContain('OnCalendar=hourly');
+    expect(timer).toContain('Persistent=true');
+    expect(timer).toContain('RandomizedDelaySec=5min');
+    expect(wrapper).toContain('age-recipient.txt');
+    expect(wrapper).toContain('CC_BACKUP_MAX_AGE_HOURS');
+    expect(wrapper).not.toContain('.hermes');
   });
 
   it('keeps auto-capture hook-driven with a oneshot service and no timer', () => {

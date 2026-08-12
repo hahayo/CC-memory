@@ -1,0 +1,14 @@
+[Unit]
+Description=Check CC-memory committed R2 backups hourly
+Documentation=file:%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
+
+[Timer]
+Unit=cc-memory-backup-freshness.service
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+

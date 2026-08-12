@@ -1,0 +1,17 @@
+[Unit]
+Description=CC-memory committed R2 backup freshness checker
+Documentation=file:%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+WorkingDirectory=%h/CC_project/CC-memory
+EnvironmentFile=%h/.ccm-r2.env
+EnvironmentFile=%h/.ccm-memory-alert.env
+Environment=CC_MEMORY_AGE_RECIPIENT_FILE=%h/.config/cc-memory/age-recipient.txt
+Environment=CC_BACKUP_MAX_AGE_HOURS=26
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/CC_project/CC-memory/ops/systemd/run-backup-freshness.sh
+StandardOutput=journal
+StandardError=journal

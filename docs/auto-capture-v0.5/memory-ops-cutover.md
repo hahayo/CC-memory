@@ -16,7 +16,7 @@
 
 auto-capture 不設 timer，也不做常駐 daemon（背景常駐程序）；service 是跑完即退的 oneshot（單次執行服務）。
 
-> **Cutover status（2026-08-12 Asia/Taipei）**：五個 user-level（使用者層級）units 與 Claude Code／Codex SessionStart 已安裝；reminder／Todoist timers 均在運作，對應 Hermes jobs 已 pause。auto-capture Hermes job 也維持 pause。auto-capture installed unit 已更新為與 repo 逐位元一致：同時要求 `~/.ccm-project-url`、`~/.ccm-auto-capture-production-approved`，並固定 `CC_MEMORY_REQUIRE_ALERTS=1`；舊 unit 備份為 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260812`。marker 缺失時的實際 start 驗收為 `inactive/dead`、`ConditionResult=no`，journal 明列 condition skip，worker 未執行；runtime pause drop-in（執行期暫停覆寫）目前仍保留。memory 專用 `~/.ccm-memory-alert.env` 尚未建立。2026-08-12 readiness audit（就緒稽核）確認資料量與併用時間已達門檻；近 7 日已透過本輪實際 MCP 工作查詢累積 5/5 筆 project-scoped `search_feedback`。10 題 keyword baseline benchmark（關鍵字基線測試）已完成，正式報告實測 production 非個人 active corpus 為 14,229 筆、只有 27 筆有 embedding；因此維持 **PARTIAL／No-Go**。Gemini key 已暴露，仍須輪替。以安全的新 key 完成 100% active corpus backfill、跑正式 hybrid benchmark（混合檢索基準測試）、人工標註三硬指標全過，且 §9 全部閘門依序通過後，才可停用 claude-mem。
+> **Cutover status（2026-08-12 Asia/Taipei）**：五個 user-level（使用者層級）units 與 Claude Code／Codex SessionStart 已安裝；reminder／Todoist timers 均在運作，對應 Hermes jobs 已 pause。auto-capture Hermes job 也維持 pause。auto-capture installed unit 已更新為與 repo 逐位元一致：同時要求 `~/.ccm-project-url`、`~/.ccm-auto-capture-production-approved`，並固定 `CC_MEMORY_REQUIRE_ALERTS=1`；舊 unit 備份為 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260812`。marker 缺失時的實際 start 驗收為 `inactive/dead`、`ConditionResult=no`，journal 明列 condition skip，worker 未執行；runtime pause drop-in（執行期暫停覆寫）目前仍保留。memory 專用 `~/.ccm-memory-alert.env` 已建立為 `0600`，`--test-alert` 已實際送達並由操作人確認。2026-08-12 readiness audit（就緒稽核）確認資料量與併用時間已達門檻；近 7 日已透過本輪實際 MCP 工作查詢累積 5/5 筆 project-scoped `search_feedback`。10 題 keyword baseline benchmark（關鍵字基線測試）已完成，正式報告實測 production 非個人 active corpus 為 14,229 筆、只有 27 筆有 embedding；因此維持 **PARTIAL／No-Go**。暴露的舊 Gemini key 已由操作人在 provider 端撤銷，新 key 已安裝為 `0600` 並以 1536 dimensions smoke test（維度煙霧測試）通過；仍須完成 14,202 筆 embedding backfill、正式 hybrid benchmark（混合檢索基準測試）、人工標註三硬指標全過，且 §9 全部閘門依序通過後，才可停用 claude-mem。
 
 ## 1. 準備獨立憑證與連線檔
 
@@ -96,7 +96,54 @@ production canary 與停用 claude-mem 前，除了 spool archive，project 與 
 
 備份前基線：project `project_memories=224`、`observations=14006`；personal `project_memories=10`、`observations=0`。兩份 dump 隨後已實際 restore 到一次性本機 `pgvector/pgvector:pg18` container 的獨立空庫；兩側均恢復 8 張 public tables，pgvector 0.8.3 與上述 row counts 完全一致，container 結束後自動刪除且無殘留。真正災難復原仍依 `docs/personal-hub/prod-runbook.md`。
 
-本機可還原不等於災難復原完成。canary 前須把兩份 DB dump 與 §5 產生且驗證通過的 backlog archive 複製到獨立於本機／同一磁碟的 offsite storage（異地儲存），再從異地副本核對大小與 SHA-256。不得把 DB URL、Gemini key 或其他秘密一併封裝。截至 2026-08-12，異地副本尚未完成，因此仍是 No-Go 項目。
+本機可還原不等於災難復原完成。canary 前須把兩份 DB dump 與 §5 產生且驗證通過的 backlog archive 複製到獨立於本機／同一磁碟的 offsite storage（異地儲存），再從異地副本核對大小與 SHA-256。不得把 DB URL、Gemini key 或其他秘密一併封裝。
+
+2026-08-12 已建立 private Cloudflare R2 bucket `cc-memory-backups`，全 bucket 啟用 30 天 Bucket Lock（儲存桶鎖定）；限定該 bucket 的 Object Read & Write token 已實測 Put／List／Head，Delete 回 `409 ObjectLockedByBucketPolicy`。project 與 personal 已各完成一輪 fresh PostgreSQL 18 custom dump → `pg_restore --list` → `pg_restore --file=/dev/null` → age X25519 公鑰加密 → R2 全量讀回 size／SHA-256 比對 → manifest 最後提交：
+
+- project：`backups/v1/project/2026/08/20260812T151738Z-d5fca92d3736a815.manifest.json`
+- personal：`backups/v1/personal/2026/08/20260812T151757Z-62c55a8535f2361c.manifest.json`
+
+兩份 manifest 的真實 freshness checker 結果皆為 PASS，完成時年齡約 0.01 小時。這只證明加密異地副本已 committed（提交完成）且遠端密文與上傳端一致；**尚未**證明私鑰 escrow（託管備援）或從 R2 完整下載、解密與 restore，因此 g1 仍不可轉 PASS。§5 的 immutable backlog archive 也仍須在正式 cutoff 後以相同原則加密上 R2；不得用接受 `file changed as we read it` 的 live tar 冒充一致性 snapshot（快照）。
+
+### 1.4.1 每日 DB 備份與 freshness dead-man
+
+`docker-compose.coolify.yml` 的 `backup` 是長駐 idle container（閒置容器）；每一套 project／personal Coolify compose 各自設定 `CC_BACKUP_TARGET`，並由 Coolify Scheduled Task 每日執行：
+
+```bash
+/app/cc-memory-backup.sh run
+```
+
+容器只持有 DB dump 權限、限定 R2 token、Telegram 告警設定與 age recipient 公鑰，**不得**放 age 私鑰。明文 dump 僅存在 2 GiB `/backup-tmp` tmpfs（記憶體暫存檔案系統）；腳本使用全域 flock、每輪 fresh destination、完整 archive 走讀、append-only object key（只新增物件鍵）及 full readback（全量讀回）驗證。任何一步失敗都不建立 manifest；30 天 lock 下的孤兒密文保留到期，不嘗試刪除。
+
+primary dead-man（主要失聯監測器）的目標部署是 `ops/cloudflare-backup-monitor/` 的 Cloudflare Worker Cron，每小時第 17 分執行。它用 R2 binding 直接讀 bucket，不持有 S3 token；`TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID` 必須用 Wrangler secret（秘密）注入，禁止寫進 `wrangler.jsonc`：
+
+```bash
+cd ops/cloudflare-backup-monitor
+npm ci
+wrangler secret put TELEGRAM_BOT_TOKEN
+wrangler secret put TELEGRAM_CHAT_ID
+wrangler deploy
+```
+
+Worker 對 project／personal manifests 使用與本機 checker 相同的 fail-closed contract（失敗即停止契約）；R2 list/get 例外、manifest 缺失／格式錯誤、recipient／cipher readback 不一致或 age >26 小時都發 Telegram 並讓 scheduled event 失敗。Cloudflare 與 R2 同平台故障時可能同時失去 storage 與 primary monitor，因此仍保留下列本機 timer 作 off-platform tertiary check（平台外第三線檢查），但它不能在 WSL／PC 關機時承擔 24/7 RPO 告警責任。
+
+截至 2026-08-12，Worker 程式、20 項 focused tests（聚焦測試）與 Wrangler dry-run bundle 已通過，但尚未注入 secrets、正式 deploy 或完成 forced-failure 告警驗收；因此 24/7 primary 仍缺位，本機 timer 是目前唯一自動 freshness 監測，且 PC 關機時有告警空窗。
+
+本機 freshness checker 每小時驗證兩個 target 最新 canonical manifest：
+
+```bash
+install -Dm644 ops/systemd/cc-memory-backup-freshness.service ~/.config/systemd/user/
+install -Dm644 ops/systemd/cc-memory-backup-freshness.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user start cc-memory-backup-freshness.service
+systemctl --user enable --now cc-memory-backup-freshness.timer
+```
+
+它讀 `~/.ccm-r2.env`、`~/.ccm-memory-alert.env` 與 `~/.config/cc-memory/age-recipient.txt`，只在 project／personal 都具備 ≤26 小時、PostgreSQL 18 custom dump、指定 recipient、cipher/readback 一致的 manifest 時 PASS；同一故障 6 小時內不重複洗版，恢復時另送一次 Telegram。狀態檔只含 fingerprint（故障指紋）與時間，不含 token、URL、hash 或 recipient。
+
+2026-08-12 23:31 Asia/Taipei 的安裝後驗收：`ConditionResult=yes`，`ExecMainStartTimestamp` 與 `ExecMainExitTimestamp` 均為該次實際執行時間，`Result=success`、`ExecMainStatus=0`；journal 明列 project／personal 兩側 PASS 與各自 `completed_at`／`age_hours`，不是 condition skip（條件略過）。monitor unit 刻意不設 `ConditionPathExists`：R2／alert env 或 recipient 缺失時必須讓 unit 明確失敗，不能靜默 skip。
+
+RPO 必須分開陳述：DB 端災難的資料遺失窗 ≤24 小時（每日 dump 間隔）；本機故障時可能遺失尚未寫入 DB、只存在 active spool 的事件，窗口是 worker 停擺到告警與修復的時間，正常應為分鐘級。active spool 不做會把 live tar 誤當一致性的每日備份；若 worker 刻意 pause 數小時或 backlog 長期超出可容忍窗口，才另做與 §5 cutoff 同級的 verified immutable archive。
 
 ### 1.5 production approval marker
 
@@ -301,6 +348,7 @@ runtime state（執行期狀態）位於：
 ```bash
 npm run readiness:production
 npm run readiness:production -- --json
+npm run backup:freshness -- --json
 ```
 
 exit code：`0` 只保留給所有 gate 都能由機器證明通過的情況；`1` 代表至少一項 `FAIL` 或 `PARTIAL`；`2` 代表沒有已證明失敗，但仍有 `BLOCKED`／`UNKNOWN`；`3` 是 CLI 使用錯誤。provider 端 key 撤銷、異地復原、人工 benchmark、cutoff 授權、canary 與觀察窗都不會因本機檔案或自我聲明而轉成 `PASS`，因此 checker 是 fail-closed advisory（安全失敗的輔助證據），不能取代本節人工簽核。

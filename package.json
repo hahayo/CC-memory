@@ -12,11 +12,12 @@
     "pretest:ci": "npm run build",
     "test:ci": "vitest run",
     "typecheck": "tsc -p tsconfig.check.json",
-    "lint": "eslint \"src/**/*.ts\" \"scripts/**/*.ts\" \"tests/**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\" \"scripts/**/*.ts\" \"ops/**/*.ts\" \"tests/**/*.ts\"",
     "clean": "rm -rf build",
     "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts",
     "archive:capture-backlog": "npx tsx scripts/archive-capture-backlog.ts",
     "drain:capture": "npx tsx scripts/drain-capture-backlog.ts",
+    "backup:freshness": "npx tsx scripts/check-backup-freshness.ts",
     "readiness:production": "npx tsx scripts/check-production-readiness.ts",
     "decisions:validate": "node --import tsx scripts/validate-decisions.ts"
   },
