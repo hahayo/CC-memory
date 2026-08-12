@@ -129,6 +129,35 @@ describe('capture hooks kick the systemd oneshot service', () => {
     ]);
   });
 
+  it('Stop ignores events without a transcript path and does not kick the worker', () => {
+    resetFixture();
+    const unexpectedSpool = join(spoolRoot, 'demo-project', 'session-stop-no-transcript.jsonl');
+
+    const result = runHook(STOP_HOOK, {
+      cwd: '/work/demo-project',
+      session_id: 'session-stop-no-transcript',
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unexpectedSpool)).toBe(false);
+    expect(existsSync(systemctlLog)).toBe(false);
+  });
+
+  it('Stop ignores a JSON null transcript path and does not kick the worker', () => {
+    resetFixture();
+    const unexpectedSpool = join(spoolRoot, 'demo-project', 'session-stop-null-transcript.jsonl');
+
+    const result = runHook(STOP_HOOK, {
+      cwd: '/work/demo-project',
+      session_id: 'session-stop-null-transcript',
+      transcript_path: null,
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unexpectedSpool)).toBe(false);
+    expect(existsSync(systemctlLog)).toBe(false);
+  });
+
   it('SessionStart kicks backlog even when recent-activity injection is disabled', () => {
     resetFixture();
 
@@ -171,6 +200,65 @@ describe('capture hooks kick the systemd oneshot service', () => {
     });
 
     expect(result.status).toBe(0);
+    expect(existsSync(systemctlLog)).toBe(false);
+  });
+
+  it('PostToolUse ignores events without a transcript path', () => {
+    resetFixture();
+    const unexpectedSpool = join(spoolRoot, 'demo-project', 'session-no-transcript.jsonl');
+
+    const result = runHook(POST_TOOL_USE_HOOK, {
+      cwd: '/work/demo-project',
+      session_id: 'session-no-transcript',
+      tool_name: 'Bash',
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unexpectedSpool)).toBe(false);
+    expect(existsSync(systemctlLog)).toBe(false);
+  });
+
+  it('PostToolUse ignores a JSON null transcript path', () => {
+    resetFixture();
+    const unexpectedSpool = join(spoolRoot, 'demo-project', 'session-null-transcript.jsonl');
+
+    const result = runHook(POST_TOOL_USE_HOOK, {
+      cwd: '/work/demo-project',
+      session_id: 'session-null-transcript',
+      tool_name: 'Bash',
+      transcript_path: null,
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unexpectedSpool)).toBe(false);
+    expect(existsSync(systemctlLog)).toBe(false);
+  });
+
+  it.each([
+    ['PostToolUse missing', POST_TOOL_USE_HOOK, { tool_name: 'Bash' }, {}],
+    ['Stop missing', STOP_HOOK, {}, {}],
+    ['PostToolUse null', POST_TOOL_USE_HOOK, { tool_name: 'Bash' }, { session_id: null }],
+    ['Stop null', STOP_HOOK, {}, { session_id: null }],
+  ])('%s session id is ignored instead of writing unknown.jsonl', (
+    _label,
+    hookPath,
+    payloadExtra,
+    sessionExtra,
+  ) => {
+    resetFixture();
+    const transcriptPath = join(testRoot, 'transcript.jsonl');
+    writeFileSync(transcriptPath, '{"event":"missing-session"}\n');
+    const unexpectedSpool = join(spoolRoot, 'demo-project', 'unknown.jsonl');
+
+    const result = runHook(hookPath, {
+      cwd: '/work/demo-project',
+      transcript_path: transcriptPath,
+      ...payloadExtra,
+      ...sessionExtra,
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unexpectedSpool)).toBe(false);
     expect(existsSync(systemctlLog)).toBe(false);
   });
 

@@ -9,10 +9,33 @@ function readUnit(name: string): string {
 }
 
 describe('CC-memory systemd scheduling contracts', () => {
+  it('keeps user service paths portable and the capture lock aligned with CLI defaults', () => {
+    for (const name of [
+      'cc-memory-auto-capture.service',
+      'cc-memory-reminders.service',
+      'cc-memory-todoist-sync.service',
+    ]) {
+      expect(readUnit(name)).not.toContain('/home/haha');
+    }
+    expect(readUnit('cc-memory-auto-capture.service')).toContain(
+      'ExecStartPre=/usr/bin/mkdir -p -m 700 %h/.cache/cc-memory'
+    );
+    expect(readUnit('cc-memory-auto-capture.service')).toContain(
+      '/usr/bin/flock -n -E 75 %h/.cache/cc-memory/auto-capture-run.lock'
+    );
+    expect(readUnit('cc-memory-auto-capture.service')).toContain('SuccessExitStatus=75');
+  });
+
   it('keeps auto-capture hook-driven with a oneshot service and no timer', () => {
     const service = readUnit('cc-memory-auto-capture.service');
 
     expect(service).toContain('Type=oneshot');
+    expect(service).toContain('ConditionPathExists=%h/.ccm-project-url');
+    expect(service).toContain(
+      'ConditionPathExists=%h/.ccm-auto-capture-production-approved'
+    );
+    expect(service).not.toContain('ConditionPathExists=%h/.ccm-memory-alert.env');
+    expect(service).toContain('Environment=CC_MEMORY_REQUIRE_ALERTS=1');
     expect(service).not.toContain('[Install]');
     expect(existsSync(join(SYSTEMD_DIR, 'cc-memory-auto-capture.timer'))).toBe(false);
   });
@@ -26,6 +49,7 @@ describe('CC-memory systemd scheduling contracts', () => {
     expect(service).toContain('Type=oneshot');
     expect(service).toContain('ConditionPathExists=%h/.ccm-personal-url');
     expect(service).toContain('ConditionPathExists=%h/.ccm-reminders.env');
+    expect(service).not.toContain('.ccm-auto-capture-production-approved');
     expect(service).toContain('EnvironmentFile=%h/.ccm-reminders.env');
     expect(service).toContain('ExecStart=%h/CC_project/CC-memory/ops/systemd/run-reminders.sh');
     expect(timer).toContain('OnCalendar=*:0/5');
@@ -45,6 +69,7 @@ describe('CC-memory systemd scheduling contracts', () => {
     expect(service).toContain('Type=oneshot');
     expect(service).toContain('ConditionPathExists=%h/.ccm-personal-url');
     expect(service).toContain('ConditionPathExists=%h/.ccm-todoist-token');
+    expect(service).not.toContain('.ccm-auto-capture-production-approved');
     expect(service).toContain('ExecStart=%h/CC_project/CC-memory/ops/systemd/run-todoist-sync.sh');
     expect(timer).toContain('OnCalendar=*:0/15');
     expect(timer).toContain('Persistent=true');

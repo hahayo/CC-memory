@@ -9,6 +9,7 @@ if [[ -n "${CC_MEMORY_CAPTURE_CHILD:-}" ]]; then
 fi
 
 payload="$(cat 2>/dev/null)"
+capture_written=0
 
 json_get_string() {
   local key="$1"
@@ -56,6 +57,9 @@ main() {
   session_id="$(json_get_string 'session_id')"
   transcript_path="$(json_get_string 'transcript_path')"
   cwd="$(json_get_string 'cwd')"
+  if [[ -z "$session_id" || -z "$transcript_path" ]]; then
+    return 0
+  fi
   project_base="${cwd%/}"
   project_base="${project_base##*/}"
   project_id="$(sanitize_segment "$project_base")"
@@ -78,11 +82,14 @@ main() {
 
   printf '%s\n' "$line" >>"$spool_file" 2>/dev/null || return 0
   chmod 600 "$spool_file" 2>/dev/null || true
+  capture_written=1
   return 0
 }
 
 main
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-bash "$script_dir/kick-auto-capture.sh" >/dev/null 2>&1 || true
+if [[ "$capture_written" == "1" ]]; then
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+  bash "$script_dir/kick-auto-capture.sh" >/dev/null 2>&1 || true
+fi
 exit 0

@@ -471,9 +471,11 @@ function parseClaudeCliRateLimit(stdout: string, model: string): Record<string, 
 
 export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<ClaudeCliRunResult> {
   return new Promise((resolve, reject) => {
+    const childEnv = { ...process.env, ...(input.env ?? {}) };
+    delete childEnv.GEMINI_API_KEY;
     const child = spawn(input.command, input.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...(input.env ?? {}) },
+      env: childEnv,
     });
     let stdout = '';
     let stderr = '';

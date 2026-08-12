@@ -12,7 +12,7 @@ TimeoutStartSec=240
 WorkingDirectory=%h/CC_project/CC-memory
 EnvironmentFile=%h/.ccm-reminders.env
 Environment=CC_MEMORY_PERSONAL_URL_FILE=%h/.ccm-personal-url
-Environment=PATH=/home/haha/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=%h/CC_project/CC-memory/ops/systemd/run-reminders.sh
 StandardOutput=journal
 StandardError=journal

@@ -7,6 +7,7 @@ import {
   appendFileSync,
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -18,7 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -29,6 +30,7 @@ import {
   sanitizeSpoolSegment,
 } from '../../src/services/capture-spool.js';
 import {
+  isCaptureRetryHeld,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
   type CaptureStateV2,
@@ -70,6 +72,11 @@ interface CaptureMetadata {
   transcript_sources?: Array<{ path_hash: string; start: number; end: number }>;
   summarize_count?: number;
   discovery_tokens?: number;
+  empty_observation_windows?: Array<{
+    start: number;
+    end: number;
+    reason: string;
+  }>;
 }
 
 interface RollupRow {
@@ -110,7 +117,7 @@ function makeHarness(overrides: Partial<Pick<TestHarness, 'projectId' | 'session
   return {
     root,
     spoolDir,
-    env: { CC_MEMORY_SPOOL_DIR: spoolDir },
+    env: { CC_MEMORY_SPOOL_DIR: spoolDir, CC_CAPTURE_RETRY_MIN_INTERVAL_MS: '0' },
     projectId,
     sessionId,
     transcriptPath,
@@ -291,6 +298,7 @@ async function runWorker(
     dbHealthCheck?: () => Promise<boolean>;
     stateWriter?: (path: string, state: CaptureStateV2) => Promise<void>;
     stdout?: { write(chunk: string): unknown };
+    generateEmbedding?: (text: string) => Promise<number[] | null>;
   }
 ) {
   return runCaptureWorkerOnce({
@@ -301,7 +309,7 @@ async function runWorker(
     nowMs: input.nowMs,
     writerHost: TEST_WRITER,
     dbHealthCheck: input.dbHealthCheck,
-    generateEmbedding: async () => null,
+    generateEmbedding: input.generateEmbedding ?? (async () => null),
     stateWriter: input.stateWriter,
     stdout: input.stdout,
   });
@@ -584,7 +592,7 @@ describe('capture worker failure contracts without DB', () => {
     expect(existsSync(lockPath(harness))).toBe(true);
   });
 
-  it('honors CC_CAPTURE_MAX_SESSIONS_PER_TICK to keep cron ticks bounded', async () => {
+  it('limits LLM processing to CC_CAPTURE_MAX_SESSIONS_PER_TICK', async () => {
     const first = makeHarness({
       projectId: `capture-worker-max-a-${randomUUID()}`,
       sessionId: `session-a-${randomUUID()}`,
@@ -597,26 +605,219 @@ describe('capture worker failure contracts without DB', () => {
       transcriptPath: join(first.root, 'second.transcript.jsonl'),
     };
     writeFileSync(second.transcriptPath, '', { mode: 0o600 });
-    const firstEnd = await appendWindow(first, {
+    const firstTranscriptEnd = appendTranscriptEntries(first.transcriptPath, [
+      { message: 'first processable session' },
+    ]);
+    const secondTranscriptEnd = appendTranscriptEntries(second.transcriptPath, [
+      { message: 'second processable session' },
+    ]);
+    await appendWindow(first, {
       transcriptStart: 0,
-      transcriptEnd: 0,
+      transcriptEnd: firstTranscriptEnd,
       timestamp: '2026-07-06T10:00:30.000Z',
     });
     await appendWindow(second, {
       transcriptStart: 0,
-      transcriptEnd: 0,
+      transcriptEnd: secondTranscriptEnd,
       timestamp: '2026-07-06T10:00:31.000Z',
     });
-    const llm = mockLlm([]);
+    const llm = mockLlm([
+      rawExtraction({ summary: 'first session processed', observations: [] }),
+      rawExtraction({ summary: 'second session must wait', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
 
-    await expect(runWorker(first, { db: {}, llm })).resolves.toMatchObject({
-      processed: 0,
-      skipped: 1,
+    await expect(runWorker(first, { db: fakeDb, llm })).resolves.toMatchObject({
+      processed: 1,
       deadLettered: 0,
     });
 
-    expect(readState(first).spool.cursor).toBe(firstEnd);
-    expect(existsSync(statePath(second))).toBe(false);
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(first.transcriptPath, 'utf8'),
+    ]);
+  });
+
+  it('does not let a missing transcript consume the processable-session budget', async () => {
+    const missing = makeHarness({
+      projectId: 'capture-worker-budget-a',
+      sessionId: 'session-a-missing',
+    });
+    missing.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    const available: TestHarness = {
+      ...missing,
+      projectId: 'capture-worker-budget-z',
+      sessionId: 'session-z-available',
+      transcriptPath: join(missing.root, 'available.transcript.jsonl'),
+    };
+    writeFileSync(available.transcriptPath, '', { mode: 0o600 });
+
+    await appendCaptureEvent(
+      {
+        session_id: missing.sessionId,
+        project_id: missing.projectId,
+        tool_name: 'Bash',
+        timestamp: '2026-07-06T10:00:30.000Z',
+        transcript_path: '',
+        transcript_offset: 0,
+      },
+      { env: missing.env }
+    );
+    await appendStopSentinel(
+      {
+        project_id: missing.projectId,
+        session_id: missing.sessionId,
+        timestamp: '2026-07-06T10:00:31.000Z',
+        transcript_path: '',
+        hwm_offset: 0,
+      },
+      { env: missing.env }
+    );
+
+    const transcriptEnd = appendTranscriptEntries(available.transcriptPath, [
+      { message: 'processable session must not be starved by missing transcript metadata' },
+    ]);
+    await appendWindow(available, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:32.000Z',
+    });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'available session processed', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(missing, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 1, transcriptMissing: 1 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(available.transcriptPath, 'utf8'),
+    ]);
+    expect(readState(missing).spool.cursor).toBe(statSync(spoolPath(missing)).size);
+    expect(readState(available).spool.cursor).toBe(statSync(spoolPath(available)).size);
+  });
+
+  it('drains a missing transcript after the processable-session budget is exhausted', async () => {
+    const available = makeHarness({
+      projectId: 'capture-worker-budget-a',
+      sessionId: 'session-a-available',
+    });
+    available.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    const missing: TestHarness = {
+      ...available,
+      projectId: 'capture-worker-budget-z',
+      sessionId: 'session-z-missing',
+      transcriptPath: join(available.root, 'missing.transcript.jsonl'),
+    };
+
+    const transcriptEnd = appendTranscriptEntries(available.transcriptPath, [
+      { message: 'processable session consumes the only processing slot' },
+    ]);
+    await appendWindow(available, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:30.000Z',
+    });
+    await appendCaptureEvent(
+      {
+        session_id: missing.sessionId,
+        project_id: missing.projectId,
+        tool_name: 'Bash',
+        timestamp: '2026-07-06T10:00:31.000Z',
+        transcript_path: '',
+        transcript_offset: 0,
+      },
+      { env: missing.env }
+    );
+    await appendStopSentinel(
+      {
+        project_id: missing.projectId,
+        session_id: missing.sessionId,
+        timestamp: '2026-07-06T10:00:32.000Z',
+        transcript_path: '',
+        hwm_offset: 0,
+      },
+      { env: missing.env }
+    );
+    const llm = mockLlm([
+      rawExtraction({ summary: 'available session processed', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(available, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 1, transcriptMissing: 1 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(available.transcriptPath, 'utf8'),
+    ]);
+    expect(readState(available).spool.cursor).toBe(statSync(spoolPath(available)).size);
+    expect(readState(missing).spool.cursor).toBe(statSync(spoolPath(missing)).size);
+  });
+
+  it('does not let a legacy mixed-path session consume the processable-session budget', async () => {
+    const missing = makeHarness({
+      projectId: 'capture-worker-mixed-budget-a',
+      sessionId: 'session-a-mixed-missing',
+    });
+    missing.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    const available: TestHarness = {
+      ...missing,
+      projectId: 'capture-worker-mixed-budget-z',
+      sessionId: 'session-z-available',
+      transcriptPath: join(missing.root, 'mixed-available.transcript.jsonl'),
+    };
+    writeFileSync(available.transcriptPath, '', { mode: 0o600 });
+
+    await appendCaptureEvent(
+      {
+        session_id: missing.sessionId,
+        project_id: missing.projectId,
+        tool_name: 'Bash',
+        timestamp: '2026-07-06T10:00:30.000Z',
+        transcript_path: missing.transcriptPath,
+        transcript_offset: 0,
+      },
+      { env: missing.env }
+    );
+    await appendStopSentinel(
+      {
+        project_id: missing.projectId,
+        session_id: missing.sessionId,
+        timestamp: '2026-07-06T10:00:31.000Z',
+        transcript_path: '',
+        hwm_offset: 0,
+      },
+      { env: missing.env }
+    );
+
+    const transcriptEnd = appendTranscriptEntries(available.transcriptPath, [
+      { message: 'processable session follows a legacy mixed-path spool' },
+    ]);
+    await appendWindow(available, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:32.000Z',
+    });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'available session processed', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(missing, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 1, transcriptMissing: 1 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([
+      readFileSync(available.transcriptPath, 'utf8'),
+    ]);
+    expect(readState(missing).spool.cursor).toBe(statSync(spoolPath(missing)).size);
+    expect(readState(available).spool.cursor).toBe(statSync(spoolPath(available)).size);
   });
 
   it('parks after 5 tick attempts via retry sidecar, then EEXIST dedup on replay', async () => {
@@ -815,6 +1016,56 @@ describe('capture worker failure contracts without DB', () => {
     expect(second).toMatchObject({ processed: 1, yielded: 0, parked: 0 });
     expect(secondLlm.calls.map((call) => call.transcript)).toEqual([lines[1]]);
     expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('counts one budget yield when another spool remains after yielding between chunks', async () => {
+    const first = makeHarness({
+      projectId: 'capture-worker-yield-a',
+      sessionId: 'session-a',
+    });
+    const second: TestHarness = {
+      ...first,
+      projectId: 'capture-worker-yield-z',
+      sessionId: 'session-z',
+      transcriptPath: join(first.root, 'second.transcript.jsonl'),
+    };
+    writeFileSync(second.transcriptPath, '', { mode: 0o600 });
+
+    const { transcriptEnd, cap } = makeChunkedTranscript(first, {
+      lineCount: 2,
+      messageBytes: 160,
+    });
+    first.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    first.env.CC_CAPTURE_TICK_BUDGET_MS = '5';
+    await appendWindow(first, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:10:00.000Z',
+    });
+    const secondTranscriptEnd = appendTranscriptEntries(second.transcriptPath, [
+      { message: 'second spool must remain pending after the same budget yield' },
+    ]);
+    await appendWindow(second, {
+      transcriptStart: 0,
+      transcriptEnd: secondTranscriptEnd,
+      timestamp: '2026-07-06T10:10:01.000Z',
+    });
+
+    const llm = mockLlm([
+      rawExtraction({ summary: 'first chunk', observations: [] }),
+    ]);
+    const fakeDb = {
+      transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }),
+    };
+
+    const result = await runWorker(first, {
+      db: fakeDb,
+      llm,
+      nowMs: () => (llm.calls.length > 0 ? 10 : 0),
+    });
+
+    expect(result).toMatchObject({ processed: 1, yielded: 1 });
+    expect(existsSync(statePath(second))).toBe(false);
   });
 
   it('splits a timed-out large chunk without counting it as a terminal retry', async () => {
@@ -1320,6 +1571,34 @@ describe('capture worker failure contracts without DB', () => {
     expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
   });
 
+  it('reads an explicitly configured transcript snapshot when the original is too short', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'archived transcript prefix remains replayable' },
+    ]);
+    const original = readFileSync(harness.transcriptPath);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:24.000Z',
+    });
+    const snapshotDir = join(harness.root, 'transcript-snapshots');
+    mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+    const sourceHash = createHash('sha256').update(harness.transcriptPath).digest('hex');
+    writeFileSync(join(snapshotDir, `${sourceHash}.jsonl`), original, { mode: 0o600 });
+    writeFileSync(harness.transcriptPath, 'short', { mode: 0o600 });
+    harness.env.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR = snapshotDir;
+    const llm = mockLlm([
+      rawExtraction({ summary: 'archived source replayed', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+
+    const result = await runWorker(harness, { db: fakeDb, llm });
+
+    expect(result).toMatchObject({ processed: 1, transcriptMissing: 0, parked: 0 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([original.toString('utf8')]);
+  });
+
   it('counts a readable but permanently short transcript toward the same five-attempt isolation', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
@@ -1522,6 +1801,40 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
   });
 
+  it('counts malformed spool lines when all transcript boundaries are pathless', async () => {
+    const harness = makeHarness();
+    const sp = resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(join(harness.spoolDir, sanitizeSpoolSegment(harness.projectId)), { recursive: true });
+    const pathlessEvent = JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      tool_name: 'Bash',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      transcript_path: '',
+      transcript_offset: 0,
+    });
+    const pathlessSentinel = JSON.stringify({
+      session_id: harness.sessionId,
+      project_id: harness.projectId,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      transcript_path: '',
+      hwm_offset: 0,
+    });
+    writeFileSync(sp, `this is garbage\n${pathlessEvent}\n${pathlessSentinel}\n`, { mode: 0o600 });
+    const output: string[] = [];
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm: mockLlm([]),
+      stdout: { write: (text: string) => output.push(text) },
+    });
+
+    expect(result).toMatchObject({ malformed: 1, transcriptMissing: 1 });
+    expect(output.join('')).toContain('malformed-spool-lines=1');
+    expect(readState(harness).spool.cursor).toBe(statSync(sp).size);
+  });
+
   it('tick budget stops processing before timeout, preserving HWM at last completed window', async () => {
     const harness = makeHarness();
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
@@ -1552,6 +1865,7 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     });
     // Budget expired before processing sessions
     expect(result.processed).toBe(0);
+    expect(result.yielded).toBe(1);
   });
 
   it('retry sidecar: 429 does NOT increment attempts', async () => {
@@ -1817,9 +2131,188 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(existsSync(statePath(sessionA))).toBe(true);
     expect(existsSync(statePath(sessionB))).toBe(true);
   });
+
+  it('does not let a held session consume the only per-tick processing slot', async () => {
+    const sessionA = makeHarness({
+      projectId: `capture-worker-held-a-${randomUUID()}`,
+      sessionId: `session-held-a-${randomUUID()}`,
+    });
+    sessionA.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    sessionA.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    const endA = appendTranscriptEntries(sessionA.transcriptPath, [{ message: 'held A' }]);
+    await appendWindow(sessionA, {
+      transcriptStart: 0,
+      transcriptEnd: endA,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    await runWorker(sessionA, {
+      db: {},
+      llm: mockLlm([new Error('A enters retry hold')]),
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+
+    const sessionB: TestHarness = {
+      ...sessionA,
+      projectId: `capture-worker-held-z-${randomUUID()}`,
+      sessionId: `session-held-z-${randomUUID()}`,
+      transcriptPath: join(sessionA.root, 'held-b.transcript.jsonl'),
+    };
+    writeFileSync(sessionB.transcriptPath, '', { mode: 0o600 });
+    const endB = appendTranscriptEntries(sessionB.transcriptPath, [{ message: 'processable B' }]);
+    await appendWindow(sessionB, {
+      transcriptStart: 0,
+      transcriptEnd: endB,
+      timestamp: '2026-07-06T10:01:00.000Z',
+    });
+    const cursorFile = join(sessionA.spoolDir, '.tick-cursor.json');
+    if (existsSync(cursorFile)) unlinkSync(cursorFile);
+    const llm = mockLlm([
+      rawExtraction({ summary: 'B processed in the held A tick', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+
+    const result = await runWorker(sessionA, {
+      db: fakeDb,
+      llm,
+      now: new Date('2026-07-06T10:01:00.000Z'),
+    });
+
+    expect(result).toMatchObject({ held: 1, processed: 1 });
+    expect(llm.calls).toHaveLength(1);
+    expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({
+      lastSessionPath: spoolPath(sessionB),
+    });
+  });
+
+  it('does not refund a held session slot after that session reports malformed input', async () => {
+    const sessionA = makeHarness({
+      projectId: `capture-worker-held-malformed-a-${randomUUID()}`,
+      sessionId: `session-held-malformed-a-${randomUUID()}`,
+    });
+    sessionA.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    sessionA.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    const endA = appendTranscriptEntries(sessionA.transcriptPath, [{ message: 'held malformed A' }]);
+    await appendWindow(sessionA, {
+      transcriptStart: 0,
+      transcriptEnd: endA,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    await runWorker(sessionA, {
+      db: {},
+      llm: mockLlm([new Error('A enters retry hold')]),
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+    appendFileSync(spoolPath(sessionA), '{malformed-json\n');
+
+    const sessionB: TestHarness = {
+      ...sessionA,
+      projectId: `capture-worker-held-malformed-z-${randomUUID()}`,
+      sessionId: `session-held-malformed-z-${randomUUID()}`,
+      transcriptPath: join(sessionA.root, 'held-malformed-b.transcript.jsonl'),
+    };
+    writeFileSync(sessionB.transcriptPath, '', { mode: 0o600 });
+    const endB = appendTranscriptEntries(sessionB.transcriptPath, [{ message: 'B waits' }]);
+    await appendWindow(sessionB, {
+      transcriptStart: 0,
+      transcriptEnd: endB,
+      timestamp: '2026-07-06T10:01:00.000Z',
+    });
+    const cursorFile = join(sessionA.spoolDir, '.tick-cursor.json');
+    if (existsSync(cursorFile)) unlinkSync(cursorFile);
+    const llm = mockLlm([]);
+
+    const result = await runWorker(sessionA, {
+      db: {},
+      llm,
+      now: new Date('2026-07-06T10:01:00.000Z'),
+    });
+
+    expect(result).toMatchObject({ held: 1, malformed: 1, processed: 0 });
+    expect(llm.calls).toHaveLength(0);
+    expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({
+      lastSessionPath: spoolPath(sessionA),
+    });
+  });
 });
 
 describe('capture worker DB-backed RED contracts', () => {
+  it('holds a terminal retry until the configured interval expires', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'retry interval source' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+
+    await runWorker(harness, {
+      db: {},
+      llm: mockLlm([new Error('terminal failure')]),
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+    const retryKey = Object.keys(readState(harness).retries)[0];
+    expect(readState(harness).retries[retryKey].attempts).toBe(1);
+
+    const heldLlm = mockLlm([]);
+    const held = await runWorker(harness, {
+      db: {},
+      llm: heldLlm,
+      now: new Date('2026-07-06T10:01:00.000Z'),
+    });
+    expect(held).toMatchObject({ held: 1, processed: 0, parked: 0 });
+    expect(heldLlm.calls).toHaveLength(0);
+    expect(readState(harness).retries[retryKey].attempts).toBe(1);
+
+    const expiredLlm = mockLlm([new Error('terminal failure again')]);
+    await runWorker(harness, {
+      db: {},
+      llm: expiredLlm,
+      now: new Date('2026-07-06T10:30:00.000Z'),
+    });
+    expect(expiredLlm.calls).toHaveLength(1);
+    expect(readState(harness).retries[retryKey].attempts).toBe(2);
+  });
+
+  it('does not hold a retry when the recorded attempt is in the future', () => {
+    expect(isCaptureRetryHeld(
+      { attempts: 1, lastAttemptIso: '2026-07-06T11:00:00.000Z' },
+      Date.parse('2026-07-06T10:00:00.000Z'),
+      1_800_000
+    )).toBe(false);
+  });
+
+  it('holds a missing transcript retry without consuming another attempt', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'soon missing source' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:00.000Z',
+    });
+    unlinkSync(harness.transcriptPath);
+
+    await runWorker(harness, {
+      db: {},
+      llm: mockLlm([]),
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+    const retryKey = Object.keys(readState(harness).retries)[0];
+    const held = await runWorker(harness, {
+      db: {},
+      llm: mockLlm([]),
+      now: new Date('2026-07-06T10:01:00.000Z'),
+    });
+
+    expect(held).toMatchObject({ held: 1, transcriptMissing: 0, parked: 0 });
+    expect(readState(harness).retries[retryKey].attempts).toBe(1);
+  });
+
   let sql: Sql;
   let pg: Sql;
   let db: unknown;
@@ -1876,6 +2369,35 @@ describe('capture worker DB-backed RED contracts', () => {
       (llm.calls[1] as CaptureLlmRequest & { retryPromptPrefix?: string }).retryPromptPrefix
     ).toContain('first character must be `{`');
     expect(existsSync(deadDir(harness))).toBe(false);
+    expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
+      observations: 1,
+      rollups: 1,
+    });
+  });
+
+  it('counts null embeddings as failures only when embedding was expected', async () => {
+    const harness = makeHarness();
+    harness.env.CC_MEMORY_EMBEDDING_EXPECTED = '1';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'invalid embedding credential remains observable' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:00:50.000Z',
+    });
+    const llm = mockLlm([rawExtraction({
+      summary: 'embedding failure is non-blocking',
+      observations: [observation('embedding failure', 'capture still writes NULL')],
+    })]);
+
+    const result = await runWorker(harness, {
+      db,
+      llm,
+      generateEmbedding: async () => null,
+    });
+
+    expect(result).toMatchObject({ processed: 1, embeddingFailed: 2 });
     expect(await countRows(sql, harness.projectId, harness.sessionId)).toEqual({
       observations: 1,
       rollups: 1,
@@ -2187,6 +2709,34 @@ describe('capture worker DB-backed RED contracts', () => {
     expect(capture?.summarize_count).toBe(1);
     expect(capture?.spool_offsets).toHaveLength(1);
     expect(capture?.transcript_sources).toHaveLength(1);
+  });
+
+  it('records a stable, replay-idempotent reason when a legal extraction has no observations', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'short session with no durable fact' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:05:15.000Z',
+    });
+    const response = rawExtraction({ summary: 'short session summary', observations: [] });
+
+    await expect(runWorker(harness, { db, llm: mockLlm([response]) }))
+      .resolves.toMatchObject({ processed: 1, observationsWritten: 0 });
+    resetStateForReplay(harness);
+    await expect(runWorker(harness, { db, llm: mockLlm([response]) }))
+      .resolves.toMatchObject({ processed: 1, observationsWritten: 0, rollupsWritten: 0 });
+
+    const rollupRows = await rollups(sql, harness.projectId, harness.sessionId);
+    expect(rollupRows[0].metadata.capture?.empty_observation_windows).toEqual([
+      {
+        start: 0,
+        end: statSync(spoolPath(harness)).size,
+        reason: 'no_high_value_observations',
+      },
+    ]);
   });
 
   it('skips every DB write when a committed source range replays after state persistence fails', async () => {

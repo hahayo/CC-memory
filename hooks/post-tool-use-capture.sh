@@ -88,6 +88,9 @@ main() {
   session_id="$(json_get_string 'session_id')"
   transcript_path="$(json_get_string 'transcript_path')"
   cwd="$(json_get_string 'cwd')"
+  if [[ -z "$session_id" || -z "$transcript_path" ]]; then
+    return 0
+  fi
   project_base="${cwd%/}"
   project_base="${project_base##*/}"
   project_id="$(sanitize_segment "$project_base")"

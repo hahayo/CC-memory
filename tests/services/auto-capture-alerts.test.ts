@@ -27,7 +27,7 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.fingerprint).toBeNull()
   })
 
-  it('treats yielded progress as healthy and parked chunks as alertable', () => {
+  it('treats yielded progress and retry holds as healthy, but parked chunks as alertable', () => {
     const yielded = assessAutoCaptureExecution({
       exitCode: 0,
       stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=1\n',
@@ -44,6 +44,16 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(parked.ok).toBe(false)
     expect(parked.parkedCount).toBe(1)
     expect(parked.problemLine).toBe('parked=1')
+
+    const held = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=0 held=1\n',
+      stderr: '',
+    })
+    expect(held.ok).toBe(true)
+    expect(held.heldCount).toBe(1)
+    expect(held.problemLine).toBeNull()
+    expect(held.fingerprint).toBeNull()
   })
 
   it('flags non-summary stdout and dead-letter as alertable', () => {
@@ -59,6 +69,26 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.deadLetterCount).toBe(2)
     expect(assessment.problemLine).toContain('DB health check failed')
     expect(assessment.fingerprint).toMatch(/^[0-9a-f]{12}$/)
+  })
+
+  it('treats expected embedding failures as alertable while capture remains processed', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=2\n',
+      stderr: '',
+    })
+
+    expect(assessment.ok).toBe(false)
+    expect(assessment.embeddingFailedCount).toBe(2)
+    expect(assessment.problemLine).toBe('embedding-failed=2')
+
+    const withoutGenericFailedField = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=1 embedding-failed=2\n',
+      stderr: '',
+    })
+    expect(withoutGenericFailedField.failedCount).toBe(0)
+    expect(withoutGenericFailedField.embeddingFailedCount).toBe(2)
   })
 
   it('alerts on a sanitized first-attempt retry warning', () => {

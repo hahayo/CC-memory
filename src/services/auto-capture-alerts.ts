@@ -25,6 +25,8 @@ export interface AutoCaptureAssessment {
   transcriptMissingCount: number
   parkedCount: number
   yieldedCount: number
+  heldCount: number
+  embeddingFailedCount: number
   summaryLine: string | null
   problemLine: string | null
   nonSummaryLines: string[]
@@ -105,7 +107,7 @@ function normalizeLines(text: string): string[] {
 
 function parseSummaryField(summaryLine: string | null, field: string): number {
   if (!summaryLine) return 0
-  const match = summaryLine.match(new RegExp(`${field}=(\\d+)`))
+  const match = summaryLine.match(new RegExp(`(?:^|\\s)${field}=(\\d+)`))
   return match ? Number.parseInt(match[1], 10) : 0
 }
 
@@ -137,6 +139,14 @@ function parseYieldedCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'yielded')
 }
 
+function parseHeldCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'held')
+}
+
+function parseEmbeddingFailedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'embedding-failed')
+}
+
 function truncateProblemLine(line: string): string {
   if (line.length <= MAX_PROBLEM_LINE_LENGTH) return line
   return `${line.slice(0, MAX_PROBLEM_LINE_LENGTH - 3)}...`
@@ -154,6 +164,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const transcriptMissingCount = parseTranscriptMissingCount(summaryLine)
   const parkedCount = parseParkedCount(summaryLine)
   const yieldedCount = parseYieldedCount(summaryLine)
+  const heldCount = parseHeldCount(summaryLine)
+  const embeddingFailedCount = parseEmbeddingFailedCount(summaryLine)
   const ok =
     result.exitCode === 0 &&
     nonSummaryLines.length === 0 &&
@@ -161,7 +173,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount === 0 &&
     malformedCount === 0 &&
     rateLimitedCount === 0 &&
-    parkedCount === 0
+    parkedCount === 0 &&
+    embeddingFailedCount === 0
 
   // Synthesize a problemLine when counts indicate issues but no explicit stdout problem line
   let problemLine: string | null = null
@@ -180,6 +193,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = `dead-letter=${deadLetterCount}`
     } else if (parkedCount > 0) {
       problemLine = `parked=${parkedCount}`
+    } else if (embeddingFailedCount > 0) {
+      problemLine = `embedding-failed=${embeddingFailedCount}`
     } else {
       problemLine = `worker exit=${result.exitCode}`
     }
@@ -206,6 +221,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     transcriptMissingCount,
     parkedCount,
     yieldedCount,
+    heldCount,
+    embeddingFailedCount,
     summaryLine,
     problemLine,
     nonSummaryLines,

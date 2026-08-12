@@ -12,7 +12,7 @@ TimeoutStartSec=120
 WorkingDirectory=%h/CC_project/CC-memory
 Environment=CC_MEMORY_PERSONAL_URL_FILE=%h/.ccm-personal-url
 Environment=CC_MEMORY_TODOIST_TOKEN_FILE=%h/.ccm-todoist-token
-Environment=PATH=/home/haha/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=%h/CC_project/CC-memory/ops/systemd/run-todoist-sync.sh
 StandardOutput=journal
 StandardError=journal

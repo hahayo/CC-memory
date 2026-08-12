@@ -21,7 +21,11 @@ import {
   type CaptureLlmRawResponse,
 } from './capture-llm.js';
 import type { DbClient } from './types.js';
-import { composeEmbeddingText, generateEmbedding as defaultGenerateEmbedding } from '../utils/embedding.js';
+import {
+  composeEmbeddingText,
+  composeObservationEmbeddingText,
+  generateEmbedding as defaultGenerateEmbedding,
+} from '../utils/embedding.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
@@ -60,6 +64,8 @@ export interface CaptureWorkerResult {
   malformed: number;
   parked: number;
   yielded: number;
+  held: number;
+  embeddingFailed: number;
   transcriptMissing: number;
   llmRetries: number;
   observationsWritten: number;
@@ -120,6 +126,11 @@ interface CaptureMetadata {
   transcript_sources: TranscriptSourceRange[];
   summarize_count: number;
   discovery_tokens: number;
+  empty_observation_windows: Array<{
+    start: number;
+    end: number;
+    reason: 'no_high_value_observations';
+  }>;
 }
 
 interface RollupRow {
@@ -130,10 +141,12 @@ interface RollupRow {
 interface WriteWindowResult {
   observationsWritten: number;
   rollupsWritten: number;
+  embeddingFailed: number;
   replayed?: boolean;
 }
 
 const DEFAULT_TICK_BUDGET_MS = 240_000;
+const DEFAULT_RETRY_MIN_INTERVAL_MS = 1_800_000;
 const RETRY_MAX_ATTEMPTS = 5;
 
 export interface RetryEntry {
@@ -235,6 +248,8 @@ function emptyResult(): CaptureWorkerResult {
     malformed: 0,
     parked: 0,
     yielded: 0,
+    held: 0,
+    embeddingFailed: 0,
     transcriptMissing: 0,
     llmRetries: 0,
     observationsWritten: 0,
@@ -610,6 +625,23 @@ function captureMaxSessionsPerTick(env: Record<string, string | undefined>): num
   return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_SESSIONS_PER_TICK, Number.MAX_SAFE_INTEGER);
 }
 
+function captureRetryMinIntervalMs(env: Record<string, string | undefined>): number {
+  const raw = env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS?.trim();
+  if (raw === '0') return 0;
+  return parsePositiveIntegerEnv(raw, DEFAULT_RETRY_MIN_INTERVAL_MS);
+}
+
+export function isCaptureRetryHeld(
+  entry: Pick<RetryEntry, 'attempts' | 'lastAttemptIso'> | undefined,
+  nowMs: number,
+  minIntervalMs: number
+): boolean {
+  if (!entry || entry.attempts < 1 || minIntervalMs <= 0) return false;
+  const lastAttemptMs = Date.parse(entry.lastAttemptIso);
+  if (!Number.isFinite(lastAttemptMs) || lastAttemptMs > nowMs) return false;
+  return nowMs - lastAttemptMs < minIntervalMs;
+}
+
 function llmCallBudgetReserveMs(
   env: Record<string, string | undefined>,
   llm: Pick<CaptureLlmAdapter, 'provider'>
@@ -697,11 +729,25 @@ function stripInjectionMarkerLines(transcript: string): string {
     .join('\n');
 }
 
-async function readTranscriptBuffer(path: string): Promise<Buffer | null> {
+async function readTranscriptBuffer(
+  path: string,
+  boundary: number,
+  snapshotDir?: string,
+): Promise<Buffer | null> {
+  let original: Buffer | null = null;
   try {
-    return await readFile(path);
+    original = await readFile(path);
   } catch {
-    return null;
+    // An explicitly configured archive snapshot may still contain the captured prefix.
+  }
+  if (original && original.length >= boundary) return original;
+  const root = snapshotDir?.trim();
+  if (!root) return original;
+  try {
+    const snapshot = await readFile(join(resolve(root), `${sha256(path)}.jsonl`));
+    return snapshot.length >= boundary ? snapshot : original;
+  } catch {
+    return original;
   }
 }
 
@@ -897,6 +943,16 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
       typeof record.discovery_tokens === 'number' && Number.isFinite(record.discovery_tokens)
         ? record.discovery_tokens
         : 0,
+    empty_observation_windows: Array.isArray(record.empty_observation_windows)
+      ? record.empty_observation_windows.filter(
+          (entry): entry is CaptureMetadata['empty_observation_windows'][number] =>
+            Boolean(entry) &&
+            typeof entry === 'object' &&
+            typeof (entry as { start?: unknown }).start === 'number' &&
+            typeof (entry as { end?: unknown }).end === 'number' &&
+            (entry as { reason?: unknown }).reason === 'no_high_value_observations'
+        )
+      : [],
   };
 }
 
@@ -945,12 +1001,14 @@ function mergeMetadata(metadata: unknown, capture: CaptureMetadata): Record<stri
 
 async function safeEmbedding(
   generateEmbedding: (text: string) => Promise<number[] | null>,
-  text: string
-): Promise<number[] | null> {
+  text: string,
+  embeddingExpected: boolean,
+): Promise<{ value: number[] | null; failed: boolean }> {
   try {
-    return await generateEmbedding(text);
+    const value = await generateEmbedding(text);
+    return { value, failed: embeddingExpected && value === null };
   } catch {
-    return null;
+    return { value: null, failed: embeddingExpected };
   }
 }
 
@@ -1168,14 +1226,16 @@ async function writeCaptureWindow(
   extraction: CaptureLlmExtraction,
   rawResponse: CaptureLlmRawResponse,
   source: TranscriptSourceRange,
-  options: Required<Pick<CaptureWorkerOptions, 'writerHost' | 'generateEmbedding'>>
+  options: Required<Pick<CaptureWorkerOptions, 'writerHost' | 'generateEmbedding'>> & {
+    embeddingExpected: boolean;
+  }
 ): Promise<WriteWindowResult> {
   const summary = extraction.session_summary;
   const idempotencyKey = `capture:v05:${window.projectId}:${window.sessionId}`;
   const existing = await selectRollup(tx, window.projectId, idempotencyKey);
   const previousCapture = existingCaptureMetadata(existing?.metadata);
   if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
-    return { observationsWritten: 0, rollupsWritten: 0, replayed: true };
+    return { observationsWritten: 0, rollupsWritten: 0, embeddingFailed: 0, replayed: true };
   }
   const rollupContentHash = contentHash([
     window.projectId,
@@ -1188,8 +1248,10 @@ async function writeCaptureWindow(
   const discoveryTokens = estimateDiscoveryTokens(captureTextForTokenEstimate(extraction));
   const rollupEmbedding = await safeEmbedding(
     options.generateEmbedding,
-    composeEmbeddingText(summary.summary, summary.keywords, summary.decisions)
+    composeEmbeddingText(summary.summary, summary.keywords, summary.decisions),
+    options.embeddingExpected,
   );
+  let embeddingFailed = rollupEmbedding.failed ? 1 : 0;
 
   // at-least-once 重放守衛：transaction commit 後 HWM 寫入若失敗，同 window 會重跑；
   // 已見過的 spool offset 區間不重複 append、summarize_count 不重複遞增。
@@ -1211,6 +1273,17 @@ async function writeCaptureWindow(
     ]),
     summarize_count: (previousCapture?.summarize_count ?? 0) + 1,
     discovery_tokens: discoveryTokens,
+    empty_observation_windows:
+      extraction.observations.length === 0 && !isReplayedWindow
+        ? [
+            ...(previousCapture?.empty_observation_windows ?? []),
+            {
+              start: window.spoolOffsetStart,
+              end: window.spoolOffsetEnd,
+              reason: 'no_high_value_observations',
+            },
+          ]
+        : previousCapture?.empty_observation_windows ?? [],
   };
 
   let rollupId = existing?.id ?? null;
@@ -1223,7 +1296,7 @@ async function writeCaptureWindow(
       idempotencyKey,
       contentHash: rollupContentHash,
       writerHost: options.writerHost,
-      embedding: rollupEmbedding,
+      embedding: rollupEmbedding.value,
       metadata: initialMetadata,
     });
   }
@@ -1235,8 +1308,10 @@ async function writeCaptureWindow(
     const observedAt = new Date(window.processingTime.getTime() + observedAtOffset + index);
     const observationEmbedding = await safeEmbedding(
       options.generateEmbedding,
-      [observation.title, observation.facts.join(' '), observation.narrative].join('\n')
+      composeObservationEmbeddingText(observation),
+      options.embeddingExpected,
     );
+    if (observationEmbedding.failed) embeddingFailed += 1;
     const insertedId = await insertObservation(tx, {
       window,
       observation,
@@ -1244,7 +1319,7 @@ async function writeCaptureWindow(
       model: rawResponse.model,
       writerHost: options.writerHost,
       observedAt,
-      embedding: observationEmbedding,
+      embedding: observationEmbedding.value,
       source,
     });
     if (insertedId) insertedObservationIds.push(insertedId);
@@ -1261,13 +1336,14 @@ async function writeCaptureWindow(
     extraction,
     contentHash: rollupContentHash,
     writerHost: options.writerHost,
-    embedding: rollupEmbedding,
+    embedding: rollupEmbedding.value,
     metadata: finalMetadata,
   });
 
   return {
     observationsWritten: insertedObservationIds.length,
     rollupsWritten: 1,
+    embeddingFailed,
   };
 }
 
@@ -1506,12 +1582,17 @@ export async function runCaptureWorkerOnce(
   const writerHost = options.writerHost ?? resolveWriterHost();
   const generateEmbedding = options.generateEmbedding ?? defaultGenerateEmbedding;
   const maxSessionsPerTick = captureMaxSessionsPerTick(env);
+  const retryMinIntervalMs = captureRetryMinIntervalMs(env);
+  const embeddingExpected =
+    env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || Boolean(env.GEMINI_API_KEY?.trim());
   let handledSessions = 0;
   const stateWriter = options.stateWriter ?? writeCaptureStateAtomically;
 
   for (const spool of sessions) {
-    if (handledSessions >= maxSessionsPerTick) break;
-    if (budget > 0 && getNowMs() - tickStartMs >= budget) break;
+    if (budget > 0 && getNowMs() - tickStartMs >= budget) {
+      if (result.yielded === 0) result.yielded = 1;
+      break;
+    }
     const nowMs = getNowMs();
     const release = await acquireSpoolLock(spool.path, { env, nowMs });
     if (!release) {
@@ -1547,10 +1628,6 @@ export async function runCaptureWorkerOnce(
         await maybeRotateCaptureSpool(spool, state, hasStopSentinel, getNowMs());
         continue;
       }
-      if (handledSessions >= maxSessionsPerTick) break;
-      handledSessions += 1;
-      await saveTickCursor(root, spool.path);
-
       const snapshotCursor = state.spool.cursor;
       const snapshot = readSpoolBuffer(buffer, snapshotCursor, snapshotSize);
       if (!snapshot) {
@@ -1567,9 +1644,67 @@ export async function runCaptureWorkerOnce(
         continue;
       }
 
+      const boundaryRecords = snapshot.records.filter(
+        (record) => transcriptBoundary(record) !== null
+      );
+      const candidateCheckpoints = new Map(
+        Object.entries(state.transcripts).map(([pathHash, checkpoint]) => [
+          pathHash,
+          checkpoint.checkpoint,
+        ])
+      );
+      let hasMissingTranscriptPath = false;
+      let hasProcessableRange = false;
+      for (const record of boundaryRecords) {
+        const path = typeof record.transcript_path === 'string' ? record.transcript_path : '';
+        if (!path) {
+          hasMissingTranscriptPath = true;
+          continue;
+        }
+        const boundary = transcriptBoundary(record)!;
+        const pathHash = sha256(path);
+        const checkpoint = candidateCheckpoints.get(pathHash);
+        if (checkpoint === undefined) {
+          candidateCheckpoints.set(pathHash, boundary);
+        } else if (boundary > checkpoint) {
+          hasProcessableRange = true;
+        }
+      }
+      if (hasMissingTranscriptPath && !hasProcessableRange) {
+        for (const [pathHash, checkpoint] of candidateCheckpoints) {
+          state.transcripts[pathHash] ??= { checkpoint };
+        }
+        if (snapshot.malformedCount > 0) {
+          result.malformed += snapshot.malformedCount;
+          stdout.write(
+            `[cc-memory] auto-capture warning: malformed-spool-lines=${snapshot.malformedCount} session=${spool.sessionIdFromPath}\n`
+          );
+        }
+        result.transcriptMissing += 1;
+        result.skipped += 1;
+        state.spool.cursor = snapshot.safeEnd;
+        await stateWriter(statePath, state);
+        await saveTickCursor(root, spool.path);
+        await maybeRotateCaptureSpool(
+          spool,
+          state,
+          isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset),
+          getNowMs()
+        );
+        continue;
+      }
+
+      if (handledSessions >= maxSessionsPerTick) break;
+      handledSessions += 1;
+      await saveTickCursor(root, spool.path);
+
       const projectId = firstString(snapshot.records, 'project_id') ?? spool.projectIdFromPath;
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
       const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
+      const outcomeCountBefore =
+        result.processed + result.skipped + result.failed + result.deadLettered +
+        result.rateLimited + result.malformed + result.parked + result.yielded +
+        result.transcriptMissing;
 
       if (projectId === '__personal__') {
         state.spool.cursor = snapshot.safeEnd;
@@ -1596,9 +1731,6 @@ export async function runCaptureWorkerOnce(
       let snapshotCompleted = true;
       const processingTime = options.now?.() ?? new Date();
       const spoolRangeStarts: Record<string, number> = {};
-      const outcomeCountBefore =
-        result.processed + result.skipped + result.failed + result.deadLettered +
-        result.rateLimited + result.parked + result.yielded + result.transcriptMissing;
       let missingPathReported = false;
 
       for (let recordIndex = 0; recordIndex < snapshot.records.length; recordIndex += 1) {
@@ -1636,11 +1768,31 @@ export async function runCaptureWorkerOnce(
         }
         if (boundary <= checkpoint.checkpoint) continue;
 
-        const transcriptBuffer = await readTranscriptBuffer(path);
+        const transcriptBuffer = await readTranscriptBuffer(
+          path,
+          boundary,
+          env.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR,
+        );
         const missingSourceRetryKey =
           `${pathHash}:${checkpoint.checkpoint}-${boundary}:${TRANSCRIPT_SOURCE_UNAVAILABLE_HASH}`;
         if (!transcriptBuffer || transcriptBuffer.length < boundary) {
-          const attemptTime = (options.now?.() ?? new Date()).toISOString();
+          const attemptNow = options.now?.() ?? new Date();
+          if (isCaptureRetryHeld(
+            state.retries[missingSourceRetryKey],
+            attemptNow.getTime(),
+            retryMinIntervalMs
+          )) {
+            result.held += 1;
+            const outcomesNow =
+              result.processed + result.skipped + result.failed + result.deadLettered +
+              result.rateLimited + result.malformed + result.parked + result.yielded +
+              result.transcriptMissing;
+            if (outcomesNow === outcomeCountBefore) handledSessions -= 1;
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
+          const attemptTime = attemptNow.toISOString();
           const entry = state.retries[missingSourceRetryKey] ?? {
             attempts: 0,
             lastErrorClass: TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -1756,6 +1908,23 @@ export async function runCaptureWorkerOnce(
             await stateWriter(statePath, state);
             result.skipped += 1;
             continue;
+          }
+
+          const attemptNow = options.now?.() ?? new Date();
+          if (isCaptureRetryHeld(
+            state.retries[retryKey],
+            attemptNow.getTime(),
+            retryMinIntervalMs
+          )) {
+            result.held += 1;
+            const outcomesNow =
+              result.processed + result.skipped + result.failed + result.deadLettered +
+              result.rateLimited + result.malformed + result.parked + result.yielded +
+              result.transcriptMissing;
+            if (outcomesNow === outcomeCountBefore) handledSessions -= 1;
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
           }
 
           let rawResponse: CaptureLlmRawResponse | null = null;
@@ -1903,11 +2072,13 @@ export async function runCaptureWorkerOnce(
               }, {
                 writerHost,
                 generateEmbedding,
+                embeddingExpected,
               })
             );
             result.processed += 1;
             result.observationsWritten += writeResult.observationsWritten;
             result.rollupsWritten += writeResult.rollupsWritten;
+            result.embeddingFailed += writeResult.embeddingFailed ?? 0;
             observedAtOffset += extraction.observations.length;
             checkpoint.checkpoint = chunk.end;
             clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
@@ -1925,7 +2096,8 @@ export async function runCaptureWorkerOnce(
       if (snapshotCompleted && !sessionStopped) {
         const outcomeCountAfter =
           result.processed + result.skipped + result.failed + result.deadLettered +
-          result.rateLimited + result.parked + result.yielded + result.transcriptMissing;
+          result.rateLimited + result.malformed + result.parked + result.yielded +
+          result.transcriptMissing;
         if (outcomeCountAfter === outcomeCountBefore) result.skipped += 1;
         state.spool.cursor = snapshot.safeEnd;
         await stateWriter(statePath, state);

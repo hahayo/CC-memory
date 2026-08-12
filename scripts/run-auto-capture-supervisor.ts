@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { access, readFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { access, open, readFile } from 'node:fs/promises'
 import { homedir, hostname as resolveHostname } from 'node:os'
 import path from 'node:path'
 import {
@@ -20,6 +21,10 @@ import {
 
 const DEFAULT_REPO_ROOT = path.resolve(__dirname, '..')
 const DEFAULT_PROJECT_URL_FILE = path.join(homedir(), '.ccm-project-url')
+const DEFAULT_PRODUCTION_APPROVAL_FILE = path.join(
+  homedir(),
+  '.ccm-auto-capture-production-approved'
+)
 const DEFAULT_ALERT_ENV_FILE = path.join(homedir(), '.ccm-memory-alert.env')
 const DEFAULT_ALERT_STATE_FILE = path.join(
   homedir(),
@@ -43,6 +48,18 @@ export interface AutoCaptureSupervisorDeps {
   runWorker?: (input: RunAutoCaptureWorkerInput) => Promise<AutoCaptureExecutionResult>
   readAlertTarget?: () => Promise<AutoCaptureAlertTarget>
   sendTelegram?: (target: AutoCaptureAlertTarget, text: string) => Promise<void>
+  checkProductionApproval?: (input: ProductionApprovalCheckInput) => Promise<void>
+  stderr?: { write(text: string): unknown }
+}
+
+export interface ProductionApprovalCheckInput {
+  databaseUrl: string
+  now: Date
+}
+
+export interface ProductionApprovalCheckDeps {
+  readProductionUrl?: () => Promise<string>
+  readApprovalDocument?: () => Promise<string>
 }
 
 export interface AutoCaptureSupervisorOptions {
@@ -52,6 +69,7 @@ export interface AutoCaptureSupervisorOptions {
   projectUrlFile?: string
   alertTarget?: AutoCaptureAlertTarget
   alertEnvFile?: string
+  geminiApiKeyFile?: string
   stateFile?: string
   renotifyMs?: number
 }
@@ -99,6 +117,140 @@ async function resolveProjectUrl(options: AutoCaptureSupervisorOptions): Promise
   return readTrimmedFile(filePath, 'project database url file')
 }
 
+export function validateProductionApprovalDocument(source: string, now: Date): void {
+  const values = parseSimpleEnvFile(source)
+  if (values.scope !== 'auto-capture-prod') {
+    throw new Error('production approval scope must be auto-capture-prod')
+  }
+  if (!values.approved_by?.trim()) {
+    throw new Error('production approval approved_by is required')
+  }
+
+  const parseCanonicalIso = (value: string | undefined): number => {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value ?? '')) {
+      return Number.NaN
+    }
+    const parsed = Date.parse(value!)
+    return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+      ? parsed
+      : Number.NaN
+  }
+
+  const approvedAt = parseCanonicalIso(values.approved_at)
+  if (!Number.isFinite(approvedAt)) {
+    throw new Error('production approval approved_at must be an ISO timestamp')
+  }
+  if (approvedAt > now.getTime()) {
+    throw new Error('production approval approved_at is in the future')
+  }
+
+  const expiresAt = parseCanonicalIso(values.expires_at)
+  if (!Number.isFinite(expiresAt)) {
+    throw new Error('production approval expires_at must be an ISO timestamp')
+  }
+  if (expiresAt <= now.getTime()) {
+    throw new Error('production approval has expired')
+  }
+  if (expiresAt <= approvedAt) {
+    throw new Error('production approval expires_at must be after approved_at')
+  }
+}
+
+export function databaseTargetIdentity(databaseUrl: string): string {
+  const rawAuthority = databaseUrl
+    .slice(databaseUrl.indexOf('://') + 3)
+    .split(/[/?#]/, 1)[0]
+    ?? ''
+  if (rawAuthority.split('@').length > 2) {
+    throw new Error('project database url must not contain multiple @ delimiters')
+  }
+  const authority = rawAuthority.split('@').at(-1) ?? ''
+  if (authority.includes('%')) {
+    throw new Error('project database url must not contain an encoded hostname')
+  }
+  const parsed = new URL(databaseUrl)
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error('project database url must use postgres or postgresql')
+  }
+  const rawHostname = parsed.hostname.toLowerCase().replace(/\.$/, '')
+  if (!rawHostname) {
+    throw new Error('project database url must include an explicit hostname')
+  }
+  if (rawHostname.includes(',')) {
+    throw new Error('project database url must not contain multiple hosts')
+  }
+  if (!parsed.pathname || parsed.pathname === '/') {
+    throw new Error('project database url must include an explicit database path')
+  }
+  if ([...parsed.searchParams.keys()].some((key) => key.toLowerCase() === 'database')) {
+    throw new Error('project database url must not override the database query parameter')
+  }
+  const isLoopback =
+    rawHostname === 'localhost' ||
+    rawHostname === '[::1]' ||
+    rawHostname === '::1' ||
+    /^127\./.test(rawHostname) ||
+    /^\[::ffff:7f[0-9a-f]{2}:/.test(rawHostname)
+  const hostname = isLoopback
+    ? 'loopback'
+    : rawHostname
+  const port = parsed.port || '5432'
+  return `${hostname}:${port}${parsed.pathname}`
+}
+
+export async function loadSecureProductionApprovalDocument(filePath: string): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new Error('production approval marker must be a regular file (symlinks are not accepted)')
+    }
+    throw error
+  }
+  try {
+    const metadata = await handle.stat()
+    if (!metadata.isFile()) {
+      throw new Error('production approval marker must be a regular file (symlinks are not accepted)')
+    }
+    const mode = metadata.mode & 0o777
+    if (mode !== 0o600) {
+      throw new Error(
+        `production approval marker must have mode 0600 (actual: ${mode.toString(8).padStart(4, '0')})`
+      )
+    }
+    return handle.readFile('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function checkProductionApproval(
+  input: ProductionApprovalCheckInput,
+  deps: ProductionApprovalCheckDeps = {}
+): Promise<void> {
+  let productionUrl: string
+  try {
+    productionUrl = await (deps.readProductionUrl ?? (() =>
+      readTrimmedFile(DEFAULT_PROJECT_URL_FILE, 'canonical production database url file')))()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`canonical production database identity is unavailable: ${message}`)
+  }
+  if (databaseTargetIdentity(input.databaseUrl) !== databaseTargetIdentity(productionUrl)) return
+
+  let source: string
+  try {
+    source = await (deps.readApprovalDocument ?? (() =>
+      loadSecureProductionApprovalDocument(DEFAULT_PRODUCTION_APPROVAL_FILE)))()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`production approval marker is unavailable: ${message}`)
+  }
+  validateProductionApprovalDocument(source, input.now)
+}
+
 async function resolveAlertTargetFromFile(
   options: AutoCaptureSupervisorOptions
 ): Promise<AutoCaptureAlertTarget> {
@@ -106,26 +258,41 @@ async function resolveAlertTargetFromFile(
 
   const env = options.env ?? process.env
   const filePath = options.alertEnvFile ?? env.CC_MEMORY_ALERT_ENV_FILE ?? DEFAULT_ALERT_ENV_FILE
-  const fileSource = parseSimpleEnvFile(await readTrimmedFile(filePath, 'memory alert env file'))
+  let fileSource: Record<string, string> = {}
+  try {
+    fileSource = parseSimpleEnvFile(await readTrimmedFile(filePath, 'memory alert env file'))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const canFallbackToEnv =
+      (error as NodeJS.ErrnoException).code === 'ENOENT' ||
+      message.startsWith('memory alert env file is empty:')
+    if (!canFallbackToEnv) throw error
+    return resolveAutoCaptureAlertTarget(env)
+  }
   const merged: Record<string, string | undefined> = { ...fileSource, ...env }
   return resolveAutoCaptureAlertTarget(merged)
 }
 
-async function maybeReadGeminiApiKey(env: Record<string, string | undefined>): Promise<string | undefined> {
-  if ((env.CC_CAPTURE_LLM ?? '').trim() !== 'gemini-flash') return undefined
+async function maybeReadGeminiApiKey(
+  env: Record<string, string | undefined>,
+  keyFile = DEFAULT_GEMINI_API_KEY_FILE,
+  onUnavailable?: (error: unknown) => void
+): Promise<string | undefined> {
   if (env.GEMINI_API_KEY?.trim()) return env.GEMINI_API_KEY
 
   try {
-    return await readTrimmedFile(DEFAULT_GEMINI_API_KEY_FILE, 'Gemini API key file')
+    return await readTrimmedFile(keyFile, 'Gemini API key file')
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw error
+    onUnavailable?.(error)
+    return undefined
   }
 }
 
 async function buildWorkerEnv(
   envSource: Record<string, string | undefined>,
-  databaseUrl: string
+  databaseUrl: string,
+  geminiApiKeyFile?: string,
+  onGeminiKeyUnavailable?: (error: unknown) => void
 ): Promise<NodeJS.ProcessEnv> {
   const nextEnv: NodeJS.ProcessEnv = {}
 
@@ -139,10 +306,26 @@ async function buildWorkerEnv(
   nextEnv.CC_CAPTURE_LLM = nextEnv.CC_CAPTURE_LLM ?? 'claude-cli'
   nextEnv.CC_CAPTURE_CLAUDE_MODEL = nextEnv.CC_CAPTURE_CLAUDE_MODEL ?? 'haiku'
   nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK = nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK ?? '1'
+  delete nextEnv.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR
+  delete nextEnv.CC_FORCE_PROJECT_ID
+  delete nextEnv.DATABASE_URL_PERSONAL
+  delete nextEnv.PGHOST
+  delete nextEnv.PGPORT
+  delete nextEnv.PGDATABASE
+  delete nextEnv.PGUSER
+  delete nextEnv.PGUSERNAME
+  delete nextEnv.PGPASSWORD
 
-  const geminiApiKey = await maybeReadGeminiApiKey(nextEnv)
+  const geminiApiKey = await maybeReadGeminiApiKey(
+    nextEnv,
+    geminiApiKeyFile,
+    onGeminiKeyUnavailable
+  )
   if (geminiApiKey) {
     nextEnv.GEMINI_API_KEY = geminiApiKey
+    nextEnv.CC_MEMORY_EMBEDDING_EXPECTED = '1'
+  } else {
+    delete nextEnv.CC_MEMORY_EMBEDDING_EXPECTED
   }
 
   return nextEnv
@@ -158,6 +341,10 @@ function resolveSupervisorTimeoutMs(env: Record<string, string | undefined>): nu
   if (!raw) return DEFAULT_SUPERVISOR_TIMEOUT_MS
   const parsed = Number.parseInt(raw, 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SUPERVISOR_TIMEOUT_MS
+}
+
+function requiresAlerts(env: Record<string, string | undefined>): boolean {
+  return ['1', 'on', 'true'].includes((env.CC_MEMORY_REQUIRE_ALERTS ?? '').trim().toLowerCase())
 }
 
 export async function runAutoCaptureWorkerSubprocess(
@@ -241,12 +428,73 @@ export async function runAutoCaptureSupervisorTick(
   const saveState = deps.saveState ?? ((state) => saveAutoCaptureAlertState(stateFile, state))
   const readAlertTarget = deps.readAlertTarget ?? (() => resolveAlertTargetFromFile(options))
   const sendTelegram = deps.sendTelegram ?? sendAutoCaptureTelegramMessage
+  const stderr = deps.stderr ?? process.stderr
+  let alertTarget: AutoCaptureAlertTarget | undefined
+  try {
+    alertTarget = await readAlertTarget()
+  } catch (error) {
+    if (requiresAlerts(env)) throw error
+    const message = error instanceof Error ? error.message : String(error)
+    stderr.write(`[run-auto-capture-supervisor] alerts-disabled: ${message}\n`)
+  }
   const previousState = await loadState()
+  const approvalCheck = deps.checkProductionApproval ?? checkProductionApproval
   const databaseUrl = await resolveProjectUrl(options)
-  const workerEnv = await buildWorkerEnv(env, databaseUrl)
-  const runWorker = deps.runWorker ?? runAutoCaptureWorkerSubprocess
-  const execution = await runWorker({ repoRoot, env: workerEnv })
-  const assessment = assessAutoCaptureExecution(execution)
+  let productionApprovalError: unknown
+  try {
+    await approvalCheck({ databaseUrl, now })
+  } catch (error) {
+    productionApprovalError = error
+  }
+
+  let geminiKeyUnavailableError: unknown
+  let execution: AutoCaptureExecutionResult
+  if (productionApprovalError !== undefined) {
+    const message = productionApprovalError instanceof Error
+      ? productionApprovalError.message
+      : String(productionApprovalError)
+    const problemLine = `[run-auto-capture-supervisor] production-approval-denied: ${message}`
+    stderr.write(`${problemLine}\n`)
+    execution = { exitCode: 1, stdout: '', stderr: problemLine }
+  } else {
+    const workerEnv = await buildWorkerEnv(
+      env,
+      databaseUrl,
+      options.geminiApiKeyFile,
+      (error) => { geminiKeyUnavailableError = error }
+    )
+    if (!workerEnv.GEMINI_API_KEY?.trim()) {
+      const reason = geminiKeyUnavailableError instanceof Error
+        ? geminiKeyUnavailableError.message
+        : geminiKeyUnavailableError === undefined
+          ? undefined
+          : String(geminiKeyUnavailableError)
+      const detail = reason ? ` (${reason})` : ''
+      stderr.write(
+        `[run-auto-capture-supervisor] embeddings-disabled: GEMINI_API_KEY unavailable${detail}\n`
+      )
+    }
+    const runWorker = deps.runWorker ?? runAutoCaptureWorkerSubprocess
+    execution = await runWorker({ repoRoot, env: workerEnv })
+  }
+  const geminiKeyErrorCode = (geminiKeyUnavailableError as NodeJS.ErrnoException | undefined)?.code
+  const hasEmbeddingCredentialError =
+    geminiKeyUnavailableError !== undefined && geminiKeyErrorCode !== 'ENOENT'
+  const assessedExecution = hasEmbeddingCredentialError
+    ? {
+        ...execution,
+        exitCode: execution.exitCode === 0 ? 1 : execution.exitCode,
+        stderr: [
+          execution.stderr.trimEnd(),
+          `[run-auto-capture-supervisor] embedding credential error: ${
+            geminiKeyUnavailableError instanceof Error
+              ? geminiKeyUnavailableError.message
+              : String(geminiKeyUnavailableError)
+          }`,
+        ].filter(Boolean).join('\n'),
+      }
+    : execution
+  const assessment = assessAutoCaptureExecution(assessedExecution)
 
   if (assessment.ok) {
     const nextState = buildSuccessState(previousState, now)
@@ -262,18 +510,22 @@ export async function runAutoCaptureSupervisorTick(
       previousState,
     })
 
+    if (!alertTarget) {
+      await saveState(nextState)
+      return { exitCode: 0, notification: 'recovery', alerted: false, state: nextState }
+    }
+
     try {
-      const target = await readAlertTarget()
-      await sendTelegram(target, message)
+      await sendTelegram(alertTarget, message)
       await saveState(nextState)
       return { exitCode: 0, notification: 'recovery', alerted: true, state: nextState }
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error)
-      process.stderr.write(`[run-auto-capture-supervisor] recovery alert failed: ${messageText}\n`)
+      stderr.write(`[run-auto-capture-supervisor] recovery alert failed: ${messageText}\n`)
       const prevCount = previousState.recoveryFailureCount ?? 0
       if (prevCount + 1 >= 3) {
         // 連續 3 次 recovery 發送失敗：告警是 best-effort，清掉 fingerprint 避免永久卡住
-        process.stderr.write(
+        stderr.write(
           `[run-auto-capture-supervisor] recovery alert failed 3 times consecutively, clearing failure state\n`
         )
         await saveState(nextState)
@@ -302,14 +554,18 @@ export async function runAutoCaptureSupervisorTick(
     assessment,
   })
 
+  if (!alertTarget) {
+    await saveState(decision.baseState)
+    return { exitCode: 1, notification: 'failure', alerted: false, state: decision.baseState }
+  }
+
   try {
-    const target = await readAlertTarget()
-    await sendTelegram(target, message)
+    await sendTelegram(alertTarget, message)
     await saveState(decision.alertedState)
     return { exitCode: 1, notification: 'failure', alerted: true, state: decision.alertedState }
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error)
-    process.stderr.write(`[run-auto-capture-supervisor] failure alert failed: ${messageText}\n`)
+    stderr.write(`[run-auto-capture-supervisor] failure alert failed: ${messageText}\n`)
     await saveState(decision.baseState)
     return { exitCode: 2, notification: 'failure', alerted: false, state: decision.baseState }
   }
