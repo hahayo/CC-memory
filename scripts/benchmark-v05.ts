@@ -3,27 +3,35 @@
 //
 // Thin CLI for the v0.5 M6 benchmark harness.
 
-import 'dotenv/config';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { and, count, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
 import { parseBenchmarkFixtures } from './lib/benchmark-fixtures.js';
 import {
   assertNoPersonalProjectRefs,
+  classifyRollupDrillDown,
   databaseHostPortLabel,
+  fetchEmbeddingCoverage,
   fetchRecentRealQueries,
   isClaudeMemFormatDriftError,
+  isolateBenchmarkEmbeddingEnvironment,
+  loadBenchmarkEmbeddingCredential,
   parseClaudeMemSearchText,
   renderBenchmarkReport,
+  resolveClaudeMemProjectScopes,
+  scopeClaudeMemRows,
   type BenchmarkReportQuery,
   type CcMemoryReportRow,
   type ClaudeMemReportRow,
   type DrillDownReport,
 } from './lib/benchmark-runner.js';
 import type { MemoryIndexResult } from '../src/services/types.js';
+import { observations as observationRows, projectMemories } from '../src/db/schema.js';
 
 const DEFAULT_CONN = 'postgres://test:test@localhost:5433/cc_memory_test';
 const CLAUDE_MEM_BASE_URL = 'http://127.0.0.1:37777';
@@ -31,21 +39,31 @@ const CLAUDE_MEM_BASE_URL = 'http://127.0.0.1:37777';
 // 撈太少會讓第 5 個 rollup 進不了 envelope（對審 P2：兩側 Top-5 對等性）
 const SEARCH_FETCH_LIMIT = 50;
 const ROLLUP_LIMIT = 5;
+// claude-mem 10.5.2 的 search `project` query param 不提供可驗證隔離；先取較大
+// 候選集，再透過公開 /api/session/:id detail 驗 project，最後才截 Top-5。
+const CLAUDE_MEM_SCOPE_FETCH_LIMIT = 50;
 const SUPPORT_LIMIT = 3;
 
 function usage(): string {
   return [
     'Usage:',
-    '  npx tsx scripts/benchmark-v05.ts --fixtures docs/auto-capture-v0.5/benchmark-fixtures.md',
+    '  npx tsx scripts/benchmark-v05.ts --fixtures docs/auto-capture-v0.5/benchmark-fixtures.md [--embedding-key-file ~/.gemini-api-key]',
   ].join('\n');
 }
 
-function parseArgs(argv: string[]): { fixtures: string } {
+function parseArgs(argv: string[]): { fixtures: string; embeddingKeyFile?: string } {
   let fixtures: string | null = null;
+  let embeddingKeyFile: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--fixtures') {
       fixtures = argv[index + 1] ?? null;
+      index += 1;
+      continue;
+    }
+    if (arg === '--embedding-key-file') {
+      embeddingKeyFile = argv[index + 1];
+      if (!embeddingKeyFile) throw new Error(`Missing value for --embedding-key-file\n${usage()}`);
       index += 1;
       continue;
     }
@@ -56,7 +74,7 @@ function parseArgs(argv: string[]): { fixtures: string } {
     throw new Error(`Unknown argument: ${arg}\n${usage()}`);
   }
   if (!fixtures) throw new Error(`Missing --fixtures\n${usage()}`);
-  return { fixtures };
+  return { fixtures, embeddingKeyFile };
 }
 
 function resolveConn(env: NodeJS.ProcessEnv): string {
@@ -137,7 +155,12 @@ async function searchClaudeMem(input: {
   projectId: string | null;
   workerAvailable: boolean;
   workerReason?: string;
-}): Promise<{ rows?: ClaudeMemReportRow[]; unavailableReason?: string }> {
+}): Promise<{
+  rows?: ClaudeMemReportRow[];
+  unavailableReason?: string;
+  scopeVerified?: boolean;
+  excludedCount?: number;
+}> {
   if (!input.workerAvailable) {
     return { unavailableReason: input.workerReason ?? 'worker 不可用' };
   }
@@ -145,14 +168,35 @@ async function searchClaudeMem(input: {
   try {
     const url = new URL('/api/search', CLAUDE_MEM_BASE_URL);
     url.searchParams.set('query', input.query);
-    url.searchParams.set('limit', String(ROLLUP_LIMIT));
+    url.searchParams.set('limit', String(CLAUDE_MEM_SCOPE_FETCH_LIMIT));
     url.searchParams.set('type', 'sessions');
     if (input.projectId) url.searchParams.set('project', input.projectId);
     const json = await fetchJson(url);
-    const rows = parseClaudeMemSearchText(extractClaudeMemText(json))
+    const resolvedRows = await resolveClaudeMemProjectScopes(
+      parseClaudeMemSearchText(extractClaudeMemText(json), {
+        requestLimit: CLAUDE_MEM_SCOPE_FETCH_LIMIT,
+      }),
+      async (sessionId) => {
+        const detail = await fetchJson(new URL(`/api/session/${sessionId}`, CLAUDE_MEM_BASE_URL));
+        return jsonStringField(detail, 'project') ?? null;
+      }
+    );
+    const scoped = scopeClaudeMemRows(resolvedRows, input.projectId, {
+      resultLimit: ROLLUP_LIMIT,
+      candidateLimit: CLAUDE_MEM_SCOPE_FETCH_LIMIT,
+    });
+    if (!scoped.verified) {
+      return { unavailableReason: scoped.reason };
+    }
+    const rows = scoped.rows
       .slice(0, ROLLUP_LIMIT)
-      .map((row, index) => ({ rank: index + 1, id: row.id, title: row.title }));
-    return { rows };
+      .map((row, index) => ({
+        rank: index + 1,
+        id: row.id,
+        title: row.title,
+        projectId: row.projectId!,
+      }));
+    return { rows, scopeVerified: true, excludedCount: scoped.excludedCount };
   } catch (err) {
     // 格式漂移 = parser 與 claude-mem 輸出不再對齊，report 會系統性缺筆——fail 整支
     if (isClaudeMemFormatDriftError(err)) throw err;
@@ -219,6 +263,38 @@ async function runCcMemoryQuery(input: {
   if (!top) return { rows, drillDown, effectiveMode };
 
   try {
+    const [metadataRows, countRows] = await Promise.all([
+      input.db
+        .select({ metadata: projectMemories.metadata })
+        .from(projectMemories)
+        .where(and(
+          eq(projectMemories.id, top.id),
+          eq(projectMemories.projectId, top.projectId),
+          eq(projectMemories.status, 'active')
+        ))
+        .limit(1),
+      input.db
+        .select({ value: count() })
+        .from(observationRows)
+        .where(and(
+          eq(observationRows.rollupMemoryId, top.id),
+          eq(observationRows.projectId, top.projectId),
+          eq(observationRows.status, 'active')
+        )),
+    ]);
+    const classification = classifyRollupDrillDown({
+      metadata: metadataRows[0]?.metadata,
+      activeObservationCount: countRows[0]?.value ?? 0,
+    });
+    if (classification.kind === 'legal-empty') {
+      drillDown.legalEmptyReason = 'spec-legal observations[] empty; metadata and active DB rows agree';
+      return { rows, drillDown, effectiveMode };
+    }
+    if (classification.kind === 'inconsistent') {
+      drillDown.error = classification.reason;
+      return { rows, drillDown, effectiveMode };
+    }
+
     const timelineResult = await input.timeline(input.db, top.id, 2, 2, top.projectId);
     assertNoPersonalProjectRefs({
       label: `timeline results for "${input.query}"`,
@@ -248,6 +324,13 @@ async function main(): Promise<void> {
     process.env.DATABASE_URL = conn;
   }
 
+  // Benchmark 不接受 ambient env 或 dotenv 偷渡憑證。只有顯式 0600 regular file
+  // 能啟用 hybrid，並在報告留下不含秘密值的 identity evidence。
+  const loadedCredential = args.embeddingKeyFile
+    ? await loadBenchmarkEmbeddingCredential(args.embeddingKeyFile, homedir())
+    : undefined;
+  isolateBenchmarkEmbeddingEnvironment(process.env, loadedCredential?.apiKey);
+
   const [{ searchMemoryIndexes }, { timeline, getObservations }] = await Promise.all([
     import('../src/services/memories.js'),
     import('../src/services/observations.js'),
@@ -260,7 +343,9 @@ async function main(): Promise<void> {
   const generatedAt = new Date();
 
   try {
-    const realSamples = await fetchRecentRealQueries(client);
+    const realSamples = await fetchRecentRealQueries(client, {
+      excludeQueries: fixtures.map((fixture) => fixture.query),
+    });
     const worker = await readWorkerHealth();
     const queries = [
       ...fixtures.map((fixture) => ({
@@ -274,8 +359,14 @@ async function main(): Promise<void> {
         query: sample.query,
         source: 'real' as const,
         projectId: sample.projectId,
+        realQueryProvenance: {
+          querySurface: sample.querySurface,
+          originalMode: sample.mode,
+          sampledAt: sample.createdAt,
+        },
       })),
     ];
+    const embeddingCoverage = await fetchEmbeddingCoverage(client);
 
     const reportQueries: BenchmarkReportQuery[] = [];
     const effectiveModes = new Set<string>();
@@ -306,6 +397,8 @@ async function main(): Promise<void> {
         ccMemoryTop5: ccMemory.rows,
         claudeMemTop5: claudeMem.rows,
         claudeMemUnavailableReason: claudeMem.unavailableReason,
+        claudeMemScopeVerified: claudeMem.scopeVerified,
+        claudeMemExcludedCount: claudeMem.excludedCount,
         drillDown: ccMemory.drillDown,
       });
     }
@@ -321,6 +414,8 @@ async function main(): Promise<void> {
           : process.env.GEMINI_API_KEY
             ? 'hybrid'
             : 'keyword',
+      embeddingCoverage,
+      embeddingCredential: loadedCredential?.evidence,
       realQueryCount: realSamples.length,
       realQueryTarget: 5,
       queries: reportQueries,

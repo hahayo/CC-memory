@@ -8,6 +8,12 @@ export interface EmbeddingConfig {
   dimensions?: number;
 }
 
+export interface ObservationEmbeddingInput {
+  title: string;
+  facts: string[];
+  narrative: string;
+}
+
 /**
  * 組合文本用於生成 embedding
  * 將 summary、keywords、decisions 組合成單一文本
@@ -28,6 +34,12 @@ export function composeEmbeddingText(
   }
 
   return parts.join('\n');
+}
+
+export function composeObservationEmbeddingText(
+  observation: ObservationEmbeddingInput
+): string {
+  return [observation.title, observation.facts.join(' '), observation.narrative].join('\n');
 }
 
 /**
