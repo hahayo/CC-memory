@@ -229,6 +229,7 @@
 - [x] project／personal DB 新鮮 custom dump 已建立為 `0600`，兩庫均以 PostgreSQL 18.4 `pg_restore --list`＋`--file=/dev/null` 完整走讀，並實際 restore 到一次性本機 PG18＋pgvector 0.8.3 空庫；兩側皆恢復 8 張 public 表，project 224 memories／14,006 observations、personal 10／0，與備份前基線一致，container 已自動刪除（2026-08-12）
 - [x] R2 加密備份 producer 已以 TDD（測試驅動開發）落地：project／personal fresh PostgreSQL 18 custom dump 只在 tmpfs 保留明文，完整走讀後以 age X25519 公鑰加密，append-only 上傳、全量讀回 SHA-256／size 比對，manifest 最後提交；focused tests 9/9、固定 digest image build 與實容器工具鏈驗證 PASS，Fable 5 code review＋targeted re-review 收斂 PASS（2026-08-12）
 - [x] project／personal 真實 R2 committed manifests 已建立，freshness checker 實測兩側 PASS；本機 hourly systemd timer 已安裝且 `Result=success`／`ExecMainStatus=0`，作 off-platform tertiary check（平台外第三線檢查）（2026-08-12）
+- [ ] Coolify project／personal 兩套資源尚未部署 `backup` service 與每日 Scheduled Task；完成後須觀察至少一個自動週期，確認兩側新 manifest 與 freshness 均 PASS
 - [ ] Cloudflare Worker Cron primary dead-man 已完成程式與 dry-run bundle（20/20 focused tests），但尚缺 Wrangler deploy 認證、兩個 Telegram secrets 注入、正式 deploy 與 forced-failure 告警驗收；未完成前不得把 dead-man gate 標成 PASS
 - [x] Stop sentinel 落盤後 quick-kick `cc-memory-auto-capture.service`；SessionStart 在 injection flag off 時仍 quick-kick；PostToolUse 維持只 append；Claude Code／Codex 共用相同 wrappers
 - [x] hook contract tests（契約測試）覆蓋 Stop 順序、SessionStart flag off、recursion breaker（遞迴中止）、PostToolUse 不啟動及 systemctl fail-open
@@ -236,7 +237,7 @@
 - [x] PostToolUse／Stop 缺少 `session_id` 時 fail-open 但不寫入共同 `unknown.jsonl`，避免 payload 漂移把多個 session 合併成同一 rollup；hook contract tests 11/11 PASS（2026-08-12）
 - [x] 移除 `cc-memory-auto-capture.timer`；新增 reminder 5 分鐘與 Todoist 15 分鐘的 systemd services/timers 及獨立 wrappers，不讀 `~/.hermes/.env`
 - [x] `systemd-analyze verify` 驗證 auto-capture service、reminder/Todoist services 與兩個 task timers 通過；targeted tests 5 files／17 tests PASS（含 wrapper runtime 與 Telegram channel；2026-07-17）
-- [ ] memory 專用 bot 憑證寫入 `~/.ccm-memory-alert.env`（0600），執行 `--test-alert` 並確認收件
+- [x] memory 專用 bot 憑證寫入 `~/.ccm-memory-alert.env`（0600），執行 `--test-alert` 並由操作人確認收件（2026-08-12）
 - [x] 建立 `~/.ccm-reminders.env`（0600），並確認既有 `~/.ccm-personal-url`、`~/.ccm-todoist-token` 均為 0600（2026-07-17）
 - [x] 人審設定草稿，備份後把 SessionStart hook 追加到 Claude Code 與 Codex；JSON／TOML 解析 PASS（2026-07-17）
 - [x] Codex 的 SessionStart／PostToolUse／Stop hooks 已在 `~/.codex/hooks.json` 安裝，對應 `hooks.state` 均為 enabled 且有 trusted hash（2026-08-12 唯讀複核）

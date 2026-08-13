@@ -43,7 +43,7 @@ npx tsx scripts/run-auto-capture-supervisor.ts --test-alert
 
 capture LLM（擷取用語言模型）即使選 `claude-cli`，寫入後的 embedding 仍獨立使用 Gemini。正式 supervisor 從權限為 `0600` 的 `~/.gemini-api-key` 載入 key；缺少時擷取仍會成功，但新資料的 embedding 為 `NULL`，supervisor 會輸出 `embeddings-disabled`。如果 key 已載入但 API 回傳空值或失敗，worker 仍保留 capture 的 NULL 降級語意，同時在 summary 增加 `embedding-failed=N`，supervisor 將其視為需要告警的異常；這可抓到已輪替、失效或填錯內容的 key。正式 backfill 不接受 `.env` 或 ambient `GEMINI_API_KEY`，規則見下方。
 
-目前舊 Gemini key 已暴露，不得再拿來做 benchmark、backfill（補算）或 canary。外部處置順序固定為：先在 provider（供應商）端撤銷舊 key，再簽發新 key；新值只寫入 `0600` 的 `~/.gemini-api-key`（或另行核准的秘密儲存位置），不得貼進終端輸出、文件、issue（議題）或 Git。完成後先跑不寫 DB 的 benchmark preflight（前置檢查）與下方 backfill dry-run，再考慮任何 execute。repo 內的程式與測試無法代替 provider 端撤銷；截至 2026-08-12，這項外部動作尚未執行。
+暴露的舊 Gemini key 已由操作人在 provider（供應商）端撤銷；新 key 已寫入 `0600` 的 `~/.gemini-api-key`，並以 1536 dimensions smoke test（維度煙霧測試）通過。舊 key 不得再拿來做 benchmark、backfill（補算）或 canary。新值不得貼進終端輸出、文件、issue（議題）或 Git。repo 內的程式與測試不能代替 provider 端撤銷證據；正式簽核仍須以操作人的外部處置紀錄為準。後續 key 輪替以本節兩張表各 10 筆的 canary 作為可重複 smoke test：它會同時驗證安全 key loader、Gemini 呼叫、DB 寫入與 schema 的 `vector(1536)` 維度約束。
 
 先以預設 dry-run 盤點，不會呼叫 Gemini 或寫 DB；dry-run 預設以 1000-row keyset batch（1000 筆鍵集批次）降低遠端 DB round trip，`--execute` 預設仍是 10，兩者不可混淆：
 
@@ -51,13 +51,27 @@ capture LLM（擷取用語言模型）即使選 `claude-cli`，寫入後的 embe
 DATABASE_URL="$(<~/.ccm-project-url)" npm run backfill:embeddings -- --table all
 ```
 
-確認 key、待補筆數與 Gemini quota（配額）後才執行；指令使用 keyset pagination（鍵集分頁）、RPM（每分鐘請求數）節流與連續失敗斷路：
+確認 key、待補筆數與 Gemini quota（配額）後，先對兩張表各用顯式 `--limit 10` 執行 canary；`--table all --limit 10` 會把全域上限先用在 `project_memories`，無法涵蓋 `observations`，因此不可拿它代替下列兩次試跑。`--batch-size 10` 只控制每批筆數，**不會**限制整次執行總量：
+
+```bash
+DATABASE_URL="$(<~/.ccm-project-url)" npm run backfill:embeddings -- \
+  --table project_memories --execute --key-file ~/.gemini-api-key \
+  --limit 10 --batch-size 10 --rpm 60 --max-consecutive-failures 20
+
+DATABASE_URL="$(<~/.ccm-project-url)" npm run backfill:embeddings -- \
+  --table observations --execute --key-file ~/.gemini-api-key \
+  --limit 10 --batch-size 10 --rpm 60 --max-consecutive-failures 20
+```
+
+兩次 canary 都必須各自 `attempted=10`、`updated=10`、`failed=0`；schema 已把兩欄固定為 `vector(1536)`，成功寫入 10 筆即為維度約束通過的證據。任一條件不符即停止，不得進入全量。通過後才改用 `--table all` 並移除 `--limit 10` 執行全量回填：
 
 ```bash
 DATABASE_URL="$(<~/.ccm-project-url)" npm run backfill:embeddings -- \
   --table all --execute --key-file ~/.gemini-api-key \
   --batch-size 10 --rpm 60 --max-consecutive-failures 20
 ```
+
+全量執行使用 keyset pagination（鍵集分頁）、RPM（每分鐘請求數）節流與連續失敗斷路。人工停止條件刻意比內建斷路器保守：`attempted < 500` 時只要 `failed > 0` 就中止；`attempted >= 500` 後只要 `failed/attempted > 2%` 就中止並調查。這些不是程式內建條件，操作人必須監看每 10 次請求輸出的 progress（進度）；回填具冪等性，中止後只會再取尚未成功的 `embedding IS NULL` 資料列。
 
 `--execute` 強制要求顯式 `--key-file`；檔案必須是 `0600` regular file（一般檔案）且不得是 symlink（符號連結）。程式會隔離 `.env` 與 ambient `GEMINI_API_KEY`，輸出只留 path label、mode、mtime 與 12-hex SHA-256 fingerprint（指紋），不輸出 key。`--table all --limit N` 的 `N` 是兩張表合計的全域上限，依 `project_memories`、`observations` 順序分配。若結果的 `failed` 大於 0，失敗 row（資料列）本輪已跳過；修正暫時性錯誤後用相同命令重跑，`embedding IS NULL` 條件只會再取尚未成功的資料。
 
@@ -337,7 +351,7 @@ runtime state（執行期狀態）位於：
 下列項目必須依序全部通過；任何一項未完成都是 No-Go，不能只因 unit、typecheck（型別檢查）或測試成功就停用 claude-mem：
 
 1. **可復原性**：project／personal DB 有 canary 前的新鮮 dump，完整 restore 驗證通過；§5 historical epoch 與 archive 驗證通過；三者皆有已核對 SHA-256 的異地副本。
-2. **秘密安全**：provider 端已撤銷暴露的 Gemini key；新 key 只存在核准的 `0600` 秘密檔，安全 preflight 通過，輸出與文件沒有 key 值。
+2. **秘密安全**：provider 端已撤銷暴露的 Gemini key；新 key 只存在核准的 `0600` regular file（一般檔案）且不是 symlink（符號連結），安全 credential loader（憑證載入器）檢查與兩張表 canary 均通過，輸出與文件沒有 key 值。
 3. **品質閘**：收集至少 5 筆近 7 日、`query_surface='mcp'` 的真實 query，加上固定 5 組案例；production DB 全部 active 非個人語料 embedding coverage 必須為 100%，再以顯式的新 key file 跑完整 hybrid benchmark。claude-mem 對照須以公開 session detail 證明 project scope；人工標註者須知悉真實 query 的 self-selection caveat，並讓既定三項硬指標全部達標。只跑 keyword partial benchmark 不算通過。
 4. **backlog 切代**：操作人以最新 dry-run fingerprint 建立短效批准，執行預設 600 秒 settle 的 cutoff；archive verifier 通過後才允許新 epoch 承接正式 capture。歷史 backlog 不要求在啟用前全部回放。
 5. **單 tick canary**：先安裝 `0600` 告警 env、讓 `--test-alert` 實際送達，並在持久 unit 設定 `CC_MEMORY_REQUIRE_ALERTS=1`；任一條件未通過，canary 與觀察窗都不得起算。接著依 §2 更新並驗證 installed unit，建立短效 production marker，只允許 `CC_CAPTURE_MAX_SESSIONS_PER_TICK=1`；檢查 journal、DB project scope、capture 結果、`embedding-failed` 與告警，再立刻撤除 marker 並 stop。
@@ -353,7 +367,7 @@ npm run backup:freshness -- --json
 
 exit code：`0` 只保留給所有 gate 都能由機器證明通過的情況；`1` 代表至少一項 `FAIL` 或 `PARTIAL`；`2` 代表沒有已證明失敗，但仍有 `BLOCKED`／`UNKNOWN`；`3` 是 CLI 使用錯誤。provider 端 key 撤銷、異地復原、人工 benchmark、cutoff 授權、canary 與觀察窗都不會因本機檔案或自我聲明而轉成 `PASS`，因此 checker 是 fail-closed advisory（安全失敗的輔助證據），不能取代本節人工簽核。
 
-2026-08-12 的狀態：DB 本機備份與 restore、程式防線、focused tests（聚焦測試）、完整 suite（完整測試集）與 5 筆近 7 日 MCP 真實 query 已有證據；10 題 keyword baseline 也已完成。最新報告證明 claude-mem 10/10 題可由公開 session detail 驗證 project scope，並揭露 production embedding coverage 僅 27/14,229；runner 會把非純 hybrid、coverage 非 100%、缺顯式 key evidence、scope 未證明或真實 query provenance 不完整的報告強制標為 `PARTIAL`。異地副本、新 Gemini key、14,202 筆 backfill、正式 hybrid benchmark 與人工標註、正式 backlog cutoff、單 tick production canary 及後續觀察窗仍未完成。故目前結論維持 **No-Go**。
+2026-08-12 的狀態：DB 本機備份與 restore、程式防線、focused tests（聚焦測試）、完整 suite（完整測試集）與 5 筆近 7 日 MCP 真實 query 已有證據；10 題 keyword baseline 也已完成。project／personal 的加密 DB 異地副本已 committed 到 R2 並通過 full readback，但 age 私鑰 escrow 與 R2 下載→解密→restore 演練尚未完成，因此不能宣稱異地可復原。暴露的舊 Gemini key 已由操作人撤銷，新 key 檔為 `0600` 並通過 1536 維 smoke test。最新報告證明 claude-mem 10/10 題可由公開 session detail 驗證 project scope，並揭露 production embedding coverage 僅 27/14,229；runner 會把非純 hybrid、coverage 非 100%、缺顯式 key evidence、scope 未證明或真實 query provenance 不完整的報告強制標為 `PARTIAL`。14,202 筆 backfill、正式 hybrid benchmark 與人工標註、正式 backlog cutoff、單 tick production canary、Cloudflare Worker primary dead-man、Coolify 每日備份排程及後續觀察窗仍未完成。故目前結論維持 **No-Go**。
 
 ### 9.1 相依套件安全基線
 
