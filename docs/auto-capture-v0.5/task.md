@@ -230,7 +230,7 @@
 - [x] R2 加密備份 producer 已以 TDD（測試驅動開發）落地：project／personal fresh PostgreSQL 18 custom dump 只在 tmpfs 保留明文，完整走讀後以 age X25519 公鑰加密，append-only 上傳、全量讀回 SHA-256／size 比對，manifest 最後提交；focused tests 9/9、固定 digest image build 與實容器工具鏈驗證 PASS，Fable 5 code review＋targeted re-review 收斂 PASS（2026-08-12）
 - [x] project／personal 真實 R2 committed manifests 已建立，freshness checker 實測兩側 PASS；本機 hourly systemd timer 已安裝且 `Result=success`／`ExecMainStatus=0`，作 off-platform tertiary check（平台外第三線檢查）（2026-08-12）
 - [ ] Coolify project／personal 兩套資源尚未部署 `backup` service 與每日 Scheduled Task；完成後須觀察至少一個自動週期，確認兩側新 manifest 與 freshness 均 PASS
-- [ ] Cloudflare Worker Cron primary dead-man 已完成程式與 dry-run bundle（20/20 focused tests），但尚缺 Wrangler deploy 認證、兩個 Telegram secrets 注入、正式 deploy 與 forced-failure 告警驗收；未完成前不得把 dead-man gate 標成 PASS
+- [ ] Cloudflare Worker Cron primary dead-man 已正式部署；遠端確認兩個 Telegram `secret_text`、R2 binding 與 `17 * * * *` Cron。preview 先驗證真實 R2 的 26 小時 HTTP 200／極小門檻 HTTP 500；再讓正式 Worker 以極小門檻於 2026-08-13 18:17:12 Asia/Taipei 的真實 Cron 觸發，tail 為 `backup freshness gate failed`，18:18 已還原現行 26 小時 version `c4b00cfb-24e8-444f-bc6b-fe1615207917`。只差操作人確認 18:17 Telegram 實收後才能勾選
 - [x] Stop sentinel 落盤後 quick-kick `cc-memory-auto-capture.service`；SessionStart 在 injection flag off 時仍 quick-kick；PostToolUse 維持只 append；Claude Code／Codex 共用相同 wrappers
 - [x] hook contract tests（契約測試）覆蓋 Stop 順序、SessionStart flag off、recursion breaker（遞迴中止）、PostToolUse 不啟動及 systemctl fail-open
 - [x] PostToolUse／Stop 缺少 `transcript_path` 時不寫入 spool；Stop 只有 sentinel 成功落盤才 quick-kick（2026-08-12）

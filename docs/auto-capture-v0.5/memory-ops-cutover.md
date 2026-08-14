@@ -141,7 +141,7 @@ wrangler deploy
 
 Worker 對 project／personal manifests 使用與本機 checker 相同的 fail-closed contract（失敗即停止契約）；R2 list/get 例外、manifest 缺失／格式錯誤、recipient／cipher readback 不一致或 age >26 小時都發 Telegram 並讓 scheduled event 失敗。Cloudflare 與 R2 同平台故障時可能同時失去 storage 與 primary monitor，因此仍保留下列本機 timer 作 off-platform tertiary check（平台外第三線檢查），但它不能在 WSL／PC 關機時承擔 24/7 RPO 告警責任。
 
-截至 2026-08-12，Worker 程式、20 項 focused tests（聚焦測試）與 Wrangler dry-run bundle 已通過，但尚未注入 secrets、正式 deploy 或完成 forced-failure 告警驗收；因此 24/7 primary 仍缺位，本機 timer 是目前唯一自動 freshness 監測，且 PC 關機時有告警空窗。
+2026-08-13 已用獨立 account API token（帳號 API 權杖）正式部署 Worker；遠端狀態確認兩個 Telegram secrets 皆為 `secret_text`、R2 binding 指向 `cc-memory-backups`、Cron 為 `17 * * * *`。先以官方 `wrangler dev --remote --test-scheduled` 對真實 R2 驗證 26 小時門檻 HTTP 200 與極小門檻 HTTP 500；Fable 5 review 指出 preview 的臨時 secrets 不能證明正式 secrets 正確，因此再把正式 Worker 暫時部署為極小門檻。真實 Cron 於 18:17:12 Asia/Taipei 觸發，正式 tail 明列 `backup freshness gate failed` 而不是 Telegram 傳送錯誤；18:18 已立即用 repo 設定還原為 26 小時門檻，現行 version 為 `c4b00cfb-24e8-444f-bc6b-fe1615207917`，Cron、R2 binding 與兩個 secrets 均保留。一次性 `0600` preview secret 檔與目錄均已刪除。仍須由操作人確認 Telegram 實際收到 18:17 的正式 alert，才可把 forced-failure 人工驗收標為完成。
 
 本機 freshness checker 每小時驗證兩個 target 最新 canonical manifest：
 
