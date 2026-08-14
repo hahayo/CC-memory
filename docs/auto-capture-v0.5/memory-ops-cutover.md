@@ -119,13 +119,21 @@ production canary 與停用 claude-mem 前，除了 spool archive，project 與 
 
 兩份 manifest 的真實 freshness checker 結果皆為 PASS，完成時年齡約 0.01 小時。這只證明加密異地副本已 committed（提交完成）且遠端密文與上傳端一致；**尚未**證明私鑰 escrow（託管備援）或從 R2 完整下載、解密與 restore，因此 g1 仍不可轉 PASS。§5 的 immutable backlog archive 也仍須在正式 cutoff 後以相同原則加密上 R2；不得用接受 `file changed as we read it` 的 live tar 冒充一致性 snapshot（快照）。
 
+2026-08-14 重新執行原生 PostgreSQL 18 producer，project 與 personal 分別建立 `20260814T125919Z-6cf7e0a026c3a7ee`、`20260814T125934Z-44f61b67a002094e`；兩側均完成 R2 full readback，freshness checker 隨後由 stale FAIL 恢復為 PASS。這次更新 freshness，不改變尚缺 age 私鑰與異地 restore 演練的結論。
+
 ### 1.4.1 每日 DB 備份與 freshness dead-man
 
-`docker-compose.coolify.yml` 的 `backup` 是長駐 idle container（閒置容器）；每一套 project／personal Coolify compose 各自設定 `CC_BACKUP_TARGET`，並由 Coolify Scheduled Task 每日執行：
+production 實際拓樸是一套 Coolify PostgreSQL stack 內的 `cc_memory_project` 與 `cc_memory_personal` 兩個 DB。`docker-compose.coolify.yml` 因此提供兩個長駐 idle container（閒置容器）：`backup-project` 固定 `CC_BACKUP_TARGET=project`／`PGDATABASE=cc_memory_project`，`backup-personal` 固定 `CC_BACKUP_TARGET=personal`／`PGDATABASE=cc_memory_personal`。不得再用一個可由排程臨時覆寫 target／database 的容器，避免兩個排程都成功但實際重複備份同一個 DB。
+
+在 Coolify Scheduled Tasks 建立兩筆每日排程，選對應 container，兩者 command 都是：
 
 ```bash
 /app/cc-memory-backup.sh run
 ```
+
+兩筆排程必須錯開至少 30 分鐘，並先確認 Coolify instance 使用的排程 timezone（時區）；`TZ=Asia/Taipei` 只控制容器內時間，不替 Coolify scheduler（排程器）改時區。兩個 service 各自擁有獨立 tmpfs 與 flock，因此腳本鎖只防同一 container 重入，不能阻止兩個 container 同時 dump。部署後須各觀察至少一個自動週期，確認兩個新 manifest 與 freshness checker 都 PASS。
+
+全新建立或災難重建 stack 時，PostgreSQL image 只會自動建立 `POSTGRES_DB` 指定的 personal DB；啟用 `backup-project` 排程前，必須依既有 migration／restore 流程建立 `cc_memory_project`。`POSTGRES_DB` 不得偏離 `cc_memory_personal`。若 project DB 不存在，備份會 fail-closed 並告警，不會產生 manifest。
 
 容器只持有 DB dump 權限、限定 R2 token、Telegram 告警設定與 age recipient 公鑰，**不得**放 age 私鑰。明文 dump 僅存在 2 GiB `/backup-tmp` tmpfs（記憶體暫存檔案系統）；腳本使用全域 flock、每輪 fresh destination、完整 archive 走讀、append-only object key（只新增物件鍵）及 full readback（全量讀回）驗證。任何一步失敗都不建立 manifest；30 天 lock 下的孤兒密文保留到期，不嘗試刪除。
 

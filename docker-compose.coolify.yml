@@ -1,20 +1,17 @@
 # docker-compose.coolify.yml
-# Coolify 部署：PostgreSQL + pgvector（personal DB / project DB 共用此 compose）
+# Coolify 部署：一套 PostgreSQL + pgvector stack 內含 personal / project DB，
+# 並以兩個固定目標的備份 image 分別保護兩個 DB。
 #
-# 為何不寫 Dockerfile：
-#   pgvector/pgvector 已是 official image（postgres + pgvector 預裝），自寫
-#   Dockerfile 純粹多出 base / build / 版本偏移維護面。Coolify 把 compose
-#   當 single source of truth，env / volume / network 全在這裡定義。
-#
-# 對齊 Zeabur 現況：
+# 歷史遷移基線（已完成）：
 #   personal DB 在 Zeabur 用 pgvector/pgvector:pg18，dump 來源版本 PG 18.3。
 #   restore 流程見 README「## Coolify 部署」。
 #
 # Coolify 步驟：
 #   1. Coolify Dashboard → New Resource → Docker Compose Empty
 #   2. Git Source 指這個 repo，Compose file path = docker-compose.coolify.yml
-#   3. 部署完，到該 service Settings 開啟「Make it public」拿到 public port
-#   4. 本機 MCP server 用 public host:port 連線
+#   3. PostgreSQL 只 bind host loopback；不得開啟「Make it public」
+#   4. 本機 MCP server 依 README「建 SSH tunnel 連線」使用加密通道
+#   5. 依 docs/auto-capture-v0.5/memory-ops-cutover.md §1.4.1 建立兩筆備份排程
 
 services:
   postgres:
@@ -47,12 +44,12 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
 
-  backup:
+  backup-project:
     build:
       context: .
       dockerfile: ops/backup/Dockerfile
     environment:
-      CC_BACKUP_TARGET: ${CC_BACKUP_TARGET}
+      CC_BACKUP_TARGET: project
       CC_BACKUP_TMP_DIR: /backup-tmp
       CC_MEMORY_AGE_RECIPIENT: ${CC_MEMORY_AGE_RECIPIENT}
       CC_MEMORY_R2_BUCKET: ${CC_MEMORY_R2_BUCKET}
@@ -65,7 +62,43 @@ services:
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
       PGHOST: postgres
       PGPORT: "5432"
-      PGDATABASE: ${POSTGRES_DB:-cc_memory_personal}
+      PGDATABASE: cc_memory_project
+      PGUSER: ${POSTGRES_USER:-cc_memory}
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      TZ: Asia/Taipei
+    tmpfs:
+      - /backup-tmp:size=2g,mode=0700,uid=999,gid=999
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -x /app/cc-memory-backup.sh && findmnt -rn -o FSTYPE --target /backup-tmp | grep -qx tmpfs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  backup-personal:
+    build:
+      context: .
+      dockerfile: ops/backup/Dockerfile
+    environment:
+      CC_BACKUP_TARGET: personal
+      CC_BACKUP_TMP_DIR: /backup-tmp
+      CC_MEMORY_AGE_RECIPIENT: ${CC_MEMORY_AGE_RECIPIENT}
+      CC_MEMORY_R2_BUCKET: ${CC_MEMORY_R2_BUCKET}
+      CC_MEMORY_REQUIRE_ALERTS: "1"
+      CC_MEMORY_ALERT_BOT_TOKEN: ${CC_MEMORY_ALERT_BOT_TOKEN}
+      CC_MEMORY_ALERT_CHAT_ID: ${CC_MEMORY_ALERT_CHAT_ID}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: cc_memory_personal
       PGUSER: ${POSTGRES_USER:-cc_memory}
       PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
       TZ: Asia/Taipei

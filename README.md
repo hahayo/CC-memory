@@ -131,14 +131,16 @@ cc_memory_search / cc_memory_list
 
 ## Coolify 部署（PostgreSQL + pgvector）
 
-> 設計選擇：用 `docker-compose.coolify.yml`，不寫 Dockerfile。`pgvector/pgvector` 已是 official image，自寫 Dockerfile 純粹多出維護面；Coolify 也把 compose 當 single source of truth。
+> `docker-compose.coolify.yml` 是部署設定的 single source of truth（唯一真相來源）。PostgreSQL 使用 `pgvector/pgvector` image；每日加密備份使用 `ops/backup/Dockerfile` 建立獨立 image。
 
 ### 1. Coolify 建立 service
 
 1. Coolify Dashboard → **New Resource → Docker Compose Empty**
 2. **Source** 接這個 GitHub repo，**Compose file path** 填 `docker-compose.coolify.yml`
-3. Environment Variables 區塊可留空（會用 compose 內的 default：`POSTGRES_USER=cc_memory`、`POSTGRES_DB=cc_memory_personal`），或手動覆寫
+3. 設定 `SERVICE_PASSWORD_POSTGRES`、`CC_MEMORY_*`、`AWS_*` 與 age recipient 公鑰；秘密不得提交到 Git。`POSTGRES_DB` 維持 `cc_memory_personal`
 4. **Deploy** —— `SERVICE_PASSWORD_POSTGRES` 會在第一次部署時隨機生成並寫回 Coolify Environment Variables（之後 restart 不變）
+5. 依 migration／restore 流程建立 `cc_memory_project`；兩個備份 service 的 `PGDATABASE` 已固定，不可由環境變數覆寫
+6. 依 `docs/auto-capture-v0.5/memory-ops-cutover.md` §1.4.1，在兩個 backup service 建立錯開至少 30 分鐘的每日 Scheduled Tasks
 
 ### 2. 建 SSH tunnel 連線（取代「Make it public」）
 
