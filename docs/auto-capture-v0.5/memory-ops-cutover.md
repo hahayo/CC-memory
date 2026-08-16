@@ -41,7 +41,7 @@ npx tsx scripts/run-auto-capture-supervisor.ts --test-alert
 
 ### 1.2 Gemini embedding 憑證與安全補算
 
-capture LLM（擷取用語言模型）即使選 `claude-cli`，寫入後的 embedding 仍獨立使用 Gemini。正式 supervisor 從權限為 `0600` 的 `~/.gemini-api-key` 載入 key；缺少時擷取仍會成功，但新資料的 embedding 為 `NULL`，supervisor 會輸出 `embeddings-disabled`。如果 key 已載入但 API 回傳空值或失敗，worker 仍保留 capture 的 NULL 降級語意，同時在 summary 增加 `embedding-failed=N`，supervisor 將其視為需要告警的異常；這可抓到已輪替、失效或填錯內容的 key。正式 backfill 不接受 `.env` 或 ambient `GEMINI_API_KEY`，規則見下方。
+capture LLM（擷取用語言模型）即使選 `claude-cli`，寫入後的 embedding 仍獨立使用 Gemini。正式 supervisor 從 `~/.gemini-api-key` 載入 key；程式強制該路徑為 `0600` regular file（一般檔案）且拒絕 symlink（符號連結）。缺少或不安全時擷取仍會成功，但新資料的 embedding 為 `NULL`，supervisor 會輸出 `embeddings-disabled` 並把非 `ENOENT` 的 credential error（憑證錯誤）視為不健康 tick。若 key 已載入但 API 回傳空值或失敗，worker 仍保留 capture 的 NULL 降級語意，同時在 summary 增加 `embedding-failed=N`，supervisor 將其視為需要告警的異常；這可抓到已輪替、失效或填錯內容的 key。正式 backfill 不接受 `.env` 或 ambient `GEMINI_API_KEY`，規則見下方。
 
 暴露的舊 Gemini key 已由操作人在 provider（供應商）端撤銷；新 key 已寫入 `0600` 的 `~/.gemini-api-key`，並以 1536 dimensions smoke test（維度煙霧測試）通過。舊 key 不得再拿來做 benchmark、backfill（補算）或 canary。新值不得貼進終端輸出、文件、issue（議題）或 Git。repo 內的程式與測試不能代替 provider 端撤銷證據；正式簽核仍須以操作人的外部處置紀錄為準。後續 key 輪替以本節兩張表各 10 筆的 canary 作為可重複 smoke test：它會同時驗證安全 key loader、Gemini 呼叫、DB 寫入與 schema 的 `vector(1536)` 維度約束。
 

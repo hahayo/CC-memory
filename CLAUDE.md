@@ -117,10 +117,14 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_MEMORY_SPOOL_MAX_MB` - spool 總大小上限（MB）；超過停止 capture 並告警
 - `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 96 KiB、其他 provider 256 KiB
 - `CC_CAPTURE_MAX_SESSIONS_PER_TICK` - worker 每次 tick（執行輪次）最多處理幾個 session
+- `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
 - `CC_MEMORY_SPOOL_LOCK_STALE_MS` - spool 檔案鎖過期毫秒數
+- `CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR` - 只供離線 archive/drain 讀取固定 transcript snapshot；live supervisor 會主動移除，避免誤讀封存資料
 - `CC_MEMORY_ALERT_BOT_TOKEN` - Telegram 告警 bot token
 - `CC_MEMORY_ALERT_CHAT_ID` - Telegram 告警 chat id
 - `CC_MEMORY_ALERT_API_BASE` - Telegram API base URL（可選，覆蓋預設）
+- `CC_MEMORY_REQUIRE_ALERTS` - 設為 `1` 時告警設定是 supervisor hard gate；正式 auto-capture unit 固定啟用
+- `CC_MEMORY_EMBEDDING_EXPECTED` - supervisor 成功載入 Gemini key 時自動設為 `1`；embedding 失敗會讓 tick 不健康並告警
 - `CC_MEMORY_INJECT_TOKEN_BUDGET` - SessionStart（工作階段啟動）注入的 token budget（語彙預算，預設 1200）
 - `CC_MEMORY_INJECT_RECENT` - SessionStart Recent Activity 注入開關（預設 off）
 - `CC_MEMORY_INCLUDE_OBSERVATIONS` - search 是否包含 observations（觀察記錄，預設 on）
@@ -128,6 +132,14 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_TICK_BUDGET_MS` - worker 每 tick（執行輪次）的時間預算毫秒（預設 240000；0=停用；預算耗盡則不開新窗優雅收尾）
 - `EMBEDDING_MODEL` - embedding（嵌入向量）模型名稱（預設 `gemini-embedding-001`）
 - `EMBEDDING_DIMENSIONS` - embedding 向量維度（預設 1536）
+- `CC_BACKUP_TARGET` - 備份目標，只允許 `project` 或 `personal`；Coolify 兩個 service 各自固定
+- `CC_BACKUP_TMP_DIR` - 明文 dump 暫存目錄；正式容器必須是 tmpfs
+- `CC_BACKUP_MAX_AGE_HOURS` - R2 committed manifest 最大允許年齡（預設 26）
+- `CC_BACKUP_FRESHNESS_STATE_FILE` - freshness checker 狀態檔路徑（可選）
+- `CC_MEMORY_R2_BUCKET` - R2 備份 bucket 名稱
+- `CC_MEMORY_AGE_RECIPIENT` - age X25519 加密公鑰；不得把私鑰放入容器或 env
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` - 限定備份 bucket 的 R2 S3 相容憑證
+- `AWS_ENDPOINT_URL` / `AWS_DEFAULT_REGION` - R2 S3 endpoint 與 region
 
 ## Key Design Patterns
 

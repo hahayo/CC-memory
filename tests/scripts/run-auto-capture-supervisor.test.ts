@@ -775,6 +775,90 @@ describe('scripts/run-auto-capture-supervisor', () => {
     expect(capturedEnv.CC_MEMORY_EMBEDDING_EXPECTED).toBe('1')
   })
 
+  it('does not pass a permissive embedding API key file into the live worker', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-supervisor-permissive-key-'))
+    const keyFile = join(root, 'gemini-api-key')
+    writeFileSync(keyFile, 'must-not-reach-worker\n', { mode: 0o644 })
+    let capturedEnv: NodeJS.ProcessEnv = {}
+
+    try {
+      const result = await runAutoCaptureSupervisorTick(
+        {
+          projectUrl: 'postgres://project-db.example/cc_memory',
+          geminiApiKeyFile: keyFile,
+          env: { CC_CAPTURE_LLM: 'claude-cli' },
+          alertTarget: {
+            botToken: 'bot-token',
+            chatId: '1679325299',
+            apiBase: 'https://api.telegram.org',
+            timeoutMs: 10_000,
+          },
+        },
+        {
+          loadState: async () => createEmptyAutoCaptureAlertState(),
+          saveState: async () => {},
+          runWorker: async (input) => {
+            capturedEnv = input.env
+            return {
+              exitCode: 0,
+              stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0\n',
+              stderr: '',
+            }
+          },
+          sendTelegram: async () => {},
+        },
+      )
+
+      expect(capturedEnv.GEMINI_API_KEY).toBeUndefined()
+      expect(result.exitCode).toBe(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not follow a symlinked embedding API key into the live worker', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-supervisor-symlink-key-'))
+    const target = join(root, 'gemini-api-key-target')
+    const keyFile = join(root, 'gemini-api-key')
+    writeFileSync(target, 'must-not-reach-worker\n', { mode: 0o600 })
+    symlinkSync(target, keyFile)
+    let capturedEnv: NodeJS.ProcessEnv = {}
+
+    try {
+      const result = await runAutoCaptureSupervisorTick(
+        {
+          projectUrl: 'postgres://project-db.example/cc_memory',
+          geminiApiKeyFile: keyFile,
+          env: { CC_CAPTURE_LLM: 'claude-cli' },
+          alertTarget: {
+            botToken: 'bot-token',
+            chatId: '1679325299',
+            apiBase: 'https://api.telegram.org',
+            timeoutMs: 10_000,
+          },
+        },
+        {
+          loadState: async () => createEmptyAutoCaptureAlertState(),
+          saveState: async () => {},
+          runWorker: async (input) => {
+            capturedEnv = input.env
+            return {
+              exitCode: 0,
+              stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0\n',
+              stderr: '',
+            }
+          },
+          sendTelegram: async () => {},
+        },
+      )
+
+      expect(capturedEnv.GEMINI_API_KEY).toBeUndefined()
+      expect(result.exitCode).toBe(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('does not pass an archived transcript snapshot directory into the live worker', async () => {
     let capturedEnv: NodeJS.ProcessEnv = {}
 

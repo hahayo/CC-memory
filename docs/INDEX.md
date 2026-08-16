@@ -8,7 +8,7 @@
 
 | Track | 目錄 | 狀態 | 一句話 |
 |---|---|---|---|
-| **Track 1：memory 核心（v0.3 → v0.5）** | `docs/auto-capture-v0.5/` + `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**v0.5 M1-M6 已交付（2026-07-08，PR #9-#18）；benchmark Go/No-Go 預計 2026-07-21** | auto-capture（自動採集）是「取代 claude-mem」主線；v0.4 Phase C 休眠設計已被 v0.5 observation-first（觀察紀錄優先）SDD 取代 |
+| **Track 1：memory 核心（v0.3 → v0.5）** | `docs/auto-capture-v0.5/` + `docs/{spec,plan,task}.md` | Phase A ✅（tag `v0.3-phase-a`）／Phase B ❌ 取消／**v0.5 M1-M6 已交付；2026-08-12 readiness audit 為 PARTIAL／No-Go，見 cutover §9** | auto-capture（自動採集）是「取代 claude-mem」主線；v0.4 Phase C 休眠設計已被 v0.5 observation-first（觀察紀錄優先）SDD 取代 |
 | **Track 2：personal-hub 個人中樞** | `docs/personal-hub/` | ✅ **已交付**（2026-06-10 prod cutover） | Phase 0-3 + Todoist 5 tools + at-least-once（至少一次投遞）queue 全上線；維運見 `personal-hub/prod-runbook.md` |
 | **Track 3：project DB cutover** | `docs/migrations/2026-06-29-cc-memory-project-cutover/` | ✅ **EXECUTED**（2026-07-01） | Zeabur → Coolify，Plan B fresh schema（全新結構）；`addendum-2026-06-30-plan-b.md` 是 actual runbook；剩 Step F（Zeabur 退役）待做 |
 

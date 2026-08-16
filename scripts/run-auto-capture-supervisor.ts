@@ -198,31 +198,35 @@ export function databaseTargetIdentity(databaseUrl: string): string {
   return `${hostname}:${port}${parsed.pathname}`
 }
 
-export async function loadSecureProductionApprovalDocument(filePath: string): Promise<string> {
+async function readSecureMode0600RegularFile(filePath: string, label: string): Promise<string> {
   let handle: Awaited<ReturnType<typeof open>>
   try {
     handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
-      throw new Error('production approval marker must be a regular file (symlinks are not accepted)')
+      throw new Error(`${label} must be a regular file (symlinks are not accepted)`)
     }
     throw error
   }
   try {
     const metadata = await handle.stat()
     if (!metadata.isFile()) {
-      throw new Error('production approval marker must be a regular file (symlinks are not accepted)')
+      throw new Error(`${label} must be a regular file (symlinks are not accepted)`)
     }
     const mode = metadata.mode & 0o777
     if (mode !== 0o600) {
       throw new Error(
-        `production approval marker must have mode 0600 (actual: ${mode.toString(8).padStart(4, '0')})`
+        `${label} must have mode 0600 (actual: ${mode.toString(8).padStart(4, '0')})`
       )
     }
     return handle.readFile('utf8')
   } finally {
     await handle.close()
   }
+}
+
+export async function loadSecureProductionApprovalDocument(filePath: string): Promise<string> {
+  return readSecureMode0600RegularFile(filePath, 'production approval marker')
 }
 
 export async function checkProductionApproval(
@@ -281,7 +285,11 @@ async function maybeReadGeminiApiKey(
   if (env.GEMINI_API_KEY?.trim()) return env.GEMINI_API_KEY
 
   try {
-    return await readTrimmedFile(keyFile, 'Gemini API key file')
+    const value = (await readSecureMode0600RegularFile(keyFile, 'embedding key file')).trim()
+    if (!value) {
+      throw new Error(`Gemini API key file is empty: ${keyFile}`)
+    }
+    return value
   } catch (error) {
     onUnavailable?.(error)
     return undefined

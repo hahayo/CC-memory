@@ -15,7 +15,8 @@
 
 services:
   postgres:
-    image: pgvector/pgvector:pg18
+    # PostgreSQL 18.4 + pgvector 0.8.3；釘 multi-arch digest，避免 redeploy 靜默升版。
+    image: pgvector/pgvector:0.8.3-pg18@sha256:c8a919765f2ef63681329fa21021b830cd4d79d1165bdca730dd016014e4da84
     restart: unless-stopped
     environment:
       # Coolify magic env：SERVICE_PASSWORD_* 首次部署隨機生成、寫入 Coolify
