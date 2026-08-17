@@ -6,6 +6,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
@@ -483,7 +484,81 @@ export function archiveCaptureEpoch(input: {
   return manifest;
 }
 
-export function verifyCaptureEpochArchive(archiveDir: string): {
+function archiveTreeEntries(root: string): string[] {
+  const entries: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      const relative = path.relative(root, full).split(path.sep).join('/');
+      const info = lstatSync(full);
+      if (info.isSymbolicLink()) throw new Error(`unexpected archive entry type: ${relative}`);
+      if (info.isDirectory()) {
+        entries.push(`${relative}/`);
+        walk(full);
+      } else if (info.isFile() && info.nlink === 1) {
+        entries.push(relative);
+      } else {
+        throw new Error(`unexpected archive entry type: ${relative}`);
+      }
+    }
+  };
+  walk(root);
+  return entries.sort();
+}
+
+function expectedArchiveEntries(manifest: CaptureEpochArchiveManifest): string[] {
+  if (manifest.spoolArchive.relpath !== 'spool.tar.gz') {
+    throw new Error('spool archive relpath must be spool.tar.gz');
+  }
+  const expected = new Set([
+    'manifest.json',
+    'manifest.sha256',
+    'spool.tar.gz',
+    'transcripts/',
+  ]);
+  for (const transcript of manifest.transcripts) {
+    if (transcript.status !== 'snapshotted') continue;
+    const relative = transcript.snapshotRelpath ?? '';
+    if (!/^transcripts\/[0-9a-f]{64}\.jsonl$/.test(relative)) {
+      throw new Error('transcript snapshot relpath is invalid');
+    }
+    expected.add(relative);
+  }
+  return [...expected].sort();
+}
+
+function expectedSpoolArchiveFiles(
+  entries: string[],
+  manifest: CaptureEpochArchiveManifest,
+): { root: string; files: string[] } {
+  const first = entries[0] ?? '';
+  const root = first.endsWith('/') ? first.slice(0, -1) : '';
+  if (!root || root.includes('/') || /\p{Cc}/u.test(root)) {
+    throw new Error('spool archive must start with one safe epoch root');
+  }
+  const expected = new Set<string>();
+  for (const file of manifest.spoolFiles) {
+    const relative = file.relpath.split(path.sep).join('/');
+    const normalized = path.posix.normalize(relative);
+    if (
+      !relative ||
+      relative !== normalized ||
+      path.posix.isAbsolute(relative) ||
+      normalized === '..' ||
+      normalized.startsWith('../') ||
+      /\p{Cc}/u.test(relative)
+    ) {
+      throw new Error('spool manifest contains an unsafe relpath');
+    }
+    expected.add(`${root}/${relative}`);
+  }
+  return { root, files: [...expected].sort() };
+}
+
+export function verifyCaptureEpochArchive(
+  archiveDir: string,
+  options: { tempRoot?: string } = {},
+): {
   ok: boolean;
   reason?: string;
 } {
@@ -498,6 +573,11 @@ export function verifyCaptureEpochArchive(archiveDir: string): {
       return { ok: false, reason: 'manifest sha256 mismatch' };
     }
     const manifest = JSON.parse(manifestSource) as CaptureEpochArchiveManifest;
+    const actualArchiveEntries = archiveTreeEntries(archiveDir);
+    const allowedArchiveEntries = expectedArchiveEntries(manifest);
+    if (JSON.stringify(actualArchiveEntries) !== JSON.stringify(allowedArchiveEntries)) {
+      return { ok: false, reason: 'unexpected archive entry outside the manifest allowlist' };
+    }
     const spoolArchive = path.join(archiveDir, manifest.spoolArchive.relpath);
     if (
       statSync(spoolArchive).size !== manifest.spoolArchive.bytes ||
@@ -505,18 +585,55 @@ export function verifyCaptureEpochArchive(archiveDir: string): {
     ) {
       return { ok: false, reason: 'spool archive verification failed' };
     }
-    const listed = spawnSync('tar', ['-tzf', spoolArchive], {
+    const listed = spawnSync('tar', ['--quoting-style=literal', '-tzf', spoolArchive], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     });
     if (listed.status !== 0) return { ok: false, reason: 'spool archive listing failed' };
     const entries = listed.stdout.split(/\r?\n/).filter(Boolean);
     const unsafeEntry = entries.find((entry) => {
-      const normalized = path.posix.normalize(entry);
-      return path.posix.isAbsolute(entry) || normalized === '..' || normalized.startsWith('../');
+      const canonical = entry.endsWith('/') ? entry.slice(0, -1) : entry;
+      const normalized = path.posix.normalize(canonical);
+      return (
+        !canonical ||
+        /\p{Cc}/u.test(canonical) ||
+        path.posix.isAbsolute(canonical) ||
+        normalized !== canonical ||
+        normalized === '..' ||
+        normalized.startsWith('../')
+      );
     });
     if (unsafeEntry) return { ok: false, reason: 'spool archive contains an unsafe path' };
-    const extractionRoot = mkdtempSync(path.join(tmpdir(), 'cc-memory-archive-verify-'));
+    const verbose = spawnSync('tar', ['--quoting-style=literal', '-tvzf', spoolArchive], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (verbose.status !== 0) return { ok: false, reason: 'spool archive verbose listing failed' };
+    const verboseEntries = verbose.stdout.split(/\r?\n/).filter(Boolean);
+    if (
+      verboseEntries.length !== entries.length ||
+      verboseEntries.some((entry) => entry[0] !== 'd' && entry[0] !== '-')
+    ) {
+      return { ok: false, reason: 'unexpected spool archive entry type' };
+    }
+    if (new Set(entries).size !== entries.length) {
+      return { ok: false, reason: 'spool archive contains duplicate entries' };
+    }
+    const { root, files: expectedSpoolFiles } = expectedSpoolArchiveFiles(entries, manifest);
+    const actualSpoolFiles = entries
+      .filter((_entry, index) => verboseEntries[index]![0] === '-')
+      .sort();
+    const actualSpoolDirectories = entries
+      .filter((_entry, index) => verboseEntries[index]![0] === 'd');
+    if (
+      !actualSpoolDirectories.includes(`${root}/`) ||
+      actualSpoolDirectories.some((entry) => !entry.startsWith(`${root}/`)) ||
+      JSON.stringify(actualSpoolFiles) !== JSON.stringify(expectedSpoolFiles)
+    ) {
+      return { ok: false, reason: 'spool archive files do not match the manifest allowlist' };
+    }
+    const extractionParent = options.tempRoot ?? tmpdir();
+    const extractionRoot = mkdtempSync(path.join(extractionParent, 'cc-memory-archive-verify-'));
     try {
       const extracted = spawnSync('tar', ['-xzf', spoolArchive, '-C', extractionRoot], {
         encoding: 'utf8',
@@ -615,14 +732,44 @@ function cutoffId(now: Date): string {
 }
 
 function reexecUnderFlock(options: ArchiveBacklogCliOptions): number | null {
-  if (process.env.CC_MEMORY_ARCHIVE_FLOCKED === '1') return null;
   mkdirSync(path.dirname(options.lockFile), { recursive: true, mode: 0o700 });
-  const tsxCli = path.join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  if (process.env.CC_MEMORY_ARCHIVE_LOCK_PATH !== undefined) {
+    const lockInfo = statSync(options.lockFile);
+    const matchingFd = readdirSync('/proc/self/fd').find((rawFd) => {
+      const fd = Number(rawFd);
+      if (!Number.isSafeInteger(fd) || fd < 3) return false;
+      try {
+        const info = fstatSync(fd);
+        return info.isFile() && info.dev === lockInfo.dev && info.ino === lockInfo.ino;
+      } catch {
+        return false;
+      }
+    });
+    if (matchingFd === undefined) {
+      throw new Error('inherited archive lock fd does not match the lock file');
+    }
+    const fdInfo = readFileSync(`/proc/self/fdinfo/${matchingFd}`, 'utf8');
+    const lockPattern = new RegExp(
+      `^lock:\\s+\\d+: FLOCK\\s+ADVISORY\\s+WRITE\\s+${process.pid}\\s+[^:]+:[^:]+:${lockInfo.ino}\\s`,
+      'm',
+    );
+    if (!lockPattern.test(fdInfo)) {
+      throw new Error('inherited archive lock fd is not exclusively locked');
+    }
+    return null;
+  }
   const child = spawnSync(
     '/usr/bin/flock',
-    ['-n', '-E', '73', options.lockFile, process.execPath, tsxCli, process.argv[1], ...process.argv.slice(2)],
-    { stdio: 'inherit', env: { ...process.env, CC_MEMORY_ARCHIVE_FLOCKED: '1' } },
+    [
+      '-F', '-n', '-E', '73', options.lockFile,
+      process.execPath, '--import', 'tsx', process.argv[1], ...process.argv.slice(2),
+    ],
+    {
+      stdio: 'inherit',
+      env: { ...process.env, CC_MEMORY_ARCHIVE_LOCK_PATH: options.lockFile },
+    },
   );
+  if (child.error) throw new Error(`failed to start archive flock: ${child.error.message}`);
   if (child.status === 73) {
     process.stderr.write(`[cc-memory] backlog cutoff lock busy: ${options.lockFile}\n`);
     return 3;

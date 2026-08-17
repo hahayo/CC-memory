@@ -286,7 +286,18 @@ spool_fingerprint=<dry-run output>
 npm run archive:capture-backlog -- --execute
 ```
 
-成功輸出會列出 `oldEpochDir`、`newEpochDir` 與 `archiveDir`。archive 內含 `spool.tar.gz`、`transcripts/`、`manifest.json` 與 `manifest.sha256`；verifier（驗證器）會實際解開 tar 到一次性目錄，逐檔比對 manifest 的相對路徑、大小、行數與 SHA-256。manifest 不保存 transcript 完整路徑，只保存路徑雜湊、需要的最大 byte boundary（位元組邊界）、快照狀態與內容雜湊。任何缺檔或短檔都明列為 unrecoverable（不可復原），不會冒充成功。舊 epoch 與 archive 都不可因 cutover 成功而刪除，且仍需另做 offsite copy（異地副本）。
+成功輸出會列出 `oldEpochDir`、`newEpochDir` 與 `archiveDir`。archive 內含 `spool.tar.gz`、`transcripts/`、`manifest.json` 與 `manifest.sha256`；verifier（驗證器）會實際解開 tar 到一次性目錄，逐檔比對 manifest 的相對路徑、大小、行數與 SHA-256。spool 內的安全空目錄可保留，但任何額外 regular file、symlink、hardlink 或 special entry 都會拒絕。manifest 不保存 transcript 完整路徑，只保存路徑雜湊、需要的最大 byte boundary（位元組邊界）、快照狀態與內容雜湊。任何缺檔或短檔都明列為 unrecoverable（不可復原），不會冒充成功。舊 epoch 與 archive 都不可因 cutover 成功而刪除，且仍需另做 offsite copy（異地副本）。
+
+本機 archive verifier 通過後，使用專用 CLI 建立加密異地副本。它預設以 `O_NOFOLLOW` 讀取 `~/.ccm-r2.env` 與 `~/.config/cc-memory/age-recipient.txt`；R2 檔必須是 `0600` regular file，recipient 檔不得由 group／others 寫入，兩者皆拒絕 symlink。暫存打包、驗證解包、密文與全量讀回只放在 tmpfs；archive 與 tmpfs 路徑不得相同或互為祖先。CLI 取得全域 flock 後先清除固定前綴的舊 tmpfs run directory，再檢查本機 archive 的精確 allowlist、內層 tar 型態、私有檔案樹與容量；實際打包完成後會再解開並驗證一次，避免驗證與打包間的內容變動。R2 密文使用 `--immutable` append-only key，上傳後完整讀回比對 bytes／SHA-256，最後才提交 content-addressed manifest（內容定址清單檔）：
+
+```bash
+install -d -m 0700 /dev/shm/cc-memory-backlog-upload
+CC_BACKLOG_UPLOAD_TMP_DIR=/dev/shm/cc-memory-backlog-upload \
+  npm run upload:capture-backlog -- \
+  --archive-dir <archiveDir> --json
+```
+
+成功輸出會列出 `objectKey` 與 `manifestKey`。`manifestKey` 內含 manifest 內容的 SHA-256；reader 必須先核對 key 內雜湊才可把它視為完成標記。密文或 manifest 讀回不一致時，R2 可能因 Bucket Lock 留下孤兒物件，但不會形成可通過雜湊驗證的完成標記。同一 run ID 重試不得覆寫既有物件，必須使用新的隨機 run ID。archive directory 必須維持 pristine，不得加入 receipt、README 或其他檔案；若要保存輸出收據，放在 archive 的 sibling directory（同層目錄），不可放進 archive。完成後仍保留本機 archive 與 historical epoch，不得因 R2 上傳成功而刪除。
 
 如果輸出已顯示 spool symlink 指向新 epoch，但 settle、snapshot、tar 或 verify 隨後失敗，不要再次對目前的新 spool 執行一般 cutoff，也不要刪除 partial archive（不完整封存）。錯誤訊息中的 historical epoch 仍是資料真相；先確認新 spool symlink 正常，再對該 historical epoch 重新做指紋綁定的 resume：
 

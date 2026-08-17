@@ -16,6 +16,7 @@
     "clean": "rm -rf build",
     "backfill:embeddings": "npx tsx scripts/backfill-embeddings.ts",
     "archive:capture-backlog": "npx tsx scripts/archive-capture-backlog.ts",
+    "upload:capture-backlog": "npx tsx scripts/upload-capture-backlog.ts",
     "drain:capture": "npx tsx scripts/drain-capture-backlog.ts",
     "backup:freshness": "npx tsx scripts/check-backup-freshness.ts",
     "readiness:production": "npx tsx scripts/check-production-readiness.ts",

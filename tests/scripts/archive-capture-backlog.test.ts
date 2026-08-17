@@ -1,12 +1,16 @@
 import {
+  closeSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,6 +36,20 @@ function makeRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'cc-memory-backlog-archive-'));
   roots.push(root);
   return root;
+}
+
+function refreshSpoolArchiveHashes(archive: string): void {
+  const manifestPath = join(archive, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const spoolSource = readFileSync(join(archive, 'spool.tar.gz'));
+  manifest.spoolArchive.bytes = spoolSource.length;
+  manifest.spoolArchive.sha256 = createHash('sha256').update(spoolSource).digest('hex');
+  const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(manifestPath, manifestSource);
+  writeFileSync(
+    join(archive, 'manifest.sha256'),
+    `${createHash('sha256').update(manifestSource).digest('hex')}  manifest.json\n`,
+  );
 }
 
 afterEach(() => {
@@ -166,6 +184,65 @@ describe('capture epoch cutoff', () => {
     expect(historicalJsonl).toContain('{"stray":true}\n');
     expect(lstatSync(spool).isSymbolicLink()).toBe(true);
   });
+
+  it('rejects the archive lock marker when no matching fd is inherited', () => {
+    const root = makeRoot();
+    const spool = join(root, 'spool');
+    const lock = join(root, 'cutoff.lock');
+    mkdirSync(spool);
+    writeFileSync(join(spool, 'session.jsonl'), '{}\n');
+    writeFileSync(lock, '', { mode: 0o600 });
+    const script = join(process.cwd(), 'scripts', 'archive-capture-backlog.ts');
+
+    const result = spawnSync(process.execPath, [
+      '--import', 'tsx', script,
+      '--execute',
+      '--spool-dir', spool,
+      '--lock-file', lock,
+      '--settle-ms', '0',
+      '--allow-short-settle',
+    ], {
+      env: { ...process.env, CC_MEMORY_ARCHIVE_LOCK_PATH: lock },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/lock fd does not match the lock file/i);
+  });
+
+  it('rejects a matching archive lock fd that is not exclusively locked', () => {
+    const root = makeRoot();
+    const spool = join(root, 'spool');
+    const lock = join(root, 'cutoff.lock');
+    mkdirSync(spool);
+    writeFileSync(join(spool, 'session.jsonl'), '{}\n');
+    writeFileSync(lock, '', { mode: 0o600 });
+    const script = join(process.cwd(), 'scripts', 'archive-capture-backlog.ts');
+    const fd = openSync(lock, 'r');
+    try {
+      const stdio: Array<'ignore' | 'pipe' | number> = [
+        'ignore', 'pipe', 'pipe',
+        'ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'ignore', fd,
+      ];
+      const result = spawnSync(process.execPath, [
+        '--import', 'tsx', script,
+        '--execute',
+        '--spool-dir', spool,
+        '--lock-file', lock,
+        '--settle-ms', '0',
+        '--allow-short-settle',
+      ], {
+        env: { ...process.env, CC_MEMORY_ARCHIVE_LOCK_PATH: lock },
+        encoding: 'utf8',
+        stdio,
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/lock fd is not exclusively locked/i);
+    } finally {
+      closeSync(fd);
+    }
+  });
 });
 
 describe('capture epoch archive', () => {
@@ -222,6 +299,289 @@ describe('capture epoch archive', () => {
     expect(verifyCaptureEpochArchive(archive)).toMatchObject({
       ok: false,
       reason: 'spool archive contents do not match the manifest',
+    });
+  });
+
+  it('rejects regular files outside the manifest allowlist', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+    writeFileSync(join(archive, 'unexpected-secret.txt'), 'not in manifest', { mode: 0o600 });
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unexpected archive entry/i),
+    });
+  });
+
+  it('accepts safe empty directories inside the spool archive', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(join(epoch, 'project', 'empty'), { recursive: true });
+    writeFileSync(join(epoch, 'project', 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({ ok: true });
+  });
+
+  it('rejects regular files inside the spool archive that are absent from the manifest', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const maliciousParent = join(root, 'malicious-extra-file');
+    const maliciousEpoch = join(maliciousParent, 'epoch');
+    mkdirSync(maliciousEpoch, { recursive: true });
+    writeFileSync(join(maliciousEpoch, 'session.jsonl'), '{}\n');
+    writeFileSync(join(maliciousEpoch, 'extra.jsonl'), '{"extra":true}\n');
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', maliciousParent,
+      '-czf', spoolArchive,
+      'epoch',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+
+    const manifestPath = join(archive, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const spoolSource = readFileSync(spoolArchive);
+    manifest.spoolArchive.bytes = spoolSource.length;
+    manifest.spoolArchive.sha256 = createHash('sha256').update(spoolSource).digest('hex');
+    const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, manifestSource);
+    writeFileSync(
+      join(archive, 'manifest.sha256'),
+      `${createHash('sha256').update(manifestSource).digest('hex')}  manifest.json\n`,
+    );
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/files do not match the manifest allowlist/i),
+    });
+  });
+
+  it('rejects duplicate entries inside the spool archive', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', root,
+      '-czf', spoolArchive,
+      '--hard-dereference',
+      'epoch/session.jsonl',
+      'epoch/session.jsonl',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+    refreshSpoolArchiveHashes(archive);
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/duplicate entries/i),
+    });
+  });
+
+  it('rejects parent traversal entries inside the spool archive', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const source = join(root, 'unsafe-source.jsonl');
+    writeFileSync(source, '{}\n');
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', root,
+      '-czf', spoolArchive,
+      '--transform=s#^unsafe-source.jsonl#../escape.jsonl#',
+      'unsafe-source.jsonl',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+    refreshSpoolArchiveHashes(archive);
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unsafe path/i),
+    });
+  });
+
+  it('rejects links inside the spool archive before extraction', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const maliciousParent = join(root, 'malicious');
+    const maliciousEpoch = join(maliciousParent, 'epoch');
+    mkdirSync(maliciousEpoch, { recursive: true });
+    writeFileSync(join(maliciousEpoch, 'session.jsonl'), '{}\n');
+    symlinkSync('/etc/passwd', join(maliciousEpoch, 'link'));
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', maliciousParent,
+      '-czf', spoolArchive,
+      'epoch',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+
+    const manifestPath = join(archive, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const spoolSource = readFileSync(spoolArchive);
+    manifest.spoolArchive.bytes = spoolSource.length;
+    manifest.spoolArchive.sha256 = createHash('sha256').update(spoolSource).digest('hex');
+    const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, manifestSource);
+    writeFileSync(
+      join(archive, 'manifest.sha256'),
+      `${createHash('sha256').update(manifestSource).digest('hex')}  manifest.json\n`,
+    );
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unexpected spool archive entry type/i),
+    });
+  });
+
+  it('rejects hardlinks inside the spool archive before extraction', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const maliciousParent = join(root, 'malicious-hardlink');
+    const maliciousEpoch = join(maliciousParent, 'epoch');
+    mkdirSync(maliciousEpoch, { recursive: true });
+    const original = join(maliciousEpoch, 'session.jsonl');
+    writeFileSync(original, '{}\n');
+    linkSync(original, join(maliciousEpoch, 'hardlink.jsonl'));
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', maliciousParent,
+      '-czf', spoolArchive,
+      'epoch',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+
+    const manifestPath = join(archive, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const spoolSource = readFileSync(spoolArchive);
+    manifest.spoolArchive.bytes = spoolSource.length;
+    manifest.spoolArchive.sha256 = createHash('sha256').update(spoolSource).digest('hex');
+    const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, manifestSource);
+    writeFileSync(
+      join(archive, 'manifest.sha256'),
+      `${createHash('sha256').update(manifestSource).digest('hex')}  manifest.json\n`,
+    );
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unexpected spool archive entry type/i),
+    });
+  });
+
+  it('rejects special entries inside the spool archive before extraction', () => {
+    const root = makeRoot();
+    const epoch = join(root, 'epoch');
+    const archive = join(root, 'archive');
+    mkdirSync(epoch);
+    writeFileSync(join(epoch, 'session.jsonl'), '{}\n');
+    archiveCaptureEpoch({
+      epochDir: epoch,
+      archiveDir: archive,
+      cutoffId: '20260812T010000Z',
+      cutoffAt: '2026-08-12T01:00:00.000Z',
+      approval: { approvedBy: 'haha', approvalSha256: 'approval-hash' },
+    });
+
+    const maliciousParent = join(root, 'malicious-special');
+    const maliciousEpoch = join(maliciousParent, 'epoch');
+    mkdirSync(maliciousEpoch, { recursive: true });
+    writeFileSync(join(maliciousEpoch, 'session.jsonl'), '{}\n');
+    const fifo = spawnSync('mkfifo', [join(maliciousEpoch, 'special-fifo')], { encoding: 'utf8' });
+    expect(fifo.status, fifo.stderr).toBe(0);
+    const spoolArchive = join(archive, 'spool.tar.gz');
+    const created = spawnSync('tar', [
+      '-C', maliciousParent,
+      '-czf', spoolArchive,
+      'epoch',
+    ], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+
+    const manifestPath = join(archive, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const spoolSource = readFileSync(spoolArchive);
+    manifest.spoolArchive.bytes = spoolSource.length;
+    manifest.spoolArchive.sha256 = createHash('sha256').update(spoolSource).digest('hex');
+    const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, manifestSource);
+    writeFileSync(
+      join(archive, 'manifest.sha256'),
+      `${createHash('sha256').update(manifestSource).digest('hex')}  manifest.json\n`,
+    );
+
+    expect(verifyCaptureEpochArchive(archive)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unexpected spool archive entry type/i),
     });
   });
 
