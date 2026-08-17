@@ -16,7 +16,7 @@
 
 auto-capture 不設 timer，也不做常駐 daemon（背景常駐程序）；service 是跑完即退的 oneshot（單次執行服務）。
 
-> **Cutover status（2026-08-12 Asia/Taipei）**：五個 user-level（使用者層級）units 與 Claude Code／Codex SessionStart 已安裝；reminder／Todoist timers 均在運作，對應 Hermes jobs 已 pause。auto-capture Hermes job 也維持 pause。auto-capture installed unit 已更新為與 repo 逐位元一致：同時要求 `~/.ccm-project-url`、`~/.ccm-auto-capture-production-approved`，並固定 `CC_MEMORY_REQUIRE_ALERTS=1`；舊 unit 備份為 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260812`。marker 缺失時的實際 start 驗收為 `inactive/dead`、`ConditionResult=no`，journal 明列 condition skip，worker 未執行；runtime pause drop-in（執行期暫停覆寫）目前仍保留。memory 專用 `~/.ccm-memory-alert.env` 已建立為 `0600`，`--test-alert` 已實際送達並由操作人確認。2026-08-12 readiness audit（就緒稽核）確認資料量與併用時間已達門檻；近 7 日已透過本輪實際 MCP 工作查詢累積 5/5 筆 project-scoped `search_feedback`。10 題 keyword baseline benchmark（關鍵字基線測試）已完成，正式報告實測 production 非個人 active corpus 為 14,229 筆、只有 27 筆有 embedding；因此維持 **PARTIAL／No-Go**。暴露的舊 Gemini key 已由操作人在 provider 端撤銷，新 key 已安裝為 `0600` 並以 1536 dimensions smoke test（維度煙霧測試）通過；仍須完成 14,202 筆 embedding backfill、正式 hybrid benchmark（混合檢索基準測試）、人工標註三硬指標全過，且 §9 全部閘門依序通過後，才可停用 claude-mem。
+> **Cutover status（2026-08-17 Asia/Taipei）**：五個 user-level（使用者層級）units 與 Claude Code／Codex SessionStart 已安裝；reminder／Todoist timers 均在運作，對應 Hermes jobs 已 pause。auto-capture Hermes job 也維持 pause。auto-capture installed unit 已更新為與 repo 逐位元一致：同時要求 `~/.ccm-project-url`、`~/.ccm-auto-capture-production-approved`，並固定 `CC_MEMORY_REQUIRE_ALERTS=1`；舊 unit 備份為 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260812`。marker 缺失時的實際 start 驗收為 `inactive/dead`、`ConditionResult=no`，journal 明列 condition skip，worker 未執行；runtime pause drop-in（執行期暫停覆寫）目前仍保留。memory 專用 `~/.ccm-memory-alert.env` 已建立為 `0600`，`--test-alert` 已實際送達並由操作人確認。Cloudflare Worker 與 Coolify 每日雙 DB 排程已完成，且新 age（檔案加密工具）金鑰的 project／personal R2 備份均通過異地下載、解密與隔離還原；私鑰另存 Bitwarden（密碼管理服務）。2026-08-12 readiness audit（就緒稽核）確認資料量與併用時間已達門檻；近 7 日已透過本輪實際 MCP 工作查詢累積 5/5 筆 project-scoped `search_feedback`。10 題 keyword baseline benchmark（關鍵字基線測試）已完成，正式報告實測 production 非個人 active corpus 為 14,229 筆、只有 27 筆有 embedding；因此維持 **PARTIAL／No-Go**。暴露的舊 Gemini key 已由操作人在 provider 端撤銷，新 key 已安裝為 `0600` 並以 1536 dimensions smoke test（維度煙霧測試）通過；仍須完成 §5 backlog cutoff（積壓資料切代）與異地封存、14,202 筆 embedding backfill、正式 hybrid benchmark（混合檢索基準測試）、人工標註三硬指標及 §9 後續閘門，才可停用 claude-mem。
 
 ## 1. 準備獨立憑證與連線檔
 
@@ -117,9 +117,16 @@ production canary 與停用 claude-mem 前，除了 spool archive，project 與 
 - project：`backups/v1/project/2026/08/20260812T151738Z-d5fca92d3736a815.manifest.json`
 - personal：`backups/v1/personal/2026/08/20260812T151757Z-62c55a8535f2361c.manifest.json`
 
-兩份 manifest 的真實 freshness checker 結果皆為 PASS，完成時年齡約 0.01 小時。這只證明加密異地副本已 committed（提交完成）且遠端密文與上傳端一致；**尚未**證明私鑰 escrow（託管備援）或從 R2 完整下載、解密與 restore，因此 g1 仍不可轉 PASS。§5 的 immutable backlog archive 也仍須在正式 cutoff 後以相同原則加密上 R2；不得用接受 `file changed as we read it` 的 live tar 冒充一致性 snapshot（快照）。
+兩份 manifest 的真實 freshness checker 結果皆為 PASS，完成時年齡約 0.01 小時。這證明加密異地副本已 committed（提交完成）且遠端密文與上傳端一致；當時尚未完成私鑰 escrow（託管備援）與異地 restore。§5 的 immutable backlog archive 仍須在正式 cutoff 後以相同原則加密上 R2；不得用接受 `file changed as we read it` 的 live tar 冒充一致性 snapshot（快照）。
 
-2026-08-14 重新執行原生 PostgreSQL 18 producer，project 與 personal 分別建立 `20260814T125919Z-6cf7e0a026c3a7ee`、`20260814T125934Z-44f61b67a002094e`；兩側均完成 R2 full readback，freshness checker 隨後由 stale FAIL 恢復為 PASS。這次更新 freshness，不改變尚缺 age 私鑰與異地 restore 演練的結論。
+2026-08-14 重新執行原生 PostgreSQL 18 producer，project 與 personal 分別建立 `20260814T125919Z-6cf7e0a026c3a7ee`、`20260814T125934Z-44f61b67a002094e`；兩側均完成 R2 full readback，freshness checker 隨後由 stale FAIL 恢復為 PASS。
+
+2026-08-17 因舊 age 私鑰無法尋獲而輪替金鑰；舊 R2 密文仍受 30 天 Bucket Lock 保留，但未找到舊私鑰前不可解密。新 recipient（加密接收公鑰）的 SHA-256 fingerprint（指紋）為 `ec2810bd6e8fb43d6936e100eb135dd962bcc0761eb683619c8dc1c417a89fea`。Coolify 已改用新 recipient，並建立下列新備份：
+
+- project：`backups/v1/project/2026/08/20260817T011951Z-7604bcce047ca519.dump.age`
+- personal：`backups/v1/personal/2026/08/20260817T012001Z-9fdec2426d6196a4.dump.age`
+
+兩份密文均從 R2 完整下載，依 manifest 核對密文與明文 bytes／SHA-256，使用本機新私鑰解密，並以隔離的 PostgreSQL 18.4、`--network none`、tmpfs 容器完成實際 restore。project 還原為 8 張 public tables、224 筆 memories、14,006 筆 observations；personal 還原為 8 張 public tables、47 筆 memories、0 筆 observations，scope 分布符合預期。一次性容器與 `/dev/shm` 明文均已清除。新私鑰保留於本機 `0600` regular file，並以 Bitwarden Secure Note（安全筆記）完成異地託管；CLI 讀回內容的 SHA-256 與本機私鑰一致，完成後已鎖定保管庫並刪除暫存 session 檔。DB 異地復原證據已完成；g1 仍須等待 §5 historical epoch 與 backlog archive 完成。
 
 ### 1.4.1 每日 DB 備份與 freshness dead-man
 
@@ -149,7 +156,7 @@ wrangler deploy
 
 Worker 對 project／personal manifests 使用與本機 checker 相同的 fail-closed contract（失敗即停止契約）；R2 list/get 例外、manifest 缺失／格式錯誤、recipient／cipher readback 不一致或 age >26 小時都發 Telegram 並讓 scheduled event 失敗。Cloudflare 與 R2 同平台故障時可能同時失去 storage 與 primary monitor，因此仍保留下列本機 timer 作 off-platform tertiary check（平台外第三線檢查），但它不能在 WSL／PC 關機時承擔 24/7 RPO 告警責任。
 
-2026-08-13 已用獨立 account API token（帳號 API 權杖）正式部署 Worker；遠端狀態確認兩個 Telegram secrets 皆為 `secret_text`、R2 binding 指向 `cc-memory-backups`、Cron 為 `17 * * * *`。先以官方 `wrangler dev --remote --test-scheduled` 對真實 R2 驗證 26 小時門檻 HTTP 200 與極小門檻 HTTP 500；Fable 5 review 指出 preview 的臨時 secrets 不能證明正式 secrets 正確，因此再把正式 Worker 暫時部署為極小門檻。真實 Cron 於 18:17:12 Asia/Taipei 觸發，正式 tail 明列 `backup freshness gate failed` 而不是 Telegram 傳送錯誤；18:18 已立即用 repo 設定還原為 26 小時門檻，現行 version 為 `c4b00cfb-24e8-444f-bc6b-fe1615207917`，Cron、R2 binding 與兩個 secrets 均保留。一次性 `0600` preview secret 檔與目錄均已刪除。仍須由操作人確認 Telegram 實際收到 18:17 的正式 alert，才可把 forced-failure 人工驗收標為完成。
+2026-08-13 已用獨立 account API token（帳號 API 權杖）正式部署 Worker；遠端狀態確認兩個 Telegram secrets 皆為 `secret_text`、R2 binding 指向 `cc-memory-backups`、Cron 為 `17 * * * *`。先以官方 `wrangler dev --remote --test-scheduled` 對真實 R2 驗證 26 小時門檻 HTTP 200 與極小門檻 HTTP 500；Fable 5 review 指出 preview 的臨時 secrets 不能證明正式 secrets 正確，因此再把正式 Worker 暫時部署為極小門檻。真實 Cron 於 18:17:12 Asia/Taipei 觸發，正式 tail 明列 `backup freshness gate failed` 而不是 Telegram 傳送錯誤；操作人已確認 Telegram 實際收到正式 alert。18:18 已立即用 repo 設定還原為 26 小時門檻，現行 version 為 `c4b00cfb-24e8-444f-bc6b-fe1615207917`，Cron、R2 binding 與兩個 secrets 均保留。一次性 `0600` preview secret 檔與目錄均已刪除，forced-failure 人工驗收完成。
 
 本機 freshness checker 每小時驗證兩個 target 最新 canonical manifest：
 
@@ -375,7 +382,7 @@ npm run backup:freshness -- --json
 
 exit code：`0` 只保留給所有 gate 都能由機器證明通過的情況；`1` 代表至少一項 `FAIL` 或 `PARTIAL`；`2` 代表沒有已證明失敗，但仍有 `BLOCKED`／`UNKNOWN`；`3` 是 CLI 使用錯誤。provider 端 key 撤銷、異地復原、人工 benchmark、cutoff 授權、canary 與觀察窗都不會因本機檔案或自我聲明而轉成 `PASS`，因此 checker 是 fail-closed advisory（安全失敗的輔助證據），不能取代本節人工簽核。
 
-2026-08-12 的狀態：DB 本機備份與 restore、程式防線、focused tests（聚焦測試）、完整 suite（完整測試集）與 5 筆近 7 日 MCP 真實 query 已有證據；10 題 keyword baseline 也已完成。project／personal 的加密 DB 異地副本已 committed 到 R2 並通過 full readback，但 age 私鑰 escrow 與 R2 下載→解密→restore 演練尚未完成，因此不能宣稱異地可復原。暴露的舊 Gemini key 已由操作人撤銷，新 key 檔為 `0600` 並通過 1536 維 smoke test。最新報告證明 claude-mem 10/10 題可由公開 session detail 驗證 project scope，並揭露 production embedding coverage 僅 27/14,229；runner 會把非純 hybrid、coverage 非 100%、缺顯式 key evidence、scope 未證明或真實 query provenance 不完整的報告強制標為 `PARTIAL`。14,202 筆 backfill、正式 hybrid benchmark 與人工標註、正式 backlog cutoff、單 tick production canary、Cloudflare Worker primary dead-man、Coolify 每日備份排程及後續觀察窗仍未完成。故目前結論維持 **No-Go**。
+2026-08-17 的狀態：DB 本機備份與 restore、程式防線、focused tests（聚焦測試）、完整 suite（完整測試集）與 5 筆近 7 日 MCP 真實 query 已有證據；10 題 keyword baseline 也已完成。project／personal 已用新 age 金鑰產生加密 R2 副本，通過 full readback、異地下載、解密與 PostgreSQL 18.4 隔離 restore；私鑰已在 Bitwarden 完成託管。Cloudflare Worker primary dead-man 與 Coolify 每日雙 DB 排程也已部署並驗證。暴露的舊 Gemini key 已由操作人撤銷，新 key 檔為 `0600` 並通過 1536 維 smoke test。最新報告證明 claude-mem 10/10 題可由公開 session detail 驗證 project scope，並揭露 production embedding coverage 僅 27/14,229；runner 會把非純 hybrid、coverage 非 100%、缺顯式 key evidence、scope 未證明或真實 query provenance 不完整的報告強制標為 `PARTIAL`。尚未完成 §5 backlog cutoff 與異地封存、14,202 筆 backfill、正式 hybrid benchmark、人工標註、單 tick production canary 及後續觀察窗。故目前結論維持 **No-Go**。
 
 ### 9.1 相依套件安全基線
 
