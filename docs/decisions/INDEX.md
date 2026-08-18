@@ -6,6 +6,7 @@
 
 | ID | 狀態 | 日期 | 標題 | 決策卡 |
 |---|---|---|---|---|
+| `DEC-20260818T125648Z-redact-embedding-egress-and-backfill-with-gemini-001` | active | 2026-08-18 | 遮蔽 embedding 外送內容並以 gemini-embedding-001 完成補算 | [開啟](./DEC-20260818T125648Z-redact-embedding-egress-and-backfill-with-gemini-001.md) |
 | `DEC-20260716T092938Z-cross-client-hook-driven-memory-flow` | active | 2026-07-16 | Claude Code 與 Codex 共用 hooks（掛鉤）驅動記憶流程 | [開啟](./DEC-20260716T092938Z-cross-client-hook-driven-memory-flow.md) |
 | `DEC-20260714T182133Z-keep-parent-session-rollup` | active | 2026-07-15 | 多路徑擷取維持母工作階段彙總 | [開啟](./DEC-20260714T182133Z-keep-parent-session-rollup.md) |
 | `DEC-20260714T170309Z-isolate-only-failed-capture-chunk` | active | 2026-07-15 | 大型語言模型最終失敗僅隔離單一分塊 | [開啟](./DEC-20260714T170309Z-isolate-only-failed-capture-chunk.md) |
