@@ -82,7 +82,10 @@ interface CaptureMetadata {
 interface RollupRow {
   id: string;
   idempotencyKey: string | null;
-  metadata: { capture?: CaptureMetadata };
+  metadata: {
+    capture?: CaptureMetadata;
+    embedding_policy?: Record<string, unknown>;
+  };
 }
 
 interface ObservationRow {
@@ -90,6 +93,10 @@ interface ObservationRow {
   rollupMemoryId: string | null;
   narrative: string;
   observedAt: Date;
+  metadata: {
+    capture?: Record<string, unknown>;
+    embedding_policy?: Record<string, unknown>;
+  };
 }
 
 const tmpRoots: string[] = [];
@@ -348,6 +355,7 @@ async function observations(sql: Sql, projectId: string, sessionId: string): Pro
       id,
       rollup_memory_id AS "rollupMemoryId",
       narrative,
+      metadata,
       observed_at AS "observedAt"
     FROM observations
     WHERE project_id = ${projectId}
@@ -2954,6 +2962,51 @@ describe('capture worker DB-backed RED contracts', () => {
     const [rollup] = await rollups(sql, harness.projectId, harness.sessionId);
     expect(rollup.metadata.capture?.discovery_tokens).toEqual(expect.any(Number));
     expect(rollup.metadata.capture?.discovery_tokens).toBeGreaterThan(0);
+  });
+
+  it('redacts rollup and observation provider inputs while preserving raw rows and policy evidence', async () => {
+    const harness = makeHarness();
+    const token = `sk-${'f'.repeat(32)}`;
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'embedding policy evidence' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:06:30.000Z',
+    });
+    const llm = mockLlm([
+      rawExtraction({
+        summary: `rollup ${token}`,
+        observations: [observation('policy observation', `narrative ${token}`)],
+      }),
+    ]);
+    const providerInputs: string[] = [];
+
+    await expect(runWorker(harness, {
+      db,
+      llm,
+      generateEmbedding: async (text) => {
+        providerInputs.push(text);
+        return new Array(1536).fill(0.1);
+      },
+    })).resolves.toMatchObject({ processed: 1, embeddingFailed: 0 });
+
+    expect(providerInputs).toHaveLength(2);
+    expect(providerInputs.every((text) => !text.includes(token))).toBe(true);
+    expect(providerInputs.every((text) => text.includes('[REDACTED:openai_api_key]'))).toBe(true);
+
+    const [rollup] = await rollups(sql, harness.projectId, harness.sessionId);
+    const [observationRow] = await observations(sql, harness.projectId, harness.sessionId);
+    expect(rollup.metadata.embedding_policy).toMatchObject({
+      redaction_count: 1,
+      rule_counts: { openai_api_key: 1 },
+    });
+    expect(observationRow.metadata.embedding_policy).toMatchObject({
+      redaction_count: 1,
+      rule_counts: { openai_api_key: 1 },
+    });
+    expect(observationRow.narrative).toContain(token);
   });
 
   it('assigns strictly increasing observed_at values from window processing time, not transcript timestamps', async () => {

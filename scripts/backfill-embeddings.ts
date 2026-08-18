@@ -6,10 +6,14 @@
 
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { and, asc, eq, gt, isNull } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { observations, projectMemories } from '../src/db/schema.js';
+import {
+  prepareEmbeddingText,
+  type EmbeddingPolicyEvidence,
+} from '../src/utils/embedding.js';
 import {
   isolateBenchmarkEmbeddingEnvironment,
   loadBenchmarkEmbeddingCredential,
@@ -44,6 +48,7 @@ export interface EmbeddingBackfillStore {
     target: EmbeddingBackfillTarget;
     id: string;
     embedding: number[];
+    embeddingPolicy: EmbeddingPolicyEvidence;
   }): Promise<void>;
 }
 
@@ -185,8 +190,9 @@ export async function runEmbeddingBackfill(
         result.attempted += 1;
 
         let embedding: number[] | null = null;
+        const prepared = prepareEmbeddingText(composeBackfillText(record));
         try {
-          embedding = await deps.generateEmbedding(composeBackfillText(record));
+          embedding = await deps.generateEmbedding(prepared.text);
         } catch {
           embedding = null;
         }
@@ -212,7 +218,12 @@ export async function runEmbeddingBackfill(
           continue;
         }
 
-        await deps.store.updateEmbedding({ target, id: record.id, embedding });
+        await deps.store.updateEmbedding({
+          target,
+          id: record.id,
+          embedding,
+          embeddingPolicy: prepared.evidence,
+        });
         result.updated += 1;
         consecutiveFailures = 0;
         if (result.attempted % options.batchSize === 0) {
@@ -270,12 +281,25 @@ function createDrizzleBackfillStore(
       return rows.map((row) => ({ target, ...row }));
     },
 
-    async updateEmbedding({ target, id, embedding }) {
+    async updateEmbedding({ target, id, embedding, embeddingPolicy }) {
+      const metadataPatch = JSON.stringify({ embedding_policy: embeddingPolicy });
       if (target === 'project_memories') {
-        await db.update(projectMemories).set({ embedding }).where(eq(projectMemories.id, id));
+        await db
+          .update(projectMemories)
+          .set({
+            embedding,
+            metadata: sql`coalesce(${projectMemories.metadata}, '{}'::jsonb) || ${metadataPatch}::jsonb`,
+          })
+          .where(eq(projectMemories.id, id));
         return;
       }
-      await db.update(observations).set({ embedding }).where(eq(observations.id, id));
+      await db
+        .update(observations)
+        .set({
+          embedding,
+          metadata: sql`coalesce(${observations.metadata}, '{}'::jsonb) || ${metadataPatch}::jsonb`,
+        })
+        .where(eq(observations.id, id));
     },
   };
 }

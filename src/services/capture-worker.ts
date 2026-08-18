@@ -25,6 +25,9 @@ import {
   composeEmbeddingText,
   composeObservationEmbeddingText,
   generateEmbedding as defaultGenerateEmbedding,
+  mergeEmbeddingPolicyMetadata,
+  prepareEmbeddingText,
+  type EmbeddingPolicyEvidence,
 } from '../utils/embedding.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 
@@ -1003,10 +1006,19 @@ async function safeEmbedding(
   generateEmbedding: (text: string) => Promise<number[] | null>,
   text: string,
   embeddingExpected: boolean,
-): Promise<{ value: number[] | null; failed: boolean }> {
+): Promise<{
+  value: number[] | null;
+  failed: boolean;
+  policy?: EmbeddingPolicyEvidence;
+}> {
+  const prepared = prepareEmbeddingText(text);
   try {
-    const value = await generateEmbedding(text);
-    return { value, failed: embeddingExpected && value === null };
+    const value = await generateEmbedding(prepared.text);
+    return {
+      value,
+      failed: embeddingExpected && value === null,
+      policy: value === null ? undefined : prepared.evidence,
+    };
   } catch {
     return { value: null, failed: embeddingExpected };
   }
@@ -1140,6 +1152,7 @@ async function insertObservation(
     writerHost: string;
     observedAt: Date;
     embedding: number[] | null;
+    embeddingPolicy?: EmbeddingPolicyEvidence;
     source: TranscriptSourceRange;
   }
 ): Promise<string | null> {
@@ -1156,7 +1169,7 @@ async function insertObservation(
       input.observation.narrative,
     ].join('\n')
   );
-  const metadata = {
+  const captureMetadata = {
     capture: {
       version: '0.5',
       model: input.model,
@@ -1171,6 +1184,9 @@ async function insertObservation(
       transcript_source: input.source,
     },
   };
+  const metadata = input.embeddingPolicy
+    ? mergeEmbeddingPolicyMetadata(captureMetadata, input.embeddingPolicy)
+    : captureMetadata;
   const rows = await executeRows<{ id: string }>(
     tx,
     sql`
@@ -1288,7 +1304,10 @@ async function writeCaptureWindow(
 
   let rollupId = existing?.id ?? null;
   if (!rollupId) {
-    const initialMetadata = mergeMetadata(existing?.metadata, baseCapture);
+    const captureMetadata = mergeMetadata(existing?.metadata, baseCapture);
+    const initialMetadata = rollupEmbedding.policy
+      ? mergeEmbeddingPolicyMetadata(captureMetadata, rollupEmbedding.policy)
+      : captureMetadata;
     rollupId = await insertRollup(tx, {
       window,
       extraction,
@@ -1320,6 +1339,7 @@ async function writeCaptureWindow(
       writerHost: options.writerHost,
       observedAt,
       embedding: observationEmbedding.value,
+      embeddingPolicy: observationEmbedding.policy,
       source,
     });
     if (insertedId) insertedObservationIds.push(insertedId);
@@ -1329,7 +1349,10 @@ async function writeCaptureWindow(
     ...baseCapture,
     observation_ids: [...baseCapture.observation_ids, ...insertedObservationIds],
   };
-  const finalMetadata = mergeMetadata(existing?.metadata, finalCapture);
+  const captureMetadata = mergeMetadata(existing?.metadata, finalCapture);
+  const finalMetadata = rollupEmbedding.policy
+    ? mergeEmbeddingPolicyMetadata(captureMetadata, rollupEmbedding.policy)
+    : captureMetadata;
   await updateRollup(tx, {
     rollupId,
     window,

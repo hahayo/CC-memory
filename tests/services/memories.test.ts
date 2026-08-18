@@ -23,6 +23,19 @@ vi.mock('../../src/utils/embedding.js', () => ({
   generateEmbedding: vi.fn(async () => null),
   generateQueryEmbedding: vi.fn(async () => null),
   composeEmbeddingText: vi.fn((summary: string) => summary),
+  prepareEmbeddingText: vi.fn((text: string) => ({
+    text: text.replace(/sk-[a-z]{20,}/g, '[REDACTED:openai_api_key]'),
+    evidence: {
+      rules_version: 'test-rules',
+      redaction_count: text.includes('sk-') ? 1 : 0,
+      rule_counts: text.includes('sk-') ? { openai_api_key: 1 } : {},
+      input_sha256: 'a'.repeat(64),
+    },
+  })),
+  mergeEmbeddingPolicyMetadata: vi.fn((metadata: unknown, evidence: unknown) => ({
+    ...(metadata as Record<string, unknown>),
+    embedding_policy: evidence,
+  })),
 }));
 
 import * as embedding from '../../src/utils/embedding.js';
@@ -277,6 +290,37 @@ describe('services/memories.ts integration (real PG)', () => {
   // -------------------------------------------------------------------------
 
   describe('saveMemory — idempotency three branches', () => {
+    it('keeps raw content while redacting provider input and merging embedding policy metadata', async () => {
+      const projectId = `${TRACK_M_PREFIX}-embedding-policy`;
+      const token = `sk-${'e'.repeat(32)}`;
+      const vector = new Array(1536).fill(0.1);
+      vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(true);
+      vi.mocked(embedding.generateEmbedding).mockResolvedValue(vector);
+
+      const saved = await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: `rotated ${token}`,
+        metadata: { owner: 'operator' },
+      });
+      const [row] = await sql<Array<{ summary: string; metadata: Record<string, unknown> }>>`
+        SELECT summary, metadata FROM project_memories WHERE id = ${saved.id}
+      `;
+
+      expect(embedding.generateEmbedding).toHaveBeenCalledWith(
+        'rotated [REDACTED:openai_api_key]'
+      );
+      expect(row.summary).toContain(token);
+      expect(row.metadata).toMatchObject({
+        owner: 'operator',
+        embedding_policy: {
+          rules_version: 'test-rules',
+          redaction_count: 1,
+          rule_counts: { openai_api_key: 1 },
+        },
+      });
+    });
+
     it('same key + same payload → second call returns idempotent=true and same id', async () => {
       const projectId = `${TRACK_M_PREFIX}-idem1`;
       const input = {

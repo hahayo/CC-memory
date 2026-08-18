@@ -1,6 +1,104 @@
 // src/utils/embedding.ts
 import { GoogleGenAI } from '@google/genai';
+import { createHash } from 'node:crypto';
 import { config } from '../config.js';
+
+export const EMBEDDING_REDACTION_RULES_VERSION = '2026-08-19.3';
+
+export interface EmbeddingPolicyEvidence {
+  rules_version: string;
+  redaction_count: number;
+  rule_counts: Record<string, number>;
+  input_sha256: string;
+}
+
+export interface PreparedEmbeddingText {
+  text: string;
+  evidence: EmbeddingPolicyEvidence;
+}
+
+interface EmbeddingRedactionRule {
+  id: string;
+  pattern: RegExp;
+  replacement: string;
+}
+
+const EMBEDDING_REDACTION_RULES: EmbeddingRedactionRule[] = [
+  {
+    id: 'private_key',
+    pattern:
+      /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/gu,
+    replacement: '[REDACTED:private_key]',
+  },
+  {
+    id: 'google_api_key',
+    pattern: /AIza[0-9A-Za-z_-]{30,}/gu,
+    replacement: '[REDACTED:google_api_key]',
+  },
+  {
+    id: 'openai_api_key',
+    pattern: /sk-[0-9A-Za-z_-]{20,}/gu,
+    replacement: '[REDACTED:openai_api_key]',
+  },
+  {
+    id: 'github_token',
+    pattern: /gh[pousr]_[0-9A-Za-z]{20,}/gu,
+    replacement: '[REDACTED:github_token]',
+  },
+  {
+    id: 'aws_access_key',
+    pattern: /AKIA[0-9A-Z]{16}/gu,
+    replacement: '[REDACTED:aws_access_key]',
+  },
+];
+
+const LABELED_SECRET_PATTERN =
+  /\b((?:[A-Za-z0-9]+[_-])*(?:password|passwd|api[_ -]?key|secret[_ -]?key|access[_ -]?token))(["']?\s*[:=]\s*["'`]?)(?!\[REDACTED:)([^\s"'`]{8,})/giu;
+
+export function prepareEmbeddingText(text: string): PreparedEmbeddingText {
+  let prepared = text;
+  const ruleCounts: Record<string, number> = {};
+
+  for (const rule of EMBEDDING_REDACTION_RULES) {
+    let count = 0;
+    prepared = prepared.replace(rule.pattern, () => {
+      count += 1;
+      return rule.replacement;
+    });
+    if (count > 0) ruleCounts[rule.id] = count;
+  }
+
+  let labeledSecretCount = 0;
+  prepared = prepared.replace(
+    LABELED_SECRET_PATTERN,
+    (_match, label: string, separator: string) => {
+      labeledSecretCount += 1;
+      return `${label}${separator}[REDACTED:labeled_secret]`;
+    },
+  );
+  if (labeledSecretCount > 0) ruleCounts.labeled_secret = labeledSecretCount;
+
+  return {
+    text: prepared,
+    evidence: {
+      rules_version: EMBEDDING_REDACTION_RULES_VERSION,
+      redaction_count: Object.values(ruleCounts).reduce((sum, count) => sum + count, 0),
+      rule_counts: ruleCounts,
+      input_sha256: createHash('sha256').update(prepared, 'utf8').digest('hex'),
+    },
+  };
+}
+
+export function mergeEmbeddingPolicyMetadata(
+  metadata: unknown,
+  evidence: EmbeddingPolicyEvidence,
+): Record<string, unknown> {
+  const base = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) }
+    : {};
+  base.embedding_policy = evidence;
+  return base;
+}
 
 export interface EmbeddingConfig {
   apiKey?: string;
@@ -70,10 +168,11 @@ export async function generateEmbedding(
 
   try {
     const genAI = new GoogleGenAI({ apiKey });
+    const prepared = prepareEmbeddingText(text);
 
     const response = await genAI.models.embedContent({
       model,
-      contents: text,
+      contents: prepared.text,
       config: {
         taskType: 'RETRIEVAL_DOCUMENT',
         outputDimensionality: dimensions,
@@ -88,8 +187,8 @@ export async function generateEmbedding(
     }
 
     return normalizeVector(embedding);
-  } catch (error) {
-    console.error('Failed to generate embedding:', error);
+  } catch {
+    console.error('Failed to generate embedding');
     return null;
   }
 }
@@ -113,10 +212,11 @@ export async function generateQueryEmbedding(
 
   try {
     const genAI = new GoogleGenAI({ apiKey });
+    const prepared = prepareEmbeddingText(query);
 
     const response = await genAI.models.embedContent({
       model,
-      contents: query,
+      contents: prepared.text,
       config: {
         taskType: 'RETRIEVAL_QUERY',
         outputDimensionality: dimensions,
@@ -131,8 +231,8 @@ export async function generateQueryEmbedding(
     }
 
     return normalizeVector(embedding);
-  } catch (error) {
-    console.error('Failed to generate query embedding:', error);
+  } catch {
+    console.error('Failed to generate query embedding');
     return null;
   }
 }

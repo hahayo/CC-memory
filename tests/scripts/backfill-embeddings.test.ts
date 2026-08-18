@@ -252,6 +252,43 @@ describe('embedding backfill runner', () => {
     expect(reports.join('\n')).toContain('progress scanned=2 attempted=2 updated=2 failed=0');
   });
 
+  it('redacts provider input and stores embedding policy evidence without the matched value', async () => {
+    const token = `sk-${'d'.repeat(32)}`;
+    const store = makeStore([
+      {
+        target: 'project_memories',
+        id: '00000000-0000-0000-0000-000000000001',
+        summary: `rotated credential ${token}`,
+        keywords: [],
+        decisions: [],
+      },
+    ]);
+    const generateEmbedding = vi.fn(async () => [1, 0]);
+
+    await runEmbeddingBackfill(
+      {
+        targets: ['project_memories'],
+        dryRun: false,
+        batchSize: 1,
+        requestsPerMinute: 60,
+        maxConsecutiveFailures: 2,
+      },
+      { store, generateEmbedding, sleep: async () => {} }
+    );
+
+    expect(generateEmbedding).toHaveBeenCalledWith(
+      'rotated credential [REDACTED:openai_api_key]'
+    );
+    expect(store.updateEmbedding).toHaveBeenCalledWith(expect.objectContaining({
+      embeddingPolicy: expect.objectContaining({
+        redaction_count: 1,
+        rule_counts: { openai_api_key: 1 },
+        input_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    }));
+    expect(JSON.stringify(vi.mocked(store.updateEmbedding).mock.calls)).not.toContain(token);
+  });
+
   it('stops after the configured number of consecutive embedding failures', async () => {
     const store = makeStore([
       {

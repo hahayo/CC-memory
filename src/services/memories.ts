@@ -50,6 +50,9 @@ import {
   generateQueryEmbedding,
   composeEmbeddingText,
   isEmbeddingEnabled,
+  mergeEmbeddingPolicyMetadata,
+  prepareEmbeddingText,
+  type EmbeddingPolicyEvidence,
 } from '../utils/embedding.js';
 
 // ---------------------------------------------------------------------------
@@ -205,9 +208,12 @@ export async function saveMemory(
 
   // Embedding（失敗不阻擋；在 pre-check miss 之後才算，避免冪等重試時重算）
   let embeddingVec: number[] | null = null;
+  let embeddingPolicy: EmbeddingPolicyEvidence | undefined;
   if (isEmbeddingEnabled()) {
     const text = composeEmbeddingText(input.summary, input.keywords, input.decisions);
-    embeddingVec = await generateEmbedding(text);
+    const prepared = prepareEmbeddingText(text);
+    embeddingVec = await generateEmbedding(prepared.text);
+    if (embeddingVec !== null) embeddingPolicy = prepared.evidence;
   }
 
   const baseValues: NewMemory = {
@@ -219,7 +225,9 @@ export async function saveMemory(
     decisions: input.decisions ?? [],
     nextSteps: input.nextSteps ?? [],
     embedding: embeddingVec,
-    metadata: input.metadata ?? {},
+    metadata: embeddingPolicy
+      ? mergeEmbeddingPolicyMetadata(input.metadata, embeddingPolicy)
+      : input.metadata ?? {},
     idempotencyKey: hasKey ? normalizedKey! : null,
     contentHash,
     writerHost,
