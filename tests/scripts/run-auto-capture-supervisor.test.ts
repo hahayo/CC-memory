@@ -1229,6 +1229,56 @@ describe('supervisor warning notification path', () => {
     expect(savedState.recoveryFailureCount).toBe(1)
   })
 
+  it('warning send succeeds + third recovery send failure → alerted reflects the delivered warning', async () => {
+    const THRESHOLD = 3
+    let savedState = createEmptyAutoCaptureAlertState()
+
+    const result = await runAutoCaptureSupervisorTick(
+      {
+        projectUrl: 'postgres://project-db.example/cc_memory',
+        alertTarget: {
+          botToken: 'bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        now: () => new Date('2026-08-20T10:00:00.000Z'),
+        hostname: () => 'cc-memory-host',
+        loadState: async () => ({
+          ...createEmptyAutoCaptureAlertState(),
+          activeFingerprint: 'abc123def456',
+          firstFailedAt: '2026-08-19T00:00:00.000Z',
+          lastAlertedAt: '2026-08-19T00:00:00.000Z',
+          recoveryFailureCount: 2,
+          fallbackSuccessStreak: THRESHOLD - 1,
+        }),
+        saveState: async (state) => { savedState = state },
+        runWorker: async () => ({
+          exitCode: 0,
+          stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0 primary-provider=codex-cli primary-success=0 fallback-success=1 fallback-failed=0 fatal=0 spool-bytes=1000 spool-cap-pct=10 windows=1\n',
+          stderr: '',
+        }),
+        sendTelegram: async (_target, text) => {
+          // Warning send succeeds, recovery send fails
+          if (text.includes('recovered')) throw new Error('network down')
+        },
+        stderr: { write: () => {} },
+      }
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.notification).toBe('recovery')
+    // Warning was delivered, so alerted=true
+    expect(result.alerted).toBe(true)
+    // Warning dedup state preserved despite recovery failure
+    expect(savedState.fallbackSuccessStreak).toBe(THRESHOLD)
+    expect(savedState.fallbackWarningLastSentAt).toBe('2026-08-20T10:00:00.000Z')
+    // third failure clears the failure fingerprint
+    expect(savedState.activeFingerprint).toBeNull()
+  })
+
   it('recovery takes priority over warning when both apply', async () => {
     const sentMessages: string[] = []
     const THRESHOLD = 3

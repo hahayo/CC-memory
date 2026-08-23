@@ -564,7 +564,7 @@ export async function runAutoCaptureSupervisorTick(
           `[run-auto-capture-supervisor] recovery alert failed 3 times consecutively, clearing failure state\n`
         )
         await saveState(nextState)
-        return { exitCode: 0, notification: 'recovery', alerted: false, state: nextState }
+        return { exitCode: 0, notification: 'recovery', alerted: warningSent, state: nextState }
       }
       // Preserve warning dedup state even when recovery fails (Finding 2)
       const staleState: AutoCaptureAlertState = {
