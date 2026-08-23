@@ -110,12 +110,17 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 
 ### v0.5 auto-capture / 告警（worker 與 hooks 端，非 MCP server 本體）
 
-- `CC_CAPTURE_LLM` - capture worker 使用的 LLM provider（預設 `claude-cli`；可切 `gemini-flash`）
+- `CC_CAPTURE_LLM` - capture worker 使用的 LLM provider（預設 `claude-cli`；正式 unit 設為 `codex-cli`；可切 `gemini-flash`）
+- `CC_CAPTURE_LLM_FALLBACK` - 主 provider 失敗時的 fallback（退回）provider；正式 unit 設為 `claude-cli`
+- `CC_CAPTURE_CODEX_MODEL` - codex-cli provider 的模型字串（預設 `gpt-5.6-sol`）
+- `CC_CAPTURE_CODEX_TIMEOUT_MS` - codex-cli provider 的 timeout（逾時）毫秒數（正式 unit：90000）
+- `CC_CAPTURE_MAX_WINDOWS_PER_TICK` - worker 每 tick（執行輪次）最多開幾個 LLM 抽取窗口（正式 unit：1）
 - `CC_CAPTURE_CLAUDE_MODEL` - claude-cli provider 的模型（預設 `haiku`）
 - `CC_CAPTURE_CLAUDE_TIMEOUT_MS` - claude-cli provider 的 timeout（逾時）毫秒數
+- `CC_CAPTURE_GEMINI_TIMEOUT_MS` - gemini-flash provider 的 timeout（逾時）毫秒數
 - `CC_MEMORY_SPOOL_DIR` - spool（本地緩衝）根目錄（預設 `~/.cache/cc-memory/spool`）
 - `CC_MEMORY_SPOOL_MAX_MB` - spool 總大小上限（MB）；超過停止 capture 並告警
-- `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 96 KiB、其他 provider 256 KiB
+- `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 32 KiB、其他 provider 256 KiB
 - `CC_CAPTURE_MAX_SESSIONS_PER_TICK` - worker 每次 tick（執行輪次）最多處理幾個 session
 - `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
 - `CC_MEMORY_SPOOL_LOCK_STALE_MS` - spool 檔案鎖過期毫秒數

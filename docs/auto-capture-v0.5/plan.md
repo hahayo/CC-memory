@@ -30,7 +30,7 @@ Claude Code / Codex session
        ├─ health check（健康檢查）SSH tunnel（通道）與 project DB（專案資料庫）
        ├─ file lock（檔案鎖）+ rotation（輪替）+ high-water mark（高水位）commit
        ├─ batch harvest（批次收割）transcript 增量窗口
-       ├─ capture LLM（大型語言模型）一次呼叫（預設 claude-cli 吃訂閱；可切 gemini-flash）
+       ├─ capture LLM（大型語言模型）一次呼叫（正式 unit：codex-cli 主力 + claude-cli fallback；可切 gemini-flash）
        ├─ JSON schema validation（結構驗證）
        ├─ write rollup → project_memories(type='session')
        └─ write observations → observations
@@ -132,7 +132,7 @@ v0.5 不建遠端 pending queue（待處理佇列）。hook 不走網路是硬�
 src/services/capture-spool.ts          # spool append；worker 管 lock/state/rotation/dead-letter
 src/services/capture-worker.ts         # harvest + LLM + schema validation + DB write
 src/services/observations.ts           # insert/search-index/timeline/get/archive
-src/services/capture-llm.ts            # capture LLM adapter（claude-cli / gemini-flash）+ schema parser
+src/services/capture-llm.ts            # capture LLM adapter（codex-cli 主力 / claude-cli fallback / gemini-flash）+ fallback wrapper + schema parser
 src/services/recent-activity.ts        # SessionStart index builder
 src/tools/timeline.ts                  # cc_memory_timeline
 src/tools/get-observations.ts          # cc_memory_get_observations
@@ -249,7 +249,12 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 
 | 名稱 | 預設值 | 讀取元件 | 缺值或降級行為 |
 |---|---|---|---|
-| `CC_CAPTURE_LLM` | `claude-cli`（2026-07-07 拍板，原 `gemini-flash`） | capture worker | 未支援 provider 時 fail-fast 到 dead-letter metadata |
+| `CC_CAPTURE_LLM` | `claude-cli`（程式碼預設；正式 unit 設為 `codex-cli`） | capture worker | 未支援 provider 時 fail-fast 到 dead-letter metadata |
+| `CC_CAPTURE_LLM_FALLBACK` | 未設（無 fallback） | capture worker | 設為 `claude-cli` 時主 provider 失敗自動退回 |
+| `CC_CAPTURE_CODEX_MODEL` | `gpt-5.6-sol` | capture LLM（codex-cli provider） | parse 失敗／缺值用預設 |
+| `CC_CAPTURE_CODEX_TIMEOUT_MS` | `90000` | capture LLM（codex-cli provider） | parse 失敗用預設 |
+| `CC_CAPTURE_MAX_WINDOWS_PER_TICK` | 無上限（`Number.MAX_SAFE_INTEGER`；正式 unit 設為 `1`） | capture worker | parse 失敗或小於 1 用預設 |
+| `CC_CAPTURE_GEMINI_TIMEOUT_MS` | 未記錄（實作預設） | capture LLM（gemini-flash provider） | parse 失敗用預設 |
 | `CC_CAPTURE_CLAUDE_MODEL` | `haiku` | capture LLM（claude-cli provider） | parse 失敗／缺值用預設；tier 別名交給 claude CLI 解析 |
 | `GEMINI_API_KEY` | 無 | capture LLM（僅 gemini-flash provider）/ embedding | gemini-flash 下缺值時 capture 靜默停用並 stdout 告警；claude-cli 下不需要；既有 search 降級沿用 `embedding.ts` |
 | `CC_MEMORY_SKIP_TOOLS` | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | hook wrapper | 設定後整個覆蓋預設；空字串代表不 skip |
@@ -269,7 +274,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 - `CC_MEMORY_INJECT_RECENT=off` 預設。
 - 併用期兩週內只 capture，不注入。
 - 注入內容加 metadata marker（標記）`source=cc-memory-inject`；worker 看到該 marker 直接排除。
-- **遞迴 capture 斷路器**（2026-07-07 claude-cli provider 連帶補強）：worker spawn 的 claude 抽取子程序帶 `CC_MEMORY_CAPTURE_CHILD=1` env，兩支 capture hook 開頭偵測到即 exit 0——抽取 session 自身不得再進 spool；子程序另帶 `--strict-mcp-config` 不載使用者 MCP servers（概念仿 claude-mem 的子程序隔離 flags）。
+- **遞迴 capture 斷路器**（2026-07-07 claude-cli provider 連帶補強；2026-08-23 codex-cli 雙層強化）：worker spawn 的子程序帶 `CC_MEMORY_CAPTURE_CHILD=1` env，兩支 capture hook 開頭偵測到即 exit 0——抽取 session 自身不得再進 spool。codex-cli 子程序另以 bwrap（bubblewrap 沙箱）+ execpolicy（執行策略）兩層防護、`--ignore-user-config` 不載使用者設定，雙重確保遞迴斷路；claude-cli 子程序仍帶 `--strict-mcp-config` 不載使用者 MCP servers。
 - token budget 預設 1,200；超過先截 observations ids，再截 summary text。
 - 每列 rollup 的 `discovery_tokens` 讀 `metadata.capture.discovery_tokens`；注入器不即時計算。
 - 注入 stdout 不含全文 observation narrative，只含索引。
@@ -314,7 +319,7 @@ Gate：
 
 交付：
 - `scripts/run-auto-capture.ts`。
-- capture LLM adapter（原交付 Gemini Flash；2026-07-07 預設改 claude-cli，見 spec 紅線 3）、JSON schema validation、dead-letter。
+- capture LLM adapter（原交付 Gemini Flash；2026-07-07 預設改 claude-cli；2026-08-23 正式 unit 改 codex-cli 主力 + claude-cli fallback，見 spec 紅線 3 後記）、JSON schema validation、dead-letter。
 - rollup + observations 寫入 transaction。
 - per-session canonical rollup upsert；同 session 多個 harvest window 只更新同一筆 rollup。
 - 2026-07-15 reliability repair（可靠性修復）：capture state v2、多 transcript checkpoint、穩定 chunk retry key、來源遺失第 5 次只隔離該 range、source coverage 冪等、`parked/yielded` summary、只在末筆為 Stop sentinel 時 rotation，以及唯讀 recovery manifest。

@@ -9,7 +9,7 @@
 | 流程 | 觸發方式 | systemd unit | Hermes 切換條件 |
 |---|---|---|---|
 | PostToolUse capture | 只 append 本機 spool；不啟動 worker | 無 | 不適用 |
-| Stop capture | append sentinel 後，以 `systemctl --no-block` 快速啟動 | `cc-memory-auto-capture.service` | `cc-memory-auto-capture` 保持 paused |
+| Stop capture | append sentinel 後，以 `systemctl --no-block` 快速啟動 | `cc-memory-auto-capture.service` | `cc-memory-auto-capture` 保持 paused；provider 已切 codex-cli 主力 + claude-cli fallback（見 §2.5） |
 | SessionStart capture | 每次快速啟動 backlog；注入由 feature flag（功能開關）獨立控制 | `cc-memory-auto-capture.service` | 不適用 |
 | reminders | systemd timer 每 5 分鐘 | `cc-memory-reminders.{service,timer}` | 手動執行與一個 timer 週期均通過後才 pause |
 | Todoist sync | systemd timer 每 15 分鐘 | `cc-memory-todoist-sync.{service,timer}` | 手動執行與一個 timer 週期均通過後才 pause |
@@ -238,6 +238,20 @@ journalctl --user -u cc-memory-todoist-sync.service -n 50 --no-pager
 
 預期結果：reminders 與 Todoist 各完成一次輪詢。auto-capture 同時有 project URL、有效 marker 與可用告警設定時應產生健康 summary（摘要）；`CC_CAPTURE_MAX_SESSIONS_PER_TICK=1` 將 canary 限於一個可處理 session。正式 unit 固定設定 `CC_MEMORY_REQUIRE_ALERTS=1`，所以缺少或無效告警設定必須在 worker 前失敗；只有開發期直接呼叫 supervisor 時才有 optional 告警模式。canary 結束立即依 §1.5 撤除 marker 並 stop service。
 
+### 2.5 Phase 7：codex-cli 主力 provider 安裝差異
+
+下列 `Environment=` 行已寫入 `ops/systemd/cc-memory-auto-capture.service`（2026-08-23 更新）。重新安裝 unit 時複製整個 service 檔即自動套用：
+
+```
+Environment=CC_CAPTURE_LLM=codex-cli
+Environment=CC_CAPTURE_LLM_FALLBACK=claude-cli
+Environment=CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol
+Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
+Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=1
+```
+
+同時移除舊的 `Environment=CC_CAPTURE_LLM=claude-cli`（已不在 service 檔中）。安裝後需兩次 `daemon-reload` 並依 §2 步驟 3、4 重新驗證 fragment 與 ConditionResult。
+
 ## 3. 安裝 Claude Code／Codex SessionStart hook
 
 設定草稿與合併注意事項見 `docs/auto-capture-v0.5/m4-settings-draft.md`。兩個客戶端都指向同一支 `hooks/session-start-inject.sh`：
@@ -374,14 +388,18 @@ runtime state（執行期狀態）位於：
 
 ## 9. 正式啟用 Go／No-Go 清單
 
-下列項目必須依序全部通過；任何一項未完成都是 No-Go，不能只因 unit、typecheck（型別檢查）或測試成功就停用 claude-mem：
+下列七項必須依序全部通過；任何一項未完成都是 No-Go，不能只因 unit、typecheck（型別檢查）或測試成功就停用 claude-mem：
 
-1. **可復原性**：project／personal DB 有 canary 前的新鮮 dump，完整 restore 驗證通過；§5 historical epoch 與 archive 驗證通過；三者皆有已核對 SHA-256 的異地副本。
-2. **秘密安全**：provider 端已撤銷暴露的 Gemini key；新 key 只存在核准的 `0600` regular file（一般檔案）且不是 symlink（符號連結），安全 credential loader（憑證載入器）檢查與兩張表 canary 均通過，輸出與文件沒有 key 值。
-3. **品質閘**：收集至少 5 筆近 7 日、`query_surface='mcp'` 的真實 query，加上固定 5 組案例；production DB 全部 active 非個人語料 embedding coverage 必須為 100%，再以顯式的新 key file 跑完整 hybrid benchmark。claude-mem 對照須以公開 session detail 證明 project scope；人工標註者須知悉真實 query 的 self-selection caveat，並讓既定三項硬指標全部達標。只跑 keyword partial benchmark 不算通過。
-4. **backlog 切代**：操作人以最新 dry-run fingerprint 建立短效批准，執行預設 600 秒 settle 的 cutoff；archive verifier 通過後才允許新 epoch 承接正式 capture。歷史 backlog 不要求在啟用前全部回放。
-5. **單 tick canary**：先安裝 `0600` 告警 env、讓 `--test-alert` 實際送達，並在持久 unit 設定 `CC_MEMORY_REQUIRE_ALERTS=1`；任一條件未通過，canary 與觀察窗都不得起算。接著依 §2 更新並驗證 installed unit，建立短效 production marker，只允許 `CC_CAPTURE_MAX_SESSIONS_PER_TICK=1`；檢查 journal、DB project scope、capture 結果、`embedding-failed` 與告警，再立刻撤除 marker 並 stop。
-6. **觀察與切換**：在另行核准的觀察窗內沒有資料錯置、重複寫入、持續 embedding failure 或未告警故障，才 pause claude-mem capture。保留其套件與資料，並記錄 rollback 操作；不做 uninstall 或資料刪除。
+1. **可復原性（擴充）**：
+   - canary 前 project／personal DB 新鮮 dump 且 restore 驗證通過（維持原條）
+   - **新增**：未處理 spool 及其引用 transcript（對話紀錄）的唯讀、已驗 hash、異地備份完成（備份後仍從 live backlog 繼續處理）
+   - **新增**：定義並執行 weekly full snapshot 與每月 restore drill，持續到 backlog 清零
+2. **秘密安全**：新 Gemini key 為 `0600` 一般檔，且 Phase 2 沙箱（sandbox）三層驗收全過（L1 為作業系統層證據，L2 為事件流（event flow）證據）。
+3. **告警 hard gate**：`~/.ccm-memory-alert.env` 為 `0600` 一般檔、`--test-alert` 實際送達並經操作人確認、持久 unit 內固定 `CC_MEMORY_REQUIRE_ALERTS=1`。**未過不得建立任何 marker。**
+4. **品質（降為 advisory（參考用））**：benchmark 不再是啟用前置硬閘門；readiness checker（就緒檢查器）的相關文案與測試已同步更新為 advisory。
+5. **營運契約**：Phase 6 的 marker 四段生命週期、spool sealed（密封）移出程序（含 70%/90% 告警）、以及 ETA（預估完成時間）的量測方法已定案並記錄；ETA 本身為條件式範圍，不列為承諾。
+6. **單 tick canary**：依 Phase 7 全部 12 步（含 runtime mask 清除、兩次 daemon-reload 與兩次 fragment（單元片段）/condition（條件）檢查）。
+7. **觀察窗**：建立一天期觀察 marker → Phase 8 全項通過 → 使用者本人核准長跑 marker → 才 pause claude-mem capture（保留其套件與資料，記錄 rollback（還原）操作）；不做 uninstall 或資料刪除。
 
 可隨時執行唯讀 readiness checker（就緒檢查器）彙整目前證據；它讀取 repo 與 installed systemd unit 全文做逐位元比對，並只讀其他使用者檔案的 metadata（中繼資料）及最新 timestamped canonical benchmark report（帶日期的正式基準報告）。它不讀 DB、不聯網、不呼叫 systemd、不建立 marker，也不讀任何 key／URL／token 內容：
 

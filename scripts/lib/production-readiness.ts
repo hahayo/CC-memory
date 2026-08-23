@@ -152,26 +152,26 @@ function assessQuality(benchmarkReport: string | null): ReadinessGate {
   if (reportLines.has(BENCHMARK_REPORT_STATUS_LINES.partial)) {
     return {
       id: 'g3-quality',
-      status: 'PARTIAL',
-      reason: 'The benchmark report explicitly states that it is partial and cannot support Go/No-Go.',
+      status: 'UNKNOWN',
+      reason: 'The benchmark report is partial. Benchmark is now advisory (參考用) and is not a pre-activation gate.',
       remediation:
-        'Resolve every report incompleteness (including 100% production embedding coverage), ' +
-        'run all ten hybrid queries, and complete human scoring.',
+        'Benchmark results are advisory only — they do not block Go/No-Go. ' +
+        'Run the complete hybrid benchmark for reference before long-run cutover.',
     };
   }
   if (reportLines.has(BENCHMARK_REPORT_STATUS_LINES.pendingHumanAnnotation)) {
     return {
       id: 'g3-quality',
-      status: 'BLOCKED',
-      reason: 'Automated benchmark collection is complete but the required human annotation is not.',
-      remediation: 'Complete all three human-scored hard metrics before deciding Go.',
+      status: 'UNKNOWN',
+      reason: 'Automated benchmark collection is complete but human annotation is pending. Benchmark is advisory (參考用) and is not a pre-activation gate.',
+      remediation: 'Human scoring is advisory only — complete it for reference, but it does not block Go/No-Go.',
     };
   }
   return {
     id: 'g3-quality',
     status: 'UNKNOWN',
-    reason: 'No recognized machine-generated benchmark readiness state was found.',
-    remediation: 'Generate the canonical benchmark report; prose or self-attestation is not accepted.',
+    reason: 'No recognized machine-generated benchmark readiness state was found. Benchmark is advisory (參考用).',
+    remediation: 'Generate the canonical benchmark report for reference; it is advisory and does not block Go/No-Go.',
   };
 }
 

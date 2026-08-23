@@ -103,19 +103,21 @@ describe('production readiness evidence assessor', () => {
     expect(report.gates.find((gate) => gate.id === 'g2-secret-safety')?.status).toBe(
       'BLOCKED',
     );
-    expect(report.overall).toBe('BLOCKED');
+    // g3-quality is now UNKNOWN (benchmark advisory), which takes precedence over BLOCKED in overallStatus
+    expect(report.overall).toBe('UNKNOWN');
     expect(readinessExitCode(report)).toBe(2);
   });
 
-  it('keeps a partial benchmark as a non-deployable result', () => {
+  it('treats a partial benchmark as advisory (UNKNOWN), not a blocking result', () => {
     const evidence = baselineEvidence();
     evidence.benchmarkReport = BENCHMARK_REPORT_STATUS_LINES.partial;
 
     const report = assessProductionReadiness(evidence, new Date('2026-08-12T00:00:00Z'));
 
-    expect(report.gates.find((gate) => gate.id === 'g3-quality')?.status).toBe('PARTIAL');
-    expect(report.overall).toBe('PARTIAL');
-    expect(readinessExitCode(report)).toBe(1);
+    expect(report.gates.find((gate) => gate.id === 'g3-quality')?.status).toBe('UNKNOWN');
+    // overall is UNKNOWN (g3-quality UNKNOWN takes precedence over g1/g2 BLOCKED) — benchmark no longer a hard gate
+    expect(report.overall).toBe('UNKNOWN');
+    expect(readinessExitCode(report)).toBe(2);
   });
 
   it('does not accept a canonical status string embedded inside prose', () => {

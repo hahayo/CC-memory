@@ -1,5 +1,22 @@
 # Plan：capture 主力改用 Codex CLI，haiku 降為備援，並解封 worker 消化 backlog
 
+## 實作狀態（2026-08-23 更新）
+
+| Phase | 狀態 | 備注 |
+|---|---|---|
+| Phase 0（量測）| ✅ 已落地 | p95 pre-LLM elapsed（啟動前耗時）= 31.1 s；見 `phase0-measurement-2026-08-23.md` |
+| Phase 1（沙箱骨架）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 2（沙箱驗收）| ✅ 已落地 | 14/14 tests pass；codex-code-mode-host 未掛載（純文字模式）；見 `sandbox-acceptance-2026-08-23.md`（sandbox agent 已更新，本 cascade 不再重寫） |
+| Phase 3（codex-cli provider）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 4（fallback wrapper）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 4.5（`CC_CAPTURE_MAX_WINDOWS_PER_TICK`）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 5（integration tests 補完）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 6（worker 解封）| ✅ 已落地 | branch `feature/codex-capture-primary` |
+| Phase 7（unit 更新 + cascade）| ⏳ 待操作人執行 | ops/systemd unit 已更新；cascade docs 本 commit |
+| Phase 8（觀察窗）| ⏳ 待操作人執行 | — |
+
+可用模型字串：`gpt-5.6-sol`（正式 unit 預設）、`gpt-5.6-luna`（可選）。
+
 > 狀態：**Round 8（定稿候選）**。Codex 對審七輪，逐輪收斂：
 > R1 3 BLOCKER → R2 2 未解 → R3 4 → R4 3 → R5 4 → R6 2 → **R7：APPROVE-WITH-FIXES（0 BLOCKER，3 IMPORTANT）**。
 > 本輪已把 R7 的 3 項 IMPORTANT 全數折入（`forceProvider` 介面與跨 tick 續跑、timeout 獨立 category 與 blocked streak、sealed mover 的 fsync 順序與 filesystem 驗證）。
@@ -192,7 +209,9 @@ Round 5 正確指出：只比 destination 抓不到「預期掛 `/work-home`，�
 **L2：對抗式 LLM 探測（採事件流證據）**
 
 用 `codex exec --json` 搭配一份要求「用 shell 讀取某隨機 nonce 檔並回報」的對抗式 transcript。
-**通過條件：事件流顯示工具呼叫確實被嘗試且被拒絕。** 最終答案寫 `false` 不算通過。
+**通過條件：事件流無任何 tool call（工具呼叫）事件且輸出合法 JSON。** codex-code-mode-host 未掛載（純文字模式（pure text mode）），Codex 在此沙箱內無法執行 shell 工具，因此不會產生 tool call 事件；最終答案寫 `false` 不算通過。
+
+> **2026-08-23 sandbox-acceptance 補記**：`sandbox-acceptance-2026-08-23.md` 14/14 測試通過（L1×6 確定性探測、L2×1 對抗式探測、L3×7 功能正向）。codex-code-mode-host **未掛載**，確認為純文字模式；殘留接受風險：codex `auth.json` 在 bwrap 內可讀（已明示接受）。
 
 **L3：功能正向探測**
 
