@@ -58,7 +58,7 @@ export async function runAutoCaptureTick(): Promise<CaptureWorkerResult> {
       stdout: process.stdout,
     });
     process.stdout.write(
-      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed}\n`
+      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} blocked=${result.blocked} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed}\n`
     );
     return result;
   } finally {

@@ -8,6 +8,7 @@ import { delimiter, join } from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 
 export const DEFAULT_CAPTURE_LLM_PROVIDER = 'claude-cli';
+export const CLAUDE_CLI_PROVIDER_ID = 'claude-cli';
 export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
 export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
 export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
@@ -173,9 +174,95 @@ export type CaptureLlmErrorCode =
   | 'CLAUDE_CLI_OUTPUT_INVALID'
   | 'CLAUDE_CLI_RATE_LIMITED'
   | 'CLAUDE_CLI_TIMEOUT'
+  | 'CODEX_CLI_EXIT_NONZERO'
+  | 'LLM_RATE_LIMITED'
+  | 'LLM_PROMPT_TOO_LONG'
+  | 'LLM_TIMEOUT'
   | 'LLM_MALFORMED_JSON'
   | 'LLM_SCHEMA_INVALID'
   | 'LLM_EXTRACT_FAILED';
+
+export type FailureCategory =
+  | 'malformed'
+  | 'schema-invalid'
+  | 'prompt-too-long'
+  | 'timeout'
+  | 'rate-limited'
+  | 'disabled'
+  | 'exit-nonzero'
+  | 'terminal';
+
+export type WorkerAction =
+  | 'retry-malformed'
+  | 'split'
+  | 'rate-limited'
+  | 'disabled'
+  | 'blocked'
+  | 'terminal';
+
+export function toFailureCategory(error: unknown): FailureCategory {
+  if (!(error instanceof CaptureLlmValidationError)) return 'terminal';
+  const code = error.code;
+  const message = error.message;
+  const rawOutput = typeof error.details.rawOutput === 'string' ? error.details.rawOutput : '';
+  switch (code) {
+    case 'LLM_MALFORMED_JSON':
+      return 'malformed';
+    case 'LLM_SCHEMA_INVALID':
+      return 'schema-invalid';
+    case 'LLM_PROMPT_TOO_LONG':
+      return 'prompt-too-long';
+    case 'LLM_TIMEOUT':
+    case 'CLAUDE_CLI_TIMEOUT':
+      return 'timeout';
+    case 'LLM_RATE_LIMITED':
+    case 'CLAUDE_CLI_RATE_LIMITED':
+      return 'rate-limited';
+    case 'CAPTURE_LLM_DISABLED':
+      return 'disabled';
+    case 'CODEX_CLI_EXIT_NONZERO':
+      return 'exit-nonzero';
+    case 'CLAUDE_CLI_EXIT_NONZERO': {
+      const combined = `${message}\n${rawOutput}`.toLowerCase();
+      if (combined.includes('prompt is too long') || combined.includes('prompt_too_long')) {
+        return 'prompt-too-long';
+      }
+      return 'exit-nonzero';
+    }
+    case 'CLAUDE_CLI_OUTPUT_INVALID':
+    case 'UNSUPPORTED_CAPTURE_LLM':
+    case 'LLM_EXTRACT_FAILED':
+      return 'terminal';
+    default:
+      return 'terminal';
+  }
+}
+
+export function toWorkerAction(
+  category: FailureCategory,
+  details?: { timeoutSubtype?: string }
+): WorkerAction {
+  switch (category) {
+    case 'malformed':
+      return 'retry-malformed';
+    case 'schema-invalid':
+      return 'terminal';
+    case 'prompt-too-long':
+      return 'split';
+    case 'timeout': {
+      const subtype = details?.timeoutSubtype ?? 'service-or-network';
+      return subtype === 'size-or-deadline' ? 'split' : 'blocked';
+    }
+    case 'rate-limited':
+      return 'rate-limited';
+    case 'disabled':
+      return 'disabled';
+    case 'exit-nonzero':
+      return 'terminal';
+    case 'terminal':
+      return 'terminal';
+  }
+}
 
 export class CaptureLlmValidationError extends Error {
   constructor(
@@ -527,7 +614,7 @@ export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<Clau
 }
 
 class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
-  readonly provider = DEFAULT_CAPTURE_LLM_PROVIDER;
+  readonly provider = CLAUDE_CLI_PROVIDER_ID;
 
   constructor(
     readonly model: string,
@@ -587,23 +674,41 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
 
     if (result.timedOut) {
       throw new CaptureLlmValidationError(
-        'CLAUDE_CLI_TIMEOUT',
+        'LLM_TIMEOUT',
         `claude-cli timed out after ${this.timeoutMs}ms`,
         {
           model: this.model,
           provider: this.provider,
           timeoutMs: this.timeoutMs,
+          legacyCode: 'CLAUDE_CLI_TIMEOUT',
         }
       );
     }
 
     if (result.exitCode !== 0) {
-      const rateLimitDetails = parseClaudeCliRateLimit(result.stdout || result.stderr || '', this.model);
+      const combinedOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+      const rateLimitDetails = parseClaudeCliRateLimit(combinedOutput, this.model);
       if (rateLimitDetails) {
         throw new CaptureLlmValidationError(
-          'CLAUDE_CLI_RATE_LIMITED',
+          'LLM_RATE_LIMITED',
           'claude-cli rate limited',
-          rateLimitDetails
+          { ...rateLimitDetails, legacyCode: 'CLAUDE_CLI_RATE_LIMITED' }
+        );
+      }
+
+      const promptCombined = `claude-cli exited with code ${result.exitCode ?? 'null'}\n${combinedOutput}`.toLowerCase();
+      if (promptCombined.includes('prompt is too long') || promptCombined.includes('prompt_too_long')) {
+        throw new CaptureLlmValidationError(
+          'LLM_PROMPT_TOO_LONG',
+          `claude-cli exited with code ${result.exitCode ?? 'null'}`,
+          {
+            model: this.model,
+            provider: this.provider,
+            exitCode: result.exitCode,
+            signal: result.signal ?? null,
+            legacyCode: 'CLAUDE_CLI_EXIT_NONZERO',
+            ...optionalRawOutput(combinedOutput),
+          }
         );
       }
 
@@ -615,7 +720,7 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
           provider: this.provider,
           exitCode: result.exitCode,
           signal: result.signal ?? null,
-          ...optionalRawOutput(result.stdout || result.stderr || ''),
+          ...optionalRawOutput(combinedOutput),
         }
       );
     }

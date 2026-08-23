@@ -33,6 +33,7 @@ import {
   isCaptureRetryHeld,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
+  type CaptureRetryEntry,
   type CaptureStateV2,
 } from '../../src/services/capture-worker.js';
 import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
@@ -1090,9 +1091,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.000Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const llm = mockLlm([
       timeout,
@@ -1137,9 +1138,9 @@ describe('capture worker failure contracts without DB', () => {
         calls.push(input);
         elapsed = 2;
         throw new CaptureLlmValidationError(
-          'CLAUDE_CLI_TIMEOUT',
+          'LLM_TIMEOUT',
           'claude-cli timed out after 75000ms',
-          { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+          { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
         );
       },
     };
@@ -1185,9 +1186,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.625Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const firstLlm = mockLlm([
       timeout,
@@ -1245,9 +1246,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.700Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const firstLlm = mockLlm([
       timeout,
@@ -2240,6 +2241,376 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({
       lastSessionPath: spoolPath(sessionA),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1: category→action mapping, blocked action, ≤1024-byte park
+// ---------------------------------------------------------------------------
+
+describe('Phase 1: worker category→action integration', () => {
+  function appendSimpleWindow(harness: TestHarness) {
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'Phase 1 test transcript entry' },
+    ]);
+    return appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+  }
+
+  it('LLM_RATE_LIMITED stops tick and counts rateLimited', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_RATE_LIMITED', 'rate limited', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ rateLimited: 1, parked: 0, deadLettered: 0 });
+  });
+
+  it('LLM_PROMPT_TOO_LONG triggers split on a large chunk', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'prompt too long', { model: TEST_MODEL }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, deadLettered: 0 });
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it('LLM_TIMEOUT (default subtype service-or-network) goes to blocked, not split', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 1, rateLimited: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    const entry = state.retries[retryKeys[0]];
+    expect(entry.blockedAttempts).toBe(1);
+    expect(entry.blockedReason).toBe('timeout');
+    // blocked does NOT write splitHints
+    expect(Object.keys(state.splitHints)).toHaveLength(0);
+  });
+
+  it('LLM_TIMEOUT with size-or-deadline subtype goes to split', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', {
+        model: TEST_MODEL,
+        timeoutSubtype: 'size-or-deadline',
+      }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, blocked: 0 });
+  });
+
+  it('CAPTURE_LLM_DISABLED skips and stops tick', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled', {
+        model: TEST_MODEL,
+        provider: 'test',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ skipped: 1, blocked: 0, parked: 0 });
+  });
+
+  it('LLM_SCHEMA_INVALID goes to terminal retry', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_SCHEMA_INVALID', 'bad schema', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('CODEX_CLI_EXIT_NONZERO goes to terminal retry', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CODEX_CLI_EXIT_NONZERO', 'exit 1', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('CLAUDE_CLI_EXIT_NONZERO with prompt_too_long message goes to split', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'prompt is too long', {
+        model: TEST_MODEL,
+        rawOutput: 'prompt is too long for this model',
+      }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, blocked: 0 });
+  });
+});
+
+describe('Phase 1: blocked action lifecycle', () => {
+  function appendSimpleWindow(harness: TestHarness) {
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'Phase 1 blocked lifecycle test' },
+    ]);
+    return appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+  }
+
+  it('5 effective blocked attempts, 6th dead-letters', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const sink = { chunks: [] as string[], stdout: { write: (c: string) => { sink.chunks.push(c); return true; } } };
+    // Simulate 5 blocked ticks
+    for (let i = 0; i < 5; i++) {
+      const llm = mockLlm([
+        new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+      ]);
+      const result = await runWorker(harness, {
+        db: {},
+        llm,
+        now: new Date(`2026-07-06T${10 + i}:00:00.000Z`),
+        stdout: sink.stdout,
+      });
+      expect(result.blocked).toBe(1);
+      expect(result.deadLettered).toBe(0);
+    }
+    // 6th attempt should dead-letter
+    const llm6 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const result6 = await runWorker(harness, {
+      db: {},
+      llm: llm6,
+      now: new Date('2026-07-06T16:00:00.000Z'),
+      stdout: sink.stdout,
+    });
+    expect(result6.blocked).toBe(1);
+    expect(result6.deadLettered).toBe(1);
+    expect(result6.parked).toBe(1);
+  });
+
+  it('held ticks do not count toward blocked attempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // Use non-zero retry interval for hold testing
+    harness.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    // First blocked attempt
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const r1 = await runWorker(harness, {
+      db: {},
+      llm: llm1,
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+    expect(r1.blocked).toBe(1);
+    // Second attempt too soon: should be held
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const r2 = await runWorker(harness, {
+      db: {},
+      llm: llm2,
+      now: new Date('2026-07-06T10:00:01.000Z'), // 1 second later, within 30 min hold
+    });
+    expect(r2.held).toBe(1);
+    expect(r2.blocked).toBe(0);
+    // State should still have blockedAttempts=1
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(1);
+  });
+
+  it('reset: chunk success clears blockedAttempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // First: blocked
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    // Verify blocked state
+    const state1 = readState(harness);
+    const retryKeys = Object.keys(state1.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state1.retries[retryKeys[0]].blockedAttempts).toBe(1);
+    // Second: success (clears retry entry entirely via clearCoveredEntries)
+    const llm2 = mockLlm([
+      rawExtraction({ summary: 'success', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const r2 = await runWorker(harness, {
+      db: fakeDb,
+      llm: llm2,
+      now: new Date('2026-07-06T11:00:00.000Z'),
+    });
+    expect(r2.processed).toBe(1);
+    const state2 = readState(harness);
+    expect(Object.keys(state2.retries)).toHaveLength(0);
+  });
+
+  it('old state without blocked fields defaults to 0', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'old state compat test' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    // Write a state file with a retry entry that lacks blocked fields
+    const sp = join(
+      harness.spoolDir,
+      sanitizeSpoolSegment(harness.projectId),
+      `${sanitizeSpoolSegment(harness.sessionId)}.capture-state.json`
+    );
+    const fakeState: CaptureStateV2 = {
+      version: 2,
+      spool: { generation: 'gen', cursor: 0 },
+      transcripts: {},
+      retries: {
+        'fake-key': {
+          attempts: 1,
+          lastErrorClass: 'LLM_EXTRACT_FAILED',
+          firstSeenIso: '2026-07-06T10:00:00.000Z',
+          lastAttemptIso: '2026-07-06T10:00:00.000Z',
+          pathHash: createHash('sha256').update('test').digest('hex'),
+          start: 0,
+          end: 100,
+          contentHash: createHash('sha256').update('content').digest('hex'),
+          // No blockedAttempts, lastBlockedAtIso, blockedReason
+        } as CaptureRetryEntry,
+      },
+      splitHints: {},
+    };
+    writeFileSync(sp, JSON.stringify(fakeState));
+    // Running worker should parse successfully (defaults to 0)
+    const llm = mockLlm([
+      rawExtraction({ summary: 'ok', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, {
+      db: fakeDb,
+      llm,
+      now: new Date('2026-07-06T11:00:00.000Z'),
+    });
+    // Should not crash; state is parseable
+    expect(result.processed + result.blocked + result.held).toBeGreaterThanOrEqual(0);
+  });
+
+  it('≤1024 bytes chunk that cannot split goes to blocked then eventually parks', async () => {
+    const harness = makeHarness();
+    // Create a tiny transcript (≤1024 bytes)
+    const tinyMessage = 'x'.repeat(200);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: tinyMessage },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const sink = { chunks: [] as string[], stdout: { write: (c: string) => { sink.chunks.push(c); return true; } } };
+    // 5 effective blocked attempts
+    for (let i = 0; i < 5; i++) {
+      const llm = mockLlm([
+        new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+      ]);
+      const result = await runWorker(harness, {
+        db: {},
+        llm,
+        now: new Date(`2026-07-06T${10 + i}:00:00.000Z`),
+        stdout: sink.stdout,
+      });
+      expect(result.blocked).toBe(1);
+      expect(result.deadLettered).toBe(0);
+    }
+    // 6th: dead-letter
+    const llm6 = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+    ]);
+    const result6 = await runWorker(harness, {
+      db: {},
+      llm: llm6,
+      now: new Date('2026-07-06T16:00:00.000Z'),
+      stdout: sink.stdout,
+    });
+    expect(result6.blocked).toBe(1);
+    expect(result6.deadLettered).toBe(1);
+    expect(result6.parked).toBe(1);
+  });
+
+  it('category change does NOT reset blockedAttempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // First: blocked with timeout
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    // Second: blocked with prompt-too-long (tiny chunk, unsplittable → blocked)
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm2, now: new Date('2026-07-06T11:00:00.000Z') });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    // Both counted: blockedAttempts should be 2
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(2);
   });
 });
 

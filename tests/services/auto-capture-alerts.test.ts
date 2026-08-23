@@ -56,6 +56,27 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(held.fingerprint).toBeNull()
   })
 
+  it('treats blocked>0 as unhealthy', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=1 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0\n',
+      stderr: '',
+    })
+    expect(assessment.ok).toBe(false)
+    expect(assessment.blockedCount).toBe(1)
+    expect(assessment.problemLine).toBe('blocked=1')
+  })
+
+  it('parses blocked=0 as healthy when other counts are also zero', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0\n',
+      stderr: '',
+    })
+    expect(assessment.ok).toBe(true)
+    expect(assessment.blockedCount).toBe(0)
+  })
+
   it('flags non-summary stdout and dead-letter as alertable', () => {
     const assessment = assessAutoCaptureExecution({
       exitCode: 0,

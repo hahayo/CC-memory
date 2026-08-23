@@ -353,8 +353,9 @@ describe('claude-cli extraction subprocess contract', () => {
     expect(nonzero.details).toMatchObject({
       model: 'haiku',
       exitCode: 2,
-      rawOutput: nonzeroStdout,
     });
+    // combinedOutput includes both stdout and stderr
+    expect(nonzero.details.rawOutput).toContain(nonzeroStdout);
     expect(JSON.stringify(nonzero.details)).not.toContain(request().transcript);
 
     const malformedModelOutput = '{"session_summary":';
@@ -399,12 +400,13 @@ describe('claude-cli extraction subprocess contract', () => {
 
     const error = await expectValidationError(adapter.extract(request()));
 
-    expect(error.code).toBe('CLAUDE_CLI_RATE_LIMITED');
+    expect(error.code).toBe('LLM_RATE_LIMITED');
     expect(error.details).toMatchObject({
       model: 'haiku',
       provider: 'claude-cli',
       apiErrorStatus: 429,
       result: 'session limit resets later',
+      legacyCode: 'CLAUDE_CLI_RATE_LIMITED',
     });
     expect(JSON.stringify(error.details)).not.toContain(request().transcript);
   });
@@ -427,10 +429,11 @@ describe('claude-cli extraction subprocess contract', () => {
 
     const error = await expectValidationError(adapter.extract(request()));
 
-    expect(error.code).toBe('CLAUDE_CLI_TIMEOUT');
+    expect(error.code).toBe('LLM_TIMEOUT');
     expect(error.details).toMatchObject({
       model: 'haiku',
       timeoutMs: 5,
+      legacyCode: 'CLAUDE_CLI_TIMEOUT',
     });
     expect(runClaudeCli).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 5 }));
   });
@@ -475,5 +478,230 @@ describe('parseCaptureLlmExtraction JSON tolerance', () => {
     );
     await adapter.extract(request());
     expect(prompts.join('\n')).not.toContain('discovery_tokens');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1: toFailureCategory / toWorkerAction / D6 constants / stdout‖stderr fix
+// ---------------------------------------------------------------------------
+
+import {
+  CLAUDE_CLI_PROVIDER_ID,
+  toFailureCategory,
+  toWorkerAction,
+  type CaptureLlmErrorCode,
+  type FailureCategory,
+  type WorkerAction,
+} from '../../src/services/capture-llm.js';
+
+describe('D6: CLAUDE_CLI_PROVIDER_ID constant', () => {
+  it('equals the literal string claude-cli', () => {
+    expect(CLAUDE_CLI_PROVIDER_ID).toBe('claude-cli');
+  });
+
+  it('adapter uses CLAUDE_CLI_PROVIDER_ID as its provider', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    expect(adapter.provider).toBe(CLAUDE_CLI_PROVIDER_ID);
+  });
+});
+
+describe('toFailureCategory: 13-code mapping', () => {
+  const cases: Array<[string, CaptureLlmErrorCode, string, FailureCategory]> = [
+    ['CAPTURE_LLM_DISABLED', 'CAPTURE_LLM_DISABLED', '', 'disabled'],
+    ['UNSUPPORTED_CAPTURE_LLM', 'UNSUPPORTED_CAPTURE_LLM', '', 'terminal'],
+    ['LLM_MALFORMED_JSON', 'LLM_MALFORMED_JSON', '', 'malformed'],
+    ['LLM_SCHEMA_INVALID', 'LLM_SCHEMA_INVALID', '', 'schema-invalid'],
+    ['LLM_EXTRACT_FAILED', 'LLM_EXTRACT_FAILED', '', 'terminal'],
+    ['CLAUDE_CLI_EXIT_NONZERO (no prompt msg)', 'CLAUDE_CLI_EXIT_NONZERO', 'generic error', 'exit-nonzero'],
+    ['CLAUDE_CLI_EXIT_NONZERO (prompt is too long)', 'CLAUDE_CLI_EXIT_NONZERO', 'prompt is too long for model', 'prompt-too-long'],
+    ['CLAUDE_CLI_OUTPUT_INVALID', 'CLAUDE_CLI_OUTPUT_INVALID', '', 'terminal'],
+    ['CLAUDE_CLI_RATE_LIMITED', 'CLAUDE_CLI_RATE_LIMITED', '', 'rate-limited'],
+    ['CLAUDE_CLI_TIMEOUT', 'CLAUDE_CLI_TIMEOUT', '', 'timeout'],
+    ['CODEX_CLI_EXIT_NONZERO', 'CODEX_CLI_EXIT_NONZERO', '', 'exit-nonzero'],
+    ['LLM_RATE_LIMITED', 'LLM_RATE_LIMITED', '', 'rate-limited'],
+    ['LLM_PROMPT_TOO_LONG', 'LLM_PROMPT_TOO_LONG', '', 'prompt-too-long'],
+    ['LLM_TIMEOUT', 'LLM_TIMEOUT', '', 'timeout'],
+  ];
+
+  for (const [label, code, msg, expected] of cases) {
+    it(`${label} → ${expected}`, () => {
+      const err = new CaptureLlmValidationError(
+        code as CaptureLlmErrorCode,
+        msg || label,
+        msg.includes('prompt') ? { rawOutput: msg } : {}
+      );
+      expect(toFailureCategory(err)).toBe(expected);
+    });
+  }
+
+  it('CLAUDE_CLI_EXIT_NONZERO with prompt_too_long in rawOutput → prompt-too-long', () => {
+    const err = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'exited with code 1',
+      { rawOutput: '{"error":"prompt_too_long"}' }
+    );
+    expect(toFailureCategory(err)).toBe('prompt-too-long');
+  });
+
+  it('non-CaptureLlmValidationError → terminal', () => {
+    expect(toFailureCategory(new Error('something'))).toBe('terminal');
+  });
+
+  it('similar text does NOT false-positive to prompt-too-long', () => {
+    const err = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'the prompt was processed successfully',
+      { rawOutput: 'this is not too long at all' }
+    );
+    expect(toFailureCategory(err)).toBe('exit-nonzero');
+  });
+});
+
+describe('toWorkerAction: category → action mapping (8 rows)', () => {
+  const cases: Array<[FailureCategory, WorkerAction, Record<string, string> | undefined]> = [
+    ['malformed', 'retry-malformed', undefined],
+    ['schema-invalid', 'terminal', undefined],
+    ['prompt-too-long', 'split', undefined],
+    ['timeout', 'blocked', undefined],                          // default subtype = service-or-network
+    ['timeout', 'split', { timeoutSubtype: 'size-or-deadline' }],
+    ['timeout', 'blocked', { timeoutSubtype: 'service-or-network' }],
+    ['rate-limited', 'rate-limited', undefined],
+    ['disabled', 'disabled', undefined],
+    ['exit-nonzero', 'terminal', undefined],
+    ['terminal', 'terminal', undefined],
+  ];
+
+  for (const [category, expected, details] of cases) {
+    const subLabel = details?.timeoutSubtype ? ` (${details.timeoutSubtype})` : '';
+    it(`${category}${subLabel} → ${expected}`, () => {
+      expect(toWorkerAction(category, details)).toBe(expected);
+    });
+  }
+});
+
+describe('claude-cli adapter: new error codes with legacyCode', () => {
+  it('timeout throws LLM_TIMEOUT with legacyCode CLAUDE_CLI_TIMEOUT', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli', CC_CAPTURE_CLAUDE_TIMEOUT_MS: '100' },
+        runClaudeCli: async () => ({ stdout: '', exitCode: null, timedOut: true }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_TIMEOUT');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_TIMEOUT');
+    }
+  });
+
+  it('rate limit throws LLM_RATE_LIMITED with legacyCode CLAUDE_CLI_RATE_LIMITED', async () => {
+    const rateLimitJson = JSON.stringify({
+      type: 'result',
+      subtype: 'error_response',
+      is_error: true,
+      api_error_status: 429,
+      result: 'Rate limit exceeded',
+    });
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({ stdout: rateLimitJson, exitCode: 1 }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_RATE_LIMITED');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_RATE_LIMITED');
+    }
+  });
+
+  it('prompt-too-long throws LLM_PROMPT_TOO_LONG with legacyCode CLAUDE_CLI_EXIT_NONZERO', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: '',
+          stderr: 'Error: prompt is too long for this model',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_PROMPT_TOO_LONG');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_EXIT_NONZERO');
+    }
+  });
+});
+
+describe('stdout/stderr masking bug fix', () => {
+  it('stdout noise + stderr real error → correct classification', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: 'some debug noise',
+          stderr: 'Error: prompt is too long',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_PROMPT_TOO_LONG');
+    }
+  });
+
+  it('stderr noise + stdout real error → correct classification', async () => {
+    const rateLimitJson = JSON.stringify({
+      type: 'result',
+      subtype: 'error_response',
+      is_error: true,
+      api_error_status: 429,
+      result: 'Rate limit exceeded',
+    });
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: rateLimitJson,
+          stderr: 'some warning output',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_RATE_LIMITED');
+    }
   });
 });

@@ -22,6 +22,7 @@ export interface AutoCaptureAssessment {
   failedCount: number
   rateLimitedCount: number
   malformedCount: number
+  blockedCount: number
   transcriptMissingCount: number
   parkedCount: number
   yieldedCount: number
@@ -143,6 +144,10 @@ function parseHeldCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'held')
 }
 
+function parseBlockedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'blocked')
+}
+
 function parseEmbeddingFailedCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'embedding-failed')
 }
@@ -165,6 +170,7 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const parkedCount = parseParkedCount(summaryLine)
   const yieldedCount = parseYieldedCount(summaryLine)
   const heldCount = parseHeldCount(summaryLine)
+  const blockedCount = parseBlockedCount(summaryLine)
   const embeddingFailedCount = parseEmbeddingFailedCount(summaryLine)
   const ok =
     result.exitCode === 0 &&
@@ -173,6 +179,7 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount === 0 &&
     malformedCount === 0 &&
     rateLimitedCount === 0 &&
+    blockedCount === 0 &&
     parkedCount === 0 &&
     embeddingFailedCount === 0
 
@@ -185,6 +192,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = truncateProblemLine(stderrLines[0])
     } else if (rateLimitedCount > 0) {
       problemLine = `rate-limited=${rateLimitedCount}`
+    } else if (blockedCount > 0) {
+      problemLine = `blocked=${blockedCount}`
     } else if (failedCount > 0) {
       problemLine = `failed=${failedCount}`
     } else if (malformedCount > 0) {
@@ -218,6 +227,7 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount,
     rateLimitedCount,
     malformedCount,
+    blockedCount,
     transcriptMissingCount,
     parkedCount,
     yieldedCount,

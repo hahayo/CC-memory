@@ -8,17 +8,20 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
 import {
-  DEFAULT_CAPTURE_LLM_PROVIDER,
+  CLAUDE_CLI_PROVIDER_ID,
   DEFAULT_CLAUDE_CLI_TIMEOUT_MS,
   CaptureLlmValidationError,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
   isCaptureLlmDisabled,
   parseCaptureLlmExtraction,
+  toFailureCategory,
+  toWorkerAction,
   type CaptureLlmAdapter,
   type CaptureLlmExtraction,
   type CaptureLlmObservation,
   type CaptureLlmRawResponse,
+  type FailureCategory,
 } from './capture-llm.js';
 import type { DbClient } from './types.js';
 import {
@@ -65,6 +68,7 @@ export interface CaptureWorkerResult {
   deadLettered: number;
   rateLimited: number;
   malformed: number;
+  blocked: number;
   parked: number;
   yielded: number;
   held: number;
@@ -170,6 +174,9 @@ export interface CaptureRetryEntry extends RetryEntry {
   start: number;
   end: number;
   contentHash: string;
+  blockedAttempts?: number;
+  lastBlockedAtIso?: string;
+  blockedReason?: string;
 }
 
 export interface CaptureSplitHint {
@@ -249,6 +256,7 @@ function emptyResult(): CaptureWorkerResult {
     deadLettered: 0,
     rateLimited: 0,
     malformed: 0,
+    blocked: 0,
     parked: 0,
     yielded: 0,
     held: 0,
@@ -377,7 +385,12 @@ function parseCaptureState(raw: string, path: string): CaptureStateV2 {
     ) {
       throw new Error(`CAPTURE_STATE_CORRUPT: invalid retry entry at ${basename(path)}`);
     }
-    retries[key] = { ...(retry as CaptureRetryEntry) };
+    const parsed: CaptureRetryEntry = { ...(retry as CaptureRetryEntry) };
+    // Backward-compatible defaults for blocked fields (added in Phase 1)
+    if (parsed.blockedAttempts === undefined) parsed.blockedAttempts = 0;
+    if (parsed.lastBlockedAtIso === undefined) parsed.lastBlockedAtIso = '';
+    if (parsed.blockedReason === undefined) parsed.blockedReason = '';
+    retries[key] = parsed;
   }
 
   const splitHints: Record<string, CaptureSplitHint> = {};
@@ -618,7 +631,7 @@ function captureMaxWindowBytes(
 ): number {
   const parsed = Number.parseInt(env.CC_CAPTURE_MAX_WINDOW_BYTES ?? '', 10);
   if (Number.isInteger(parsed) && parsed >= 4) return parsed;
-  if (llm?.provider === DEFAULT_CAPTURE_LLM_PROVIDER) {
+  if (llm?.provider === CLAUDE_CLI_PROVIDER_ID) {
     return DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES;
   }
   return DEFAULT_CAPTURE_MAX_WINDOW_BYTES;
@@ -635,21 +648,36 @@ function captureRetryMinIntervalMs(env: Record<string, string | undefined>): num
 }
 
 export function isCaptureRetryHeld(
-  entry: Pick<RetryEntry, 'attempts' | 'lastAttemptIso'> | undefined,
+  entry: Pick<RetryEntry, 'attempts' | 'lastAttemptIso'> &
+    Partial<Pick<CaptureRetryEntry, 'blockedAttempts' | 'lastBlockedAtIso'>> | undefined,
   nowMs: number,
   minIntervalMs: number
 ): boolean {
-  if (!entry || entry.attempts < 1 || minIntervalMs <= 0) return false;
-  const lastAttemptMs = Date.parse(entry.lastAttemptIso);
-  if (!Number.isFinite(lastAttemptMs) || lastAttemptMs > nowMs) return false;
-  return nowMs - lastAttemptMs < minIntervalMs;
+  if (!entry || minIntervalMs <= 0) return false;
+  // Check terminal retry hold
+  if (entry.attempts >= 1) {
+    const lastAttemptMs = Date.parse(entry.lastAttemptIso);
+    if (Number.isFinite(lastAttemptMs) && lastAttemptMs <= nowMs && nowMs - lastAttemptMs < minIntervalMs) {
+      return true;
+    }
+  }
+  // Check blocked hold
+  const blockedAttempts = (entry as Partial<CaptureRetryEntry>).blockedAttempts ?? 0;
+  const lastBlockedAtIso = (entry as Partial<CaptureRetryEntry>).lastBlockedAtIso;
+  if (blockedAttempts >= 1 && typeof lastBlockedAtIso === 'string') {
+    const lastBlockedMs = Date.parse(lastBlockedAtIso);
+    if (Number.isFinite(lastBlockedMs) && lastBlockedMs <= nowMs && nowMs - lastBlockedMs < minIntervalMs) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function llmCallBudgetReserveMs(
   env: Record<string, string | undefined>,
   llm: Pick<CaptureLlmAdapter, 'provider'>
 ): number {
-  if (llm.provider !== DEFAULT_CAPTURE_LLM_PROVIDER) return 0;
+  if (llm.provider !== CLAUDE_CLI_PROVIDER_ID) return 0;
   const timeoutMs = parsePositiveIntegerEnv(
     env.CC_CAPTURE_CLAUDE_TIMEOUT_MS,
     DEFAULT_CLAUDE_CLI_TIMEOUT_MS
@@ -1393,24 +1421,6 @@ function llmRawOutputFromError(error: unknown): string | undefined {
   return undefined;
 }
 
-function isMalformedJsonLlmError(error: unknown): boolean {
-  return error instanceof CaptureLlmValidationError && error.code === 'LLM_MALFORMED_JSON';
-}
-
-function isPromptTooLongLlmError(error: unknown): boolean {
-  if (!(error instanceof CaptureLlmValidationError) || error.code !== 'CLAUDE_CLI_EXIT_NONZERO') {
-    return false;
-  }
-  const rawOutput =
-    typeof error.details.rawOutput === 'string' ? error.details.rawOutput : '';
-  const combined = `${error.message}\n${rawOutput}`.toLowerCase();
-  return combined.includes('prompt is too long') || combined.includes('prompt_too_long');
-}
-
-function isClaudeCliTimeoutError(error: unknown): boolean {
-  return error instanceof CaptureLlmValidationError && error.code === 'CLAUDE_CLI_TIMEOUT';
-}
-
 function truncateLlmRawOutput(rawOutput: string | null | undefined): string | null {
   if (typeof rawOutput !== 'string' || rawOutput.length === 0) return null;
   return rawOutput.slice(0, RAW_LLM_OUTPUT_LIMIT);
@@ -1563,6 +1573,35 @@ async function spoolEndsWithStopSentinel(spoolPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function handleBlockedAction(
+  state: CaptureStateV2,
+  retryKey: string,
+  chunk: TranscriptChunk,
+  sourceContentHash: string,
+  category: FailureCategory,
+  options: CaptureWorkerOptions,
+): void {
+  const attemptTime = (options.now?.() ?? new Date()).toISOString();
+  const entry = state.retries[retryKey] ?? {
+    attempts: 0,
+    lastErrorClass: '',
+    firstSeenIso: attemptTime,
+    lastAttemptIso: '',
+    pathHash: chunk.pathHash,
+    start: chunk.start,
+    end: chunk.end,
+    contentHash: sourceContentHash,
+    blockedAttempts: 0,
+    lastBlockedAtIso: '',
+    blockedReason: '',
+  };
+  entry.blockedAttempts = (entry.blockedAttempts ?? 0) + 1;
+  entry.lastBlockedAtIso = attemptTime;
+  entry.blockedReason = category;
+  entry.lastErrorClass = category;
+  state.retries[retryKey] = entry;
 }
 
 export async function runCaptureWorkerOnce(
@@ -1985,48 +2024,124 @@ export async function runCaptureWorkerOnce(
               extraction = attemptExtraction;
               break;
             } catch (error) {
-              if (attempt === 0 && isMalformedJsonLlmError(error)) {
-                result.llmRetries += 1;
-                continue;
-              }
-              if (error instanceof CaptureLlmValidationError && error.code === 'CAPTURE_LLM_DISABLED') {
-                stdout.write(
-                  formatCaptureLlmDisabledWarning(
-                    typeof error.details.provider === 'string' ? error.details.provider : 'unknown',
-                    error.message
-                  )
-                );
-                result.skipped += 1;
-                runtimeStopped = true;
-                break;
-              }
-              if (error instanceof CaptureLlmValidationError && error.code === 'CLAUDE_CLI_RATE_LIMITED') {
-                result.rateLimited += 1;
-                runtimeStopped = true;
-                break;
-              }
-              if (isPromptTooLongLlmError(error) || isClaudeCliTimeoutError(error)) {
-                const smallerChunks = splitTranscriptChunk(chunk);
-                if (smallerChunks) {
-                  state.splitHints[retryKey] = {
-                    pathHash: chunk.pathHash,
-                    start: chunk.start,
-                    end: chunk.end,
-                    contentHash: sourceContentHash,
-                  };
-                  await stateWriter(statePath, state);
-                  chunks = [...smallerChunks, ...chunks];
-                  promptSplit = true;
+              const category: FailureCategory = toFailureCategory(error);
+              const timeoutSubtype =
+                error instanceof CaptureLlmValidationError && typeof error.details.timeoutSubtype === 'string'
+                  ? error.details.timeoutSubtype
+                  : undefined;
+              const action = toWorkerAction(category, { timeoutSubtype });
+              switch (action) {
+                case 'retry-malformed': {
+                  if (attempt === 0) {
+                    result.llmRetries += 1;
+                    continue;
+                  }
+                  // attempt >= 1: fall through to terminal
+                  terminalError = error;
+                  terminalRawResponse = attemptRawResponse;
+                  break;
+                }
+                case 'disabled': {
+                  stdout.write(
+                    formatCaptureLlmDisabledWarning(
+                      error instanceof CaptureLlmValidationError && typeof error.details.provider === 'string'
+                        ? error.details.provider
+                        : 'unknown',
+                      error instanceof Error ? error.message : String(error)
+                    )
+                  );
+                  result.skipped += 1;
+                  runtimeStopped = true;
+                  break;
+                }
+                case 'rate-limited': {
+                  result.rateLimited += 1;
+                  runtimeStopped = true;
+                  break;
+                }
+                case 'split': {
+                  const smallerChunks = splitTranscriptChunk(chunk);
+                  if (smallerChunks) {
+                    chunks = [...smallerChunks, ...chunks];
+                    state.splitHints[retryKey] = {
+                      pathHash: chunk.pathHash,
+                      start: chunk.start,
+                      end: chunk.end,
+                      contentHash: sourceContentHash,
+                    };
+                    await stateWriter(statePath, state);
+                    promptSplit = true;
+                    break;
+                  }
+                  // Cannot split further: check alternateCategory
+                  const alternateCategory: FailureCategory | undefined =
+                    error instanceof CaptureLlmValidationError &&
+                    typeof error.details.alternateCategory === 'string'
+                      ? (error.details.alternateCategory as FailureCategory)
+                      : undefined;
+                  if (alternateCategory) {
+                    const altAction = toWorkerAction(alternateCategory);
+                    if (altAction === 'rate-limited' || altAction === 'disabled' || altAction === 'blocked') {
+                      // Non-destructive: skip this tick, data not abandoned
+                      result.blocked += 1;
+                      handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
+                      runtimeStopped = true;
+                      break;
+                    }
+                  }
+                  // No alternateCategory or destructive alternate → blocked
+                  result.blocked += 1;
+                  handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
+                  runtimeStopped = true;
+                  break;
+                }
+                case 'blocked': {
+                  result.blocked += 1;
+                  handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
+                  runtimeStopped = true;
+                  break;
+                }
+                case 'terminal':
+                default: {
+                  terminalError = error;
+                  terminalRawResponse = attemptRawResponse;
                   break;
                 }
               }
-              terminalError = error;
-              terminalRawResponse = attemptRawResponse;
               break;
             }
           }
           if (promptSplit) continue;
           if (runtimeStopped) {
+            // For blocked action: persist state and check dead-letter threshold
+            const blockedEntry = state.retries[retryKey];
+            if (blockedEntry && (blockedEntry.blockedAttempts ?? 0) > 0) {
+              await stateWriter(statePath, state);
+              const blockedCount = blockedEntry.blockedAttempts ?? 0;
+              stdout.write(
+                `[cc-memory] auto-capture warning: blocked session=${sessionId} ` +
+                  `source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} ` +
+                  `reason=${blockedEntry.blockedReason ?? 'unknown'} blocked=${blockedCount}/${RETRY_MAX_ATTEMPTS}\n`
+              );
+              if (blockedCount > RETRY_MAX_ATTEMPTS) {
+                const created = await writeDeadLetter(root, chunkWindow, {
+                  model: options.llm.model,
+                  error: new Error(`blocked after ${blockedCount} attempts: ${blockedEntry.blockedReason ?? 'unknown'}`),
+                  legacyRawText: undefined,
+                  llmRawOutput: undefined,
+                  pathHash: chunk.pathHash,
+                  sourceContentHash,
+                });
+                if (created) result.deadLettered += 1;
+                result.parked += 1;
+                checkpoint.checkpoint = chunk.end;
+                clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
+                await stateWriter(statePath, state);
+                stdout.write(
+                  `[cc-memory] auto-capture warning: parked-window session=${sessionId} source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} blocked=${blockedCount}\n`
+                );
+              }
+            }
             sessionStopped = true;
             snapshotCompleted = false;
             break;
@@ -2043,6 +2158,9 @@ export async function runCaptureWorkerOnce(
               start: chunk.start,
               end: chunk.end,
               contentHash: sourceContentHash,
+              blockedAttempts: 0,
+              lastBlockedAtIso: '',
+              blockedReason: '',
             };
             entry.attempts += 1;
             entry.lastErrorClass = llmErrorCode(terminalError);

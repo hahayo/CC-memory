@@ -40,6 +40,7 @@ function result(overrides: Partial<CaptureWorkerResult> = {}): CaptureWorkerResu
     deadLettered: 0,
     rateLimited: 0,
     malformed: 0,
+    blocked: 0,
     parked: 0,
     yielded: 0,
     held: 0,
