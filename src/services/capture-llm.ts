@@ -13,6 +13,8 @@ export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
 export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
 export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_GEMINI_FLASH_TIMEOUT_MS = 90_000;
+export const KILL_GRACE_MS = 1_000;
 
 export type CaptureObservationType =
   | 'decision'
@@ -132,12 +134,25 @@ export interface CaptureLlmRawResponse {
   text: string;
 }
 
+export interface CaptureLlmExtractOptions {
+  forceProvider?: string;
+}
+
+export interface CaptureTelemetrySnapshot {
+  primaryProvider: string;
+  primarySuccess: number;
+  fallbackSuccess: number;
+  fallbackFailed: number;
+}
+
 export interface CaptureLlmAdapter {
   readonly model: string;
   readonly provider?: string;
   readonly disabled?: boolean;
   readonly disabledReason?: string;
-  extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse>;
+  readonly worstCaseCallBudgetMs: number;
+  extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse>;
+  takeTelemetry(): CaptureTelemetrySnapshot;
 }
 
 export interface ClaudeCliRunRequest {
@@ -412,23 +427,30 @@ export function estimateDiscoveryTokens(text: string): number {
 class DisabledCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly disabled = true;
   readonly disabledReason: string;
+  readonly worstCaseCallBudgetMs = 0;
 
   constructor(readonly model: string, reason: string, readonly provider?: string) {
     this.disabledReason = reason;
   }
 
-  async extract(): Promise<CaptureLlmRawResponse> {
+  async extract(_request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', this.disabledReason, {
       model: this.model,
       provider: this.provider,
     });
   }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider ?? 'disabled', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
 }
 
 class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly worstCaseCallBudgetMs = 0;
+
   constructor(readonly model: string, readonly provider: string) {}
 
-  async extract(): Promise<CaptureLlmRawResponse> {
+  async extract(_request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError(
       'UNSUPPORTED_CAPTURE_LLM',
       `Unsupported capture LLM provider: ${this.provider}`,
@@ -437,6 +459,10 @@ class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
         provider: this.provider,
       }
     );
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
   }
 }
 
@@ -615,15 +641,22 @@ export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<Clau
 
 class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly provider = CLAUDE_CLI_PROVIDER_ID;
+  readonly worstCaseCallBudgetMs: number;
 
   constructor(
     readonly model: string,
     private readonly command: string,
     private readonly timeoutMs: number,
     private readonly runClaudeCli: ClaudeCliRunner
-  ) {}
+  ) {
+    this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
+  }
 
-  async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     let result: ClaudeCliRunResult;
     try {
       result = await this.runClaudeCli({
@@ -746,21 +779,51 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
 
 class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly provider = GEMINI_FLASH_CAPTURE_LLM_PROVIDER;
+  readonly worstCaseCallBudgetMs: number;
   private readonly ai: GoogleGenAI;
+  private readonly timeoutMs: number;
 
-  constructor(readonly model: string, apiKey: string) {
+  constructor(readonly model: string, apiKey: string, timeoutMs: number) {
     this.ai = new GoogleGenAI({ apiKey });
+    this.timeoutMs = timeoutMs;
+    this.worstCaseCallBudgetMs = timeoutMs;
   }
 
-  async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
-    const response = await this.ai.models.generateContent({
-      model: this.model,
-      contents: buildCapturePrompt(request, { includeOpeningInstructions: true }),
-    });
-    return {
-      model: this.model,
-      text: response.text ?? '',
-    };
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.ai.models.generateContent({
+        model: this.model,
+        contents: buildCapturePrompt(request, { includeOpeningInstructions: true }),
+        config: {
+          abortSignal: controller.signal,
+        },
+      });
+      return {
+        model: this.model,
+        text: response.text ?? '',
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new CaptureLlmValidationError(
+          'LLM_TIMEOUT',
+          `gemini-flash timed out after ${this.timeoutMs}ms`,
+          {
+            model: this.model,
+            provider: this.provider,
+            timeoutMs: this.timeoutMs,
+          }
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -803,11 +866,202 @@ function buildCapturePrompt(
     .join('\n');
 }
 
+/** Fallback trigger categories — primary errors that warrant trying the fallback provider. */
+const FALLBACK_TRIGGER_CATEGORIES: ReadonlySet<FailureCategory> = new Set([
+  'rate-limited',
+  'disabled',
+  'timeout',
+  'exit-nonzero',
+  'terminal',
+]);
+
+export class FallbackCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider: string | undefined;
+  readonly model: string;
+  readonly worstCaseCallBudgetMs: number;
+
+  private _primarySuccess = 0;
+  private _fallbackSuccess = 0;
+  private _fallbackFailed = 0;
+
+  constructor(
+    private readonly primary: CaptureLlmAdapter,
+    private readonly fallback: CaptureLlmAdapter
+  ) {
+    this.provider = primary.provider;
+    this.model = primary.model;
+    this.worstCaseCallBudgetMs = primary.worstCaseCallBudgetMs + fallback.worstCaseCallBudgetMs;
+  }
+
+  get disabled(): boolean {
+    return (this.primary.disabled === true) && (this.fallback.disabled === true);
+  }
+
+  get disabledReason(): string | undefined {
+    if (!this.disabled) return undefined;
+    const reasons = [this.primary.disabledReason, this.fallback.disabledReason]
+      .filter((r): r is string => typeof r === 'string');
+    return reasons.join('; ');
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    const snapshot: CaptureTelemetrySnapshot = {
+      primaryProvider: this.primary.provider ?? 'unknown',
+      primarySuccess: this._primarySuccess,
+      fallbackSuccess: this._fallbackSuccess,
+      fallbackFailed: this._fallbackFailed,
+    };
+    this._primarySuccess = 0;
+    this._fallbackSuccess = 0;
+    this._fallbackFailed = 0;
+    return snapshot;
+  }
+
+  async extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    // forceProvider: route directly to the named adapter
+    if (options?.forceProvider) {
+      const target = options.forceProvider === (this.fallback.provider ?? '')
+        ? this.fallback
+        : this.primary;
+      const response = await target.extract(request);
+      if (target === this.fallback) {
+        this._fallbackSuccess += 1;
+      } else {
+        this._primarySuccess += 1;
+      }
+      return response;
+    }
+
+    // Step 1: try primary
+    let primaryError: CaptureLlmValidationError | undefined;
+    let primaryCategory: FailureCategory | undefined;
+    try {
+      const response = await this.primary.extract(request);
+      this._primarySuccess += 1;
+      return response;
+    } catch (error) {
+      if (!(error instanceof CaptureLlmValidationError)) throw error;
+      primaryError = error;
+      primaryCategory = toFailureCategory(error);
+    }
+
+    // Should we try fallback?
+    if (!primaryCategory || !FALLBACK_TRIGGER_CATEGORIES.has(primaryCategory)) {
+      // Don't fallback for malformed, schema-invalid, prompt-too-long
+      throw primaryError!;
+    }
+
+    // Step 2: try fallback
+    try {
+      const response = await this.fallback.extract(request);
+      this._fallbackSuccess += 1;
+      return response;
+    } catch (fallbackError) {
+      this._fallbackFailed += 1;
+      if (!(fallbackError instanceof CaptureLlmValidationError)) throw fallbackError;
+      const fallbackCategory = toFailureCategory(fallbackError);
+
+      // Determine final category per D4 second-step table
+      const finalCategory = resolveFallbackCategory(primaryCategory, fallbackCategory);
+      const finalError = buildFallbackError(
+        finalCategory,
+        primaryError!,
+        fallbackError,
+        primaryCategory
+      );
+      throw finalError;
+    }
+  }
+}
+
+function resolveFallbackCategory(
+  primaryCategory: FailureCategory,
+  fallbackCategory: FailureCategory
+): FailureCategory {
+  // Fallback malformed → malformed (with retryProvider)
+  if (fallbackCategory === 'malformed') return 'malformed';
+  // Fallback schema-invalid → schema-invalid
+  if (fallbackCategory === 'schema-invalid') return 'schema-invalid';
+  // Fallback prompt-too-long → prompt-too-long (with alternateCategory = primary's category)
+  if (fallbackCategory === 'prompt-too-long') return 'prompt-too-long';
+  // Fallback rate-limited → rate-limited (any primary)
+  if (fallbackCategory === 'rate-limited') return 'rate-limited';
+  // Double timeout → blocked (timeout category with service-or-network subtype)
+  if (fallbackCategory === 'timeout' && primaryCategory === 'timeout') return 'timeout';
+  // Single fallback timeout → timeout
+  if (fallbackCategory === 'timeout') return 'timeout';
+  // Fallback disabled: depends on primary
+  if (fallbackCategory === 'disabled') {
+    if (primaryCategory === 'rate-limited') return 'rate-limited';
+    if (primaryCategory === 'timeout') return 'timeout';
+    if (primaryCategory === 'disabled') return 'disabled';
+    return 'terminal';
+  }
+  // Fallback exit-nonzero or terminal: depends on primary
+  if (primaryCategory === 'rate-limited') return 'rate-limited';
+  if (primaryCategory === 'timeout') return 'terminal';
+  return 'terminal';
+}
+
+function buildFallbackError(
+  finalCategory: FailureCategory,
+  primaryError: CaptureLlmValidationError,
+  fallbackError: CaptureLlmValidationError,
+  primaryCategory: FailureCategory
+): CaptureLlmValidationError {
+  // Map category back to an error code
+  const code = categoryToErrorCode(finalCategory, fallbackError);
+  const details: Record<string, unknown> = {
+    ...fallbackError.details,
+    primaryCategory,
+    primaryCode: primaryError.code,
+    primaryMessage: primaryError.message,
+    fallbackCategory: toFailureCategory(fallbackError),
+    fallbackCode: fallbackError.code,
+    fallbackMessage: fallbackError.message,
+  };
+
+  // malformed from fallback → retryProvider
+  if (finalCategory === 'malformed') {
+    details.retryProvider = 'fallback';
+  }
+  // prompt-too-long from fallback → alternateCategory from primary
+  if (finalCategory === 'prompt-too-long') {
+    details.alternateCategory = primaryCategory;
+  }
+  // Double timeout → service-or-network subtype to trigger blocked
+  if (finalCategory === 'timeout' && primaryCategory === 'timeout') {
+    details.timeoutSubtype = 'service-or-network';
+  }
+
+  return new CaptureLlmValidationError(code, fallbackError.message, details);
+}
+
+function categoryToErrorCode(
+  category: FailureCategory,
+  fallbackError: CaptureLlmValidationError
+): CaptureLlmErrorCode {
+  switch (category) {
+    case 'malformed': return 'LLM_MALFORMED_JSON';
+    case 'schema-invalid': return 'LLM_SCHEMA_INVALID';
+    case 'prompt-too-long': return 'LLM_PROMPT_TOO_LONG';
+    case 'timeout': return 'LLM_TIMEOUT';
+    case 'rate-limited': return 'LLM_RATE_LIMITED';
+    case 'disabled': return 'CAPTURE_LLM_DISABLED';
+    case 'exit-nonzero': return fallbackError.code;
+    case 'terminal': return 'LLM_EXTRACT_FAILED';
+  }
+}
+
 export function isCaptureLlmDisabled(adapter: CaptureLlmAdapter): boolean {
   return adapter.disabled === true;
 }
 
-export function createCaptureLlmAdapter(
+/**
+ * Create a single adapter without reading fallback env — used by the wrapper
+ * factory to avoid recursive fallback creation.
+ */
+function createSingleAdapter(
   options: CreateCaptureLlmAdapterOptions = {}
 ): CaptureLlmAdapter {
   const env = options.env ?? process.env;
@@ -841,8 +1095,6 @@ export function createCaptureLlmAdapter(
   }
 
   if (provider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER) {
-    // unsupported provider 無 model 概念——model 欄位標 unknown，避免 dead-letter
-    // metadata 把 provider 名誤報成 model 名
     return new UnsupportedCaptureLlmAdapter('unknown', provider);
   }
 
@@ -854,5 +1106,49 @@ export function createCaptureLlmAdapter(
     return new DisabledCaptureLlmAdapter(model, reason, provider);
   }
 
-  return new GeminiFlashCaptureLlmAdapter(model, apiKey);
+  const geminiTimeoutMs = parsePositiveIntegerEnv(
+    env.CC_CAPTURE_GEMINI_TIMEOUT_MS,
+    DEFAULT_GEMINI_FLASH_TIMEOUT_MS
+  );
+  return new GeminiFlashCaptureLlmAdapter(model, apiKey, geminiTimeoutMs);
+}
+
+export function createCaptureLlmAdapter(
+  options: CreateCaptureLlmAdapterOptions = {}
+): CaptureLlmAdapter {
+  const env = options.env ?? process.env;
+  const primary = createSingleAdapter(options);
+
+  const fallbackProvider = env.CC_CAPTURE_LLM_FALLBACK?.trim();
+  if (!fallbackProvider) {
+    // No fallback configured — maintain today's behaviour exactly
+    if (!Number.isFinite(primary.worstCaseCallBudgetMs) && !primary.disabled) {
+      throw new Error(
+        `Adapter ${primary.provider ?? 'unknown'} has non-finite worstCaseCallBudgetMs — cannot compute tick budget`
+      );
+    }
+    return primary;
+  }
+
+  // Validate known fallback provider
+  if (
+    fallbackProvider !== DEFAULT_CAPTURE_LLM_PROVIDER &&
+    fallbackProvider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER
+  ) {
+    throw new Error(
+      `Unknown fallback capture LLM provider: ${fallbackProvider} (CC_CAPTURE_LLM_FALLBACK)`
+    );
+  }
+
+  // Build fallback adapter using its own provider env
+  const fallbackEnv = { ...env, CC_CAPTURE_LLM: fallbackProvider };
+  const fallback = createSingleAdapter({ ...options, env: fallbackEnv, emitDisabledWarning: false });
+
+  const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+  if (!Number.isFinite(wrapper.worstCaseCallBudgetMs) && !wrapper.disabled) {
+    throw new Error(
+      `Fallback adapter has non-finite worstCaseCallBudgetMs — cannot compute tick budget`
+    );
+  }
+  return wrapper;
 }
