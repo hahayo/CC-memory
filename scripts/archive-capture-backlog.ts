@@ -925,18 +925,22 @@ export function copyLiveCapacityCheck(
   const spoolFiles = walkFiles(spoolDir);
   const spoolBytes = spoolFiles.reduce((sum, f) => sum + statSync(f).size, 0);
 
-  // Calculate transcript sizes
-  let transcriptBytes = 0;
+  // Calculate transcript sizes (deduplicated by path, matching transcriptBoundaries口径)
+  const transcriptPaths = new Set<string>();
   for (const spoolFile of spoolFiles.filter((f) => f.endsWith('.jsonl'))) {
     for (const line of readFileSync(spoolFile, 'utf8').split(/\r?\n/)) {
       if (!line.trim()) continue;
       try {
         const record = JSON.parse(line) as Record<string, unknown>;
         const source = typeof record.transcript_path === 'string' ? record.transcript_path : '';
-        if (source && existsSync(source)) {
-          transcriptBytes += statSync(source).size;
-        }
+        if (source) transcriptPaths.add(source);
       } catch { /* malformed line */ }
+    }
+  }
+  let transcriptBytes = 0;
+  for (const tp of transcriptPaths) {
+    if (existsSync(tp)) {
+      transcriptBytes += statSync(tp).size;
     }
   }
 
@@ -1121,6 +1125,9 @@ async function executeCopyLive(options: ArchiveBacklogCliOptions): Promise<numbe
   if (!capCheck.ok) {
     throw new Error(`copy-live capacity check failed: ${capCheck.reason}`);
   }
+
+  mkdirSync(options.copyLiveStagingRoot, { recursive: true, mode: 0o700 });
+  mkdirSync(options.copyLiveArchiveRoot, { recursive: true, mode: 0o700 });
 
   const stagingDir = path.join(options.copyLiveStagingRoot, `staging-${id}`);
   const archiveDir = path.join(options.copyLiveArchiveRoot, `copy-live-${id}`);

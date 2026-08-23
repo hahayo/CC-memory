@@ -265,6 +265,37 @@ function walkFilesFlat(root: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Sealed counterpart lookup in source tree (for journal-lost recovery)
+// ---------------------------------------------------------------------------
+
+/**
+ * Given a retryKey (the sealed spool filename), find the counterpart file
+ * in the source spool tree. The retryKey is the spool basename:
+ * `<sessionId>.jsonl.<ts>.<gen>.sealed`
+ *
+ * For type='state': derive the state filename from the spool pattern
+ * For type='spool': the retryKey IS the spool filename
+ */
+function findSealedCounterpart(
+  spoolDir: string,
+  retryKey: string,
+  type: 'spool' | 'state',
+): string | undefined {
+  if (type === 'state') {
+    // retryKey = "<sessionId>.jsonl.<ts>.<gen>.sealed"
+    // state counterpart = "<sessionId>.capture-state.json.<ts>.<gen>.sealed"
+    const match = retryKey.match(/^(.+)\.jsonl(\.\d+\.\d+\.sealed)$/);
+    if (!match) return undefined;
+    const stateBasename = `${match[1]}.capture-state.json${match[2]}`;
+    const allFiles = walkFilesFlat(spoolDir);
+    return allFiles.find((f) => basename(f) === stateBasename);
+  }
+  // type === 'spool': retryKey is already the spool basename
+  const allFiles = walkFilesFlat(spoolDir);
+  return allFiles.find((f) => basename(f) === retryKey);
+}
+
+// ---------------------------------------------------------------------------
 // Journal operations
 // ---------------------------------------------------------------------------
 
@@ -286,12 +317,12 @@ function readJournal(journalPath: string): JournalEntry[] {
 function appendJournal(
   journalPath: string,
   entry: JournalEntry,
-  _fsyncDirFn: (d: string) => void,
+  fsyncDirFn: (d: string) => void,
 ): void {
   mkdirSync(dirname(journalPath), { recursive: true, mode: 0o700 });
   appendFileSync(journalPath, JSON.stringify(entry) + '\n');
   fsyncFile(journalPath);
-  // Not fsyncing the parent dir here — caller controls step hooks
+  fsyncDirFn(dirname(journalPath));
 }
 
 // latestJournalState is used internally by recoverJournal's grouping logic
@@ -318,9 +349,12 @@ function readManifest(manifestPath: string): ManifestEntry[] {
 function appendManifest(
   manifestPath: string,
   entry: ManifestEntry,
+  fsyncDirFn: (d: string) => void = defaultFsyncDir,
 ): void {
   mkdirSync(dirname(manifestPath), { recursive: true, mode: 0o700 });
   appendFileSync(manifestPath, JSON.stringify(entry) + '\n');
+  fsyncFile(manifestPath);
+  fsyncDirFn(dirname(manifestPath));
 }
 
 function manifestContains(
@@ -461,10 +495,8 @@ function moveSealedPair(
   };
 
   if (!manifestContains(paths.manifestPath, pair.retryKey, spoolHash, stateHash)) {
-    appendManifest(paths.manifestPath, manifestEntry);
+    appendManifest(paths.manifestPath, manifestEntry, fsyncDirFn);
     onStep('manifest-written', { ...entry });
-
-    fsyncFile(paths.manifestPath);
     onStep('manifest-fsynced', { ...entry });
   }
 
@@ -552,7 +584,7 @@ export function recoverJournal(
               spoolRelpath: join(sub.name, spoolFile),
               stateRelpath: join(sub.name, stateFile),
               movedAt: opts.now().toISOString(),
-            });
+            }, opts.fsyncDir);
           }
           result.moved++;
         } catch (err) {
@@ -560,9 +592,114 @@ export function recoverJournal(
             `orphan staging rebuild failed: ${sub.name}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+      } else if (spoolFile && !stateFile) {
+        // Single spool in staging — look for state in source tree
+        const counterpart = findSealedCounterpart(paths.spoolDir, sub.name, 'state');
+        if (counterpart) {
+          try {
+            renameSync(counterpart, join(stagingSubdir, basename(counterpart)));
+            opts.fsyncDir(dirname(counterpart));
+            opts.fsyncDir(stagingSubdir);
+            const spoolHash = sha256File(join(stagingSubdir, spoolFile));
+            const stateBase = basename(counterpart);
+            const stateHash = sha256File(join(stagingSubdir, stateBase));
+            const finalSubdir = join(paths.finalDir, sub.name);
+            mkdirSync(paths.finalDir, { recursive: true, mode: 0o700 });
+            renameSync(stagingSubdir, finalSubdir);
+            opts.fsyncDir(dirname(finalSubdir));
+            if (!manifestContains(paths.manifestPath, sub.name, spoolHash, stateHash)) {
+              appendManifest(paths.manifestPath, {
+                retryKey: sub.name,
+                spoolHash,
+                stateHash,
+                spoolRelpath: join(sub.name, spoolFile),
+                stateRelpath: join(sub.name, stateBase),
+                movedAt: opts.now().toISOString(),
+              }, opts.fsyncDir);
+            }
+            result.moved++;
+          } catch (err) {
+            result.errors.push(
+              `orphan staging single-file rebuild failed: ${sub.name}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else {
+          result.errors.push(`orphan staging directory (incomplete pair): ${stagingSubdir}`);
+        }
+      } else if (!spoolFile && stateFile) {
+        // Single state in staging — look for spool in source tree
+        const counterpart = findSealedCounterpart(paths.spoolDir, sub.name, 'spool');
+        if (counterpart) {
+          try {
+            renameSync(counterpart, join(stagingSubdir, basename(counterpart)));
+            opts.fsyncDir(dirname(counterpart));
+            opts.fsyncDir(stagingSubdir);
+            const spoolBase = basename(counterpart);
+            const spoolHash = sha256File(join(stagingSubdir, spoolBase));
+            const stateHash = sha256File(join(stagingSubdir, stateFile));
+            const finalSubdir = join(paths.finalDir, sub.name);
+            mkdirSync(paths.finalDir, { recursive: true, mode: 0o700 });
+            renameSync(stagingSubdir, finalSubdir);
+            opts.fsyncDir(dirname(finalSubdir));
+            if (!manifestContains(paths.manifestPath, sub.name, spoolHash, stateHash)) {
+              appendManifest(paths.manifestPath, {
+                retryKey: sub.name,
+                spoolHash,
+                stateHash,
+                spoolRelpath: join(sub.name, spoolBase),
+                stateRelpath: join(sub.name, stateFile),
+                movedAt: opts.now().toISOString(),
+              }, opts.fsyncDir);
+            }
+            result.moved++;
+          } catch (err) {
+            result.errors.push(
+              `orphan staging single-file rebuild failed: ${sub.name}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else {
+          result.errors.push(`orphan staging directory (incomplete pair): ${stagingSubdir}`);
+        }
       } else {
-        // Incomplete pair in staging — can't rebuild, report
+        // No sealed files in staging — report
         result.errors.push(`orphan staging directory (incomplete pair): ${stagingSubdir}`);
+      }
+    }
+  }
+
+  // Scan final for pairs not in manifest (journal-lost after final rename)
+  if (existsSync(paths.finalDir)) {
+    const manifestEntries = readManifest(paths.manifestPath);
+    const manifestKeys = new Set(manifestEntries.map((e) => e.retryKey));
+    for (const sub of readdirSync(paths.finalDir, { withFileTypes: true })) {
+      if (!sub.isDirectory()) continue;
+      if (manifestKeys.has(sub.name)) continue;
+      if (byKey.has(sub.name)) continue; // Already handled by journal recovery
+      const finalSubdir = join(paths.finalDir, sub.name);
+      const files = readdirSync(finalSubdir);
+      const spoolFile = files.find((f) => f.match(/\.jsonl\.\d+\.\d+\.sealed$/));
+      const stateFile = files.find((f) => f.match(/\.capture-state\.json\.\d+\.\d+\.sealed$/));
+
+      if (spoolFile && stateFile) {
+        try {
+          const spoolHash = sha256File(join(finalSubdir, spoolFile));
+          const stateHash = sha256File(join(finalSubdir, stateFile));
+          appendManifest(paths.manifestPath, {
+            retryKey: sub.name,
+            spoolHash,
+            stateHash,
+            spoolRelpath: join(sub.name, spoolFile),
+            stateRelpath: join(sub.name, stateFile),
+            movedAt: opts.now().toISOString(),
+          }, opts.fsyncDir);
+          // Manifest backfill only — no files were physically moved, so
+          // do not increment result.moved. The main move pass will handle
+          // source cleanup and count it there if source files still exist.
+        } catch (err) {
+          result.errors.push(
+            `final manifest backfill failed: ${sub.name}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
   }
@@ -614,7 +751,7 @@ function recoverEntry(
         spoolRelpath: join(entry.retryKey, spoolBase),
         stateRelpath: join(entry.retryKey, stateBase),
         movedAt: now().toISOString(),
-      });
+      }, fsyncDirFn);
     }
     return { moved: true };
   }
@@ -640,7 +777,7 @@ function recoverEntry(
         spoolRelpath: join(entry.retryKey, spoolBase),
         stateRelpath: join(entry.retryKey, stateBase),
         movedAt: now().toISOString(),
-      });
+      }, fsyncDirFn);
     }
 
     // Clean source if still exists
@@ -670,7 +807,7 @@ function recoverEntry(
           spoolRelpath: join(entry.retryKey, spoolBase),
           stateRelpath: join(entry.retryKey, stateBase),
           movedAt: now().toISOString(),
-        });
+        }, fsyncDirFn);
       }
       if (sourceSpoolExists) unlinkSync(entry.spoolPath);
       return { moved: true };
@@ -697,7 +834,7 @@ function recoverEntry(
           spoolRelpath: join(entry.retryKey, spoolBase),
           stateRelpath: join(entry.retryKey, stateBase),
           movedAt: now().toISOString(),
-        });
+        }, fsyncDirFn);
       }
       if (sourceStateExists) unlinkSync(entry.statePath);
       return { moved: true };

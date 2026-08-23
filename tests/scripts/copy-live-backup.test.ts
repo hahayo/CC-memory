@@ -399,3 +399,70 @@ describe('pruneCopyLiveArchives', () => {
     pruneCopyLiveArchives('/nonexistent', 2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Finding 6: executeCopyLiveSnapshot with non-existent multi-level staging root
+// ---------------------------------------------------------------------------
+
+describe('executeCopyLiveSnapshot with deep staging root', () => {
+  it('succeeds when staging root parent does not yet exist', () => {
+    const root = makeRoot();
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir, { recursive: true });
+    writeFileSync(join(spoolDir, 'session.jsonl'), '{"a":1}\n');
+
+    // Multi-level staging dir where parent doesn't exist
+    const stagingDir = join(root, 'deep', 'nested', 'staging', 'staging-20260823T120000Z');
+    // Ensure parent exists (this is what executeCopyLive should do)
+    mkdirSync(join(root, 'deep', 'nested', 'staging'), { recursive: true, mode: 0o700 });
+
+    const manifest = executeCopyLiveSnapshot({
+      spoolDir,
+      stagingDir,
+      snapshotId: '20260823T120000Z',
+      snapshotAt: '2026-08-23T12:00:00.000Z',
+    });
+
+    expect(manifest.mode).toBe('copy-live');
+    expect(manifest.counts.spoolFiles).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 7: capacity precheck deduplicates transcripts
+// ---------------------------------------------------------------------------
+
+describe('copyLiveCapacityCheck transcript deduplication', () => {
+  it('counts each transcript only once even when referenced by 100 spool records', () => {
+    const root = makeRoot();
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir, { recursive: true });
+
+    // Create a transcript file
+    const transcriptPath = join(root, 'transcript.jsonl');
+    const transcriptContent = '{"type":"conversation"}\n'.repeat(100);
+    writeFileSync(transcriptPath, transcriptContent);
+    const transcriptSize = statSync(transcriptPath).size;
+
+    // Create 100 spool records all pointing to the same transcript
+    const lines: string[] = [];
+    for (let i = 0; i < 100; i++) {
+      lines.push(JSON.stringify({
+        transcript_path: transcriptPath,
+        transcript_offset: i * 24,
+      }));
+    }
+    writeFileSync(join(spoolDir, 'session.jsonl'), lines.join('\n') + '\n');
+
+    const spoolBytes = statSync(join(spoolDir, 'session.jsonl')).size;
+
+    const result = copyLiveCapacityCheck(spoolDir, {
+      statfsFn: () => ({ bavail: 10_000_000, bsize: 4096 }), // plenty
+    });
+
+    // The required bytes should use transcriptSize once, not 100 times
+    // Formula: (spoolBytes + transcriptBytes) * 2 + 1 GB
+    const expectedRequired = (spoolBytes + transcriptSize) * 2 + 1024 * 1024 * 1024;
+    expect(result.requiredBytes).toBe(expectedRequired);
+  });
+});

@@ -4,12 +4,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   defaultSealedMoverPaths,
@@ -543,5 +544,118 @@ describe('totalBytesInTree', () => {
 
   it('returns 0 for non-existent directory', () => {
     expect(totalBytesInTree('/nonexistent')).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 5: journal-lost crash injection × 3 positions
+// Recovery must scan source + staging + final, converge to manifest-committed.
+// ---------------------------------------------------------------------------
+
+describe('sealed-mover journal-lost crash recovery (3 positions)', () => {
+  it('converges when journal lost after only spool moved to staging', () => {
+    const root = makeRoot();
+    const paths = makePaths(root);
+    const pair = createSealedPair(paths.spoolDir, 'proj', 'sess', 2000, 1);
+    const spoolHash = sha256File(pair.spoolPath);
+    const stateHash = sha256File(pair.statePath);
+
+    // Simulate: spool in staging, state still in source, no journal
+    const stagingSubdir = join(paths.stagingDir, pair.retryKey);
+    mkdirSync(stagingSubdir, { recursive: true });
+    renameSync(pair.spoolPath, join(stagingSubdir, basename(pair.spoolPath)));
+    // State remains in source at pair.statePath
+
+    // No journal exists — simulate journal loss
+    // Recovery should find spool in staging, locate state in source, complete the move
+    const result = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(result.failClosed).toBe(false);
+
+    // Final should have exactly 2 files (one spool + one state)
+    const finalSubdir = join(paths.finalDir, pair.retryKey);
+    expect(existsSync(finalSubdir)).toBe(true);
+    const finalFiles = readdirSync(finalSubdir);
+    expect(finalFiles.filter((f: string) => f.endsWith('.sealed'))).toHaveLength(2);
+
+    // Manifest should be committed
+    const manifest = readFileSync(paths.manifestPath, 'utf8');
+    expect(manifest).toContain(pair.retryKey);
+    expect(manifest).toContain(spoolHash);
+    expect(manifest).toContain(stateHash);
+
+    // Source files should be gone
+    expect(existsSync(pair.spoolPath)).toBe(false);
+    expect(existsSync(pair.statePath)).toBe(false);
+
+    // Second run: moved=0 (idempotent)
+    const second = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(second.moved).toBe(0);
+  });
+
+  it('converges when journal lost after both files moved to staging', () => {
+    const root = makeRoot();
+    const paths = makePaths(root);
+    const pair = createSealedPair(paths.spoolDir, 'proj', 'sess', 3000, 1);
+    const spoolHash = sha256File(pair.spoolPath);
+    const stateHash = sha256File(pair.statePath);
+
+    // Simulate: both files in staging, no journal
+    const stagingSubdir = join(paths.stagingDir, pair.retryKey);
+    mkdirSync(stagingSubdir, { recursive: true });
+    renameSync(pair.spoolPath, join(stagingSubdir, basename(pair.spoolPath)));
+    renameSync(pair.statePath, join(stagingSubdir, basename(pair.statePath)));
+
+    const result = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(result.failClosed).toBe(false);
+
+    // Final should have the pair
+    const finalSubdir = join(paths.finalDir, pair.retryKey);
+    expect(existsSync(finalSubdir)).toBe(true);
+    const finalFiles = readdirSync(finalSubdir);
+    expect(finalFiles.filter((f: string) => f.endsWith('.sealed'))).toHaveLength(2);
+
+    // Manifest committed
+    const manifest = readFileSync(paths.manifestPath, 'utf8');
+    expect(manifest).toContain(spoolHash);
+    expect(manifest).toContain(stateHash);
+
+    // Second run: moved=0
+    const second = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(second.moved).toBe(0);
+  });
+
+  it('converges when journal lost after final rename but before manifest', () => {
+    const root = makeRoot();
+    const paths = makePaths(root);
+    const pair = createSealedPair(paths.spoolDir, 'proj', 'sess', 4000, 1);
+    const spoolHash = sha256File(pair.spoolPath);
+    const stateHash = sha256File(pair.statePath);
+
+    // Simulate: pair already in final, but manifest has no entry, no journal
+    const finalSubdir = join(paths.finalDir, pair.retryKey);
+    mkdirSync(finalSubdir, { recursive: true });
+    renameSync(pair.spoolPath, join(finalSubdir, basename(pair.spoolPath)));
+    renameSync(pair.statePath, join(finalSubdir, basename(pair.statePath)));
+
+    // No manifest, no journal. Recovery backfills manifest without counting
+    // as "moved" (no files physically relocated). No source files remain for
+    // the discovery pass, so overall moved=0.
+    const result = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(result.failClosed).toBe(false);
+
+    // Manifest should now be committed with correct hashes
+    expect(existsSync(paths.manifestPath)).toBe(true);
+    const manifest = readFileSync(paths.manifestPath, 'utf8');
+    expect(manifest).toContain(pair.retryKey);
+    expect(manifest).toContain(spoolHash);
+    expect(manifest).toContain(stateHash);
+
+    // Pair still in final, not duplicated
+    const finalFiles = readdirSync(finalSubdir);
+    expect(finalFiles.filter((f: string) => f.endsWith('.sealed'))).toHaveLength(2);
+
+    // Second run: moved=0
+    const second = moveSealedPairs({ paths, fsyncDir: noop, onStep: noop });
+    expect(second.moved).toBe(0);
   });
 });
