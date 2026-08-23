@@ -9,7 +9,6 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
 import {
   CLAUDE_CLI_PROVIDER_ID,
-  DEFAULT_CLAUDE_CLI_TIMEOUT_MS,
   CaptureLlmValidationError,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
@@ -77,6 +76,16 @@ export interface CaptureWorkerResult {
   llmRetries: number;
   observationsWritten: number;
   rollupsWritten: number;
+  // Telemetry fields (D1b)
+  primaryProvider: string;
+  primarySuccess: number;
+  fallbackSuccess: number;
+  fallbackFailed: number;
+  fatalError: string | null;
+  // Capacity fields (Phase 6)
+  spoolBytes: number;
+  spoolCapPct: number;
+  windows: number;
 }
 
 export interface CaptureWorkerOptions {
@@ -177,6 +186,7 @@ export interface CaptureRetryEntry extends RetryEntry {
   blockedAttempts?: number;
   lastBlockedAtIso?: string;
   blockedReason?: string;
+  pendingRetryProvider?: string;
 }
 
 export interface CaptureSplitHint {
@@ -265,6 +275,14 @@ function emptyResult(): CaptureWorkerResult {
     llmRetries: 0,
     observationsWritten: 0,
     rollupsWritten: 0,
+    primaryProvider: '',
+    primarySuccess: 0,
+    fallbackSuccess: 0,
+    fallbackFailed: 0,
+    fatalError: null,
+    spoolBytes: 0,
+    spoolCapPct: 0,
+    windows: 0,
   };
 }
 
@@ -647,6 +665,10 @@ function captureRetryMinIntervalMs(env: Record<string, string | undefined>): num
   return parsePositiveIntegerEnv(raw, DEFAULT_RETRY_MIN_INTERVAL_MS);
 }
 
+function captureMaxWindowsPerTick(env: Record<string, string | undefined>): number {
+  return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_WINDOWS_PER_TICK, Number.MAX_SAFE_INTEGER);
+}
+
 export function isCaptureRetryHeld(
   entry: Pick<RetryEntry, 'attempts' | 'lastAttemptIso'> &
     Partial<Pick<CaptureRetryEntry, 'blockedAttempts' | 'lastBlockedAtIso'>> | undefined,
@@ -674,15 +696,10 @@ export function isCaptureRetryHeld(
 }
 
 function llmCallBudgetReserveMs(
-  env: Record<string, string | undefined>,
-  llm: Pick<CaptureLlmAdapter, 'provider'>
+  llm: Pick<CaptureLlmAdapter, 'worstCaseCallBudgetMs'>
 ): number {
-  if (llm.provider !== CLAUDE_CLI_PROVIDER_ID) return 0;
-  const timeoutMs = parsePositiveIntegerEnv(
-    env.CC_CAPTURE_CLAUDE_TIMEOUT_MS,
-    DEFAULT_CLAUDE_CLI_TIMEOUT_MS
-  );
-  return timeoutMs + LLM_CALL_SETTLE_RESERVE_MS;
+  if (llm.worstCaseCallBudgetMs <= 0) return 0;
+  return llm.worstCaseCallBudgetMs + LLM_CALL_SETTLE_RESERVE_MS;
 }
 
 async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
@@ -1615,6 +1632,8 @@ export async function runCaptureWorkerOnce(
   const budget = tickBudgetMs(env);
   const tickStartMs = getNowMs();
 
+  try {
+
   if (options.dbHealthCheck) {
     let healthy = false;
     try {
@@ -1627,13 +1646,16 @@ export async function runCaptureWorkerOnce(
 
   const maxBytes = spoolMaxBytes(env);
   const maxWindowBytes = captureMaxWindowBytes(env, options.llm);
-  const llmCallReserveMs = llmCallBudgetReserveMs(env, options.llm);
+  const llmCallReserveMs = llmCallBudgetReserveMs(options.llm);
   const totalBytes = await totalSpoolBytes(root);
+  result.spoolBytes = totalBytes;
+  result.spoolCapPct = maxBytes > 0 ? Math.round((totalBytes / maxBytes) * 100) : 0;
   if (totalBytes > maxBytes) {
     stdout.write(
       `[cc-memory] auto-capture skipped: spool size ${totalBytes} exceeds cap ${maxBytes}\n`
     );
-    return { ...result, skipped: 1 };
+    result.skipped = 1;
+    return result;
   }
 
   const rawSessions = await listSpoolSessions(root);
@@ -1649,6 +1671,8 @@ export async function runCaptureWorkerOnce(
     env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || Boolean(env.GEMINI_API_KEY?.trim());
   let handledSessions = 0;
   const stateWriter = options.stateWriter ?? writeCaptureStateAtomically;
+  const maxWindowsPerTick = captureMaxWindowsPerTick(env);
+  let windowsThisTick = 0;
 
   for (const spool of sessions) {
     if (budget > 0 && getNowMs() - tickStartMs >= budget) {
@@ -1989,6 +2013,15 @@ export async function runCaptureWorkerOnce(
             break;
           }
 
+          // Window counting: increment before the first extract for this chunk
+          if (windowsThisTick >= maxWindowsPerTick) {
+            result.yielded += 1;
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
+          windowsThisTick += 1;
+
           let rawResponse: CaptureLlmRawResponse | null = null;
           let extraction: CaptureLlmExtraction | null = null;
           let terminalError: unknown = null;
@@ -1996,18 +2029,41 @@ export async function runCaptureWorkerOnce(
           let runtimeStopped = false;
           let promptSplit = false;
           let wasBlocked = false;
+          // Load pendingRetryProvider from state for cross-tick continuation
+          let retryProvider: string | undefined =
+            state.retries[retryKey]?.pendingRetryProvider ?? undefined;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             if (
               budget > 0 &&
               llmCallReserveMs > 0 &&
               getNowMs() - tickStartMs + llmCallReserveMs > budget
             ) {
+              // If we have a pending retryProvider, persist it for the next tick
+              if (retryProvider) {
+                const entry = state.retries[retryKey] ?? {
+                  attempts: 0,
+                  lastErrorClass: '',
+                  firstSeenIso: (options.now?.() ?? new Date()).toISOString(),
+                  lastAttemptIso: '',
+                  pathHash: chunk.pathHash,
+                  start: chunk.start,
+                  end: chunk.end,
+                  contentHash: sourceContentHash,
+                  blockedAttempts: 0,
+                  lastBlockedAtIso: '',
+                  blockedReason: '',
+                };
+                entry.pendingRetryProvider = retryProvider;
+                state.retries[retryKey] = entry;
+                await stateWriter(statePath, state);
+              }
               result.yielded += 1;
               runtimeStopped = true;
               break;
             }
             const retryPromptPrefix =
-              attempt === 0 ? undefined : MALFORMED_JSON_RETRY_PROMPT_PREFIX;
+              attempt === 0 && !retryProvider ? undefined : MALFORMED_JSON_RETRY_PROMPT_PREFIX;
+            const extractOptions = retryProvider ? { forceProvider: retryProvider } : undefined;
             let attemptRawResponse: CaptureLlmRawResponse | null = null;
             try {
               attemptRawResponse = await options.llm.extract({
@@ -2019,10 +2075,16 @@ export async function runCaptureWorkerOnce(
                 hwmOffsetStart: chunkWindow.hwmOffsetStart,
                 hwmOffsetEnd: chunkWindow.hwmOffsetEnd,
                 ...(retryPromptPrefix ? { retryPromptPrefix } : {}),
-              });
+              }, extractOptions);
               const attemptExtraction = parseCaptureLlmExtraction(attemptRawResponse);
               rawResponse = attemptRawResponse;
               extraction = attemptExtraction;
+              // Clear pendingRetryProvider on success
+              if (state.retries[retryKey]?.pendingRetryProvider) {
+                delete state.retries[retryKey].pendingRetryProvider;
+                await stateWriter(statePath, state);
+              }
+              retryProvider = undefined;
               break;
             } catch (error) {
               const category: FailureCategory = toFailureCategory(error);
@@ -2031,10 +2093,16 @@ export async function runCaptureWorkerOnce(
                   ? error.details.timeoutSubtype
                   : undefined;
               const action = toWorkerAction(category, { timeoutSubtype });
+              // Capture retryProvider from error details for next attempt
+              const errorRetryProvider =
+                error instanceof CaptureLlmValidationError && typeof error.details.retryProvider === 'string'
+                  ? error.details.retryProvider
+                  : undefined;
               switch (action) {
                 case 'retry-malformed': {
                   if (attempt === 0) {
                     result.llmRetries += 1;
+                    retryProvider = errorRetryProvider;
                     continue;
                   }
                   // attempt >= 1: fall through to terminal
@@ -2261,6 +2329,20 @@ export async function runCaptureWorkerOnce(
     } finally {
       await release();
     }
+  }
+
+  result.windows = windowsThisTick;
+
+  } catch (fatalErr) {
+    // D1b: capture fatal error, telemetry still flows via result
+    result.fatalError = fatalErr instanceof Error ? fatalErr.message : String(fatalErr);
+  } finally {
+    // D1b: takeTelemetry exactly once in function-level finally
+    const telemetry = options.llm.takeTelemetry();
+    result.primaryProvider = telemetry.primaryProvider;
+    result.primarySuccess += telemetry.primarySuccess;
+    result.fallbackSuccess += telemetry.fallbackSuccess;
+    result.fallbackFailed += telemetry.fallbackFailed;
   }
 
   return result;
