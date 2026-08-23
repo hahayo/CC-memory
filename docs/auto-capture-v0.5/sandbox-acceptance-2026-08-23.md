@@ -230,7 +230,7 @@ Results inside the sandbox:
 
 ## 8. Disposable CODEX_HOME Design
 
-**Implementation**: Each call creates a unique directory under `~/.cache/cc-memory/codex-sandbox/<uuid>/`:
+**Implementation**: Each call creates a unique directory under the caller-supplied `stagingRoot/<uuid>/`:
 - `codex-home/auth.json` — 0600 copy of host `~/.codex/auth.json`
 - `home/` — empty HOME directory
 
@@ -250,13 +250,13 @@ Results inside the sandbox:
 
 3. **`sandbox_permissions=[]` does not effectively block reads** — empirically tested and confirmed ineffective. File-system isolation relies entirely on bwrap, not on codex's internal sandbox policy.
 
-4. **Orphan staging directories after SIGKILL** — when the worker is killed with SIGKILL, the disposable staging directory (containing the auth.json copy) may not be cleaned up. Mitigation: `sweepOrphanedSandboxStaging()` runs each worker tick to remove UUID-named directories older than a configurable threshold.
+4. **Orphan staging directories after SIGKILL** — when the worker is killed with SIGKILL, the disposable staging directory (containing the auth.json copy) may not be cleaned up. Mitigation: `sweepOrphanedSandboxStaging()` is exported for the worker to call each tick, removing UUID-named directories older than a configurable threshold.
 
 ### Previously listed risks now mitigated
 
 - **~~codex-code-mode-host mount enables shell command execution~~** — **REMOVED** in Revision 2. The binary is no longer mounted; codex runs in pure text mode. The attack chain (shell + auth.json + DNS + unrestricted egress → exfiltration) is broken.
 - **~~`stagingRoot` default reads `process.env.HOME`~~** — **FIXED** in Revision 2. `stagingRoot` is now a required parameter; there is no default. Additionally, `/tmp` is explicitly rejected. The `findCodexPackageRoot()` and `findCodexHome()` helpers now use `os.userInfo().homedir` (reads /etc/passwd) instead of `process.env.HOME`.
-- **~~Orphan staging directories have no automated cleanup~~** — **FIXED** in Revision 2. `sweepOrphanedSandboxStaging(stagingRoot, olderThanMs)` is now exported and ready for worker-tick integration.
+- **~~Orphan staging directories have no automated cleanup~~** — **FIXED** in Revision 2. `sweepOrphanedSandboxStaging(stagingRoot, olderThanMs)` is now exported for the worker to call each tick (not yet wired into `capture-worker.ts` — that file is being edited by another agent).
 
 ---
 
