@@ -1,0 +1,18 @@
+{
+  "description": "真實 claude-cli 輸出：prompt 超過 haiku 200k token 上限。2026-08-23 實測。",
+  "command": "claude",
+  "args": ["-p", "--model", "claude-haiku-4-5-20251001", "--output-format", "text"],
+  "stdin_bytes": "~500KB（100,000 次 'AAAA ' 重複，約 458,586 tokens）",
+  "stdout": "Prompt is too long · the request is ~458586 tokens (limit 200000) but this conversation is only ~132409 tokens — the rest is system prompt, tool definitions, and attachment content. A single-exchange conversation cannot be compacted; reduce attached files/tools or start with less context.\n",
+  "stderr": "",
+  "exitCode": 1,
+  "notes": [
+    "stdout 含字串 'Prompt is too long'，符合 isPromptTooLongLlmError() 的 'prompt is too long' 比對條件（轉小寫後符合）",
+    "stderr 僅有 Permission deny rule 警告（來自 ~/.claude/settings.json 的 Write 規則說明），不含任何 token 或 DSN 資訊，已清除",
+    "rate-limit fixture 未取得：實測環境為訂閱帳號，無法重現 rate-limit 輸出；記錄嘗試於下方 rate_limit_attempt 欄位"
+  ],
+  "rate_limit_attempt": {
+    "status": "skipped",
+    "reason": "實測環境（訂閱帳號）在短時間內無法觸發 rate limit；需要 API key 帳號且在額度耗盡時才會出現。future work：在 CI 環境用 mock server 模擬。"
+  }
+}
