@@ -541,7 +541,9 @@ describe('decideWarningAlert', () => {
     const result = decideWarningAlert(state, assessment, host, now)
     expect(result.send).toBe(true)
     expect(result.reason).toBe('spool-cap-new-band')
-    expect(result.updatedState.spoolCapWarningBand).toBe('70-89')
+    // Band is only set in deliveredState (post-confirmed-delivery), not updatedState
+    expect(result.updatedState.spoolCapWarningBand).toBeFalsy()
+    expect(result.deliveredState.spoolCapWarningBand).toBe('70-89')
   })
 
   it('same spool cap band → suppressed (dedup)', () => {
@@ -585,7 +587,9 @@ describe('decideWarningAlert', () => {
     const result = decideWarningAlert(state, assessment, host, now)
     expect(result.send).toBe(true)
     expect(result.reason).toBe('fallback-streak')
-    expect(result.updatedState.fallbackWarningLastSentAt).toBe(now.toISOString())
+    // Timestamp only in deliveredState; updatedState keeps old value
+    expect(result.updatedState.fallbackWarningLastSentAt).toBe(sentAt)
+    expect(result.deliveredState.fallbackWarningLastSentAt).toBe(now.toISOString())
   })
 
   it('fallback streak + 72% spool → BOTH warnings delivered', () => {
@@ -601,8 +605,61 @@ describe('decideWarningAlert', () => {
     expect(result.reasons).toContain('spool-cap-new-band')
     expect(result.message).toContain('codex')
     expect(result.message).toContain('spool-cap-pct=72')
-    expect(result.updatedState.spoolCapWarningBand).toBe('70-89')
+    // Dedup state only in deliveredState
+    expect(result.updatedState.spoolCapWarningBand).toBeFalsy()
+    expect(result.deliveredState.spoolCapWarningBand).toBe('70-89')
     expect(result.updatedState.fallbackSuccessStreak).toBe(FALLBACK_SUCCESS_STREAK_THRESHOLD)
+    expect(result.deliveredState.fallbackWarningLastSentAt).toBe(now.toISOString())
+  })
+
+  it('send=true: updatedState does NOT have dedup timestamps (pre-delivery)', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD - 1 }
+    const assessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    // updatedState has no delivery timestamp — safe to persist on send failure
+    expect(result.updatedState.fallbackWarningLastSentAt).toBeUndefined()
+    // deliveredState has the timestamp — persist only on confirmed delivery
+    expect(result.deliveredState.fallbackWarningLastSentAt).toBe(now.toISOString())
+  })
+
+  it('send failure → persist updatedState → next tick re-sends', () => {
+    // Simulate: tick N sends, but Telegram fails → persist updatedState (no dedup stamp)
+    const state = { ...createEmptyAutoCaptureAlertState(), fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD - 1 }
+    const assessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+
+    // Simulate send failure: persist updatedState (no dedup timestamp)
+    const stateAfterFailure = result.updatedState
+
+    // Next tick: same assessment, using stateAfterFailure
+    const nextNow = new Date(now.getTime() + 60_000) // 1 min later
+    const nextAssessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const nextResult = decideWarningAlert(stateAfterFailure, nextAssessment, host, nextNow)
+    // Should re-send because no dedup timestamp was persisted
+    expect(nextResult.send).toBe(true)
+    expect(nextResult.reason).toBe('fallback-streak')
+  })
+
+  it('capacity send failure → next tick re-sends band warning', () => {
+    const state = createEmptyAutoCaptureAlertState()
+    const assessment = makeAssessment({ spoolCapPct: 75, warning: 'spool-cap-pct=75 (warning: approaching capacity)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    expect(result.reason).toBe('spool-cap-new-band')
+
+    // Simulate send failure: persist updatedState (band NOT set)
+    const stateAfterFailure = result.updatedState
+    expect(stateAfterFailure.spoolCapWarningBand).toBeFalsy()
+
+    // Next tick: same capacity, using stateAfterFailure
+    const nextNow = new Date(now.getTime() + 60_000)
+    const nextAssessment = makeAssessment({ spoolCapPct: 78, warning: 'spool-cap-pct=78 (warning: approaching capacity)' })
+    const nextResult = decideWarningAlert(stateAfterFailure, nextAssessment, host, nextNow)
+    // Should re-send because band was not committed
+    expect(nextResult.send).toBe(true)
+    expect(nextResult.reason).toBe('spool-cap-new-band')
   })
 
   it('streak resets also clears fallbackWarningLastSentAt', () => {

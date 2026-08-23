@@ -512,8 +512,9 @@ export async function runAutoCaptureSupervisorTick(
 
     // Process warnings (fallback-success streak, spool capacity) even on healthy ticks
     const warningDecision = decideWarningAlert(previousState, assessment, hostname, now)
-    // Carry warning streak/band/dedup state into nextState
+    // Carry warning streak (incremented) into nextState; dedup timestamps only on confirmed delivery
     nextState.fallbackSuccessStreak = warningDecision.updatedState.fallbackSuccessStreak
+    // Preserve pre-delivery state (no dedup stamps yet)
     nextState.spoolCapWarningBand = warningDecision.updatedState.spoolCapWarningBand
     nextState.fallbackWarningLastSentAt = warningDecision.updatedState.fallbackWarningLastSentAt
     let warningSent = false
@@ -521,9 +522,13 @@ export async function runAutoCaptureSupervisorTick(
       try {
         await sendTelegram(alertTarget, warningDecision.message)
         warningSent = true
+        // Only commit dedup timestamps after confirmed delivery
+        nextState.spoolCapWarningBand = warningDecision.deliveredState.spoolCapWarningBand
+        nextState.fallbackWarningLastSentAt = warningDecision.deliveredState.fallbackWarningLastSentAt
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error)
         stderr.write(`[run-auto-capture-supervisor] warning alert failed: ${messageText}\n`)
+        // Keep pre-delivery state — next tick will re-attempt the warning
       }
     }
 
@@ -561,12 +566,17 @@ export async function runAutoCaptureSupervisorTick(
         await saveState(nextState)
         return { exitCode: 0, notification: 'recovery', alerted: false, state: nextState }
       }
+      // Preserve warning dedup state even when recovery fails (Finding 2)
       const staleState: AutoCaptureAlertState = {
         ...previousState,
         recoveryFailureCount: prevCount + 1,
+        // Carry forward warning state from this tick
+        fallbackSuccessStreak: nextState.fallbackSuccessStreak,
+        spoolCapWarningBand: nextState.spoolCapWarningBand,
+        fallbackWarningLastSentAt: nextState.fallbackWarningLastSentAt,
       }
       await saveState(staleState)
-      return { exitCode: 2, notification: 'recovery', alerted: false, state: staleState }
+      return { exitCode: 2, notification: 'recovery', alerted: warningSent, state: staleState }
     }
   }
 

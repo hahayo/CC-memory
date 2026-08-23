@@ -3060,9 +3060,12 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
     expect(stateAfterTick1.retries[retryKeys1[0]].pendingRetryProvider).toBe('fallback');
 
     // Tick 2: resume on same harness — worker reads persisted state.
-    // Elapsed=100s + fallback-only reserve (76+15=91s) = 191s ≤ 240s → should proceed.
-    // Full reserve would be 182s → 100+182=282 > 240 → would yield, proving fallback-only works.
+    // Clock: first call (tickStart init) → t=0; all subsequent calls → t=100s.
+    // Full reserve = 167+15 = 182s → 100+182=282 > 240 → WOULD yield with full reserve.
+    // Fallback-only reserve = 76+15 = 91s → 100+91=191 ≤ 240 → should proceed.
+    // This proves fallback-only reserve is used (not the full chain).
     const tick2Start = Date.now();
+    let tick2CallCount = 0;
     const llm2 = mockLlm([
       rawExtraction({
         summary: 'retry succeeded on fallback',
@@ -3086,7 +3089,12 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
     const result2 = await runWorker(harness, {
       db: {},
       llm: llm2,
-      nowMs: () => tick2Start + 100_000, // constant 100s elapsed
+      nowMs: () => {
+        tick2CallCount += 1;
+        // First call captures tickStartMs at t=0; all subsequent see 100s elapsed
+        if (tick2CallCount <= 1) return tick2Start;
+        return tick2Start + 100_000;
+      },
     });
 
     // Tick 2: fallback called directly (forceProvider='fallback'), primary NOT called

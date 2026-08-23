@@ -450,7 +450,10 @@ export interface AutoCaptureWarningDecision {
   /** @deprecated Use reasons[0] ?? 'none' — kept for backward compat */
   reason: 'fallback-streak' | 'spool-cap-new-band' | 'none'
   message: string | null
+  /** State to persist BEFORE delivery attempt (streak incremented, but dedup timestamps unchanged) */
   updatedState: AutoCaptureAlertState
+  /** State to persist AFTER confirmed delivery (dedup timestamps set). Same as updatedState when send=false. */
+  deliveredState: AutoCaptureAlertState
 }
 
 /**
@@ -471,6 +474,10 @@ export function decideWarningAlert(
   const messages: string[] = []
   const reasons: Array<'fallback-streak' | 'spool-cap-new-band'> = []
 
+  // Track which dedup fields should be stamped only after confirmed delivery
+  let fallbackDeliveryTimestamp: string | null = null
+  let capacityDeliveryBand: string | null = null
+
   // --- Fallback success streak (independent) ---
   if (assessment.fallbackSuccessCount > 0) {
     const prevStreak = previousState.fallbackSuccessStreak ?? 0
@@ -483,7 +490,8 @@ export function decideWarningAlert(
       const shouldSend =
         Number.isNaN(lastSentMs) || now.getTime() - lastSentMs >= renotifyMs
       if (shouldSend) {
-        updatedState.fallbackWarningLastSentAt = toIsoString(now)
+        // Do NOT set fallbackWarningLastSentAt in updatedState — only in deliveredState
+        fallbackDeliveryTimestamp = toIsoString(now)
         reasons.push('fallback-streak')
         messages.push(
           [
@@ -506,7 +514,8 @@ export function decideWarningAlert(
   if (assessment.spoolCapPct >= 70 && assessment.spoolCapPct < 90) {
     const band = '70-89'
     if (previousState.spoolCapWarningBand !== band) {
-      updatedState.spoolCapWarningBand = band
+      // Do NOT set spoolCapWarningBand in updatedState — only in deliveredState
+      capacityDeliveryBand = band
       reasons.push('spool-cap-new-band')
       messages.push(
         [
@@ -523,12 +532,23 @@ export function decideWarningAlert(
   }
 
   const send = reasons.length > 0
+
+  // deliveredState: apply dedup timestamps that should only persist after confirmed send
+  const deliveredState = { ...updatedState }
+  if (fallbackDeliveryTimestamp) {
+    deliveredState.fallbackWarningLastSentAt = fallbackDeliveryTimestamp
+  }
+  if (capacityDeliveryBand) {
+    deliveredState.spoolCapWarningBand = capacityDeliveryBand
+  }
+
   return {
     send,
     reasons,
     reason: reasons[0] ?? 'none',
     message: messages.length > 0 ? messages.join('\n---\n') : null,
     updatedState,
+    deliveredState,
   }
 }
 

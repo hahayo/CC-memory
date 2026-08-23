@@ -148,17 +148,19 @@ describe('supervisor fallback-success streak alert integration', () => {
       if (tick < threshold) {
         // Below threshold: accumulating streak, no send
         expect(decision.send).toBe(false);
+        state = decision.updatedState;
       } else if (tick === threshold) {
         // Exactly at threshold: first send
         expect(decision.send).toBe(true);
         expect(decision.reason).toBe('fallback-streak');
         expect(decision.message).toContain('codex');
+        // Simulate confirmed delivery: use deliveredState (commits dedup timestamp)
+        state = decision.deliveredState;
       } else {
         // Past threshold, within renotify window: suppressed (dedup)
         expect(decision.send).toBe(false);
+        state = decision.updatedState;
       }
-
-      state = decision.updatedState;
     }
   });
 });
