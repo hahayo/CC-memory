@@ -40,11 +40,14 @@ function hasCodex(): boolean {
   return findCodexPackageRoot() !== null;
 }
 
-const SKIP_REASON = !hasBwrap()
-  ? 'bwrap not installed'
-  : !hasCodex()
-    ? 'codex CLI not installed'
-    : null;
+// 這組測試會真的 spawn codex 並消耗額度；預設不跑，需 CC_SANDBOX_IT=1 明確啟用。
+const SKIP_REASON = process.env.CC_SANDBOX_IT !== '1'
+  ? 'set CC_SANDBOX_IT=1 to run real codex sandbox integration tests'
+  : !hasBwrap()
+    ? 'bwrap not installed'
+    : !hasCodex()
+      ? 'codex CLI not installed'
+      : null;
 
 // ---------------------------------------------------------------------------
 // Helpers
