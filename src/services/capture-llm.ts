@@ -220,7 +220,7 @@ export interface CodexSandboxOptionsLike {
   hostCwd: string;
   model: string;
   timeoutMs: number;
-  stagingRoot?: string;
+  stagingRoot: string;
 }
 
 export type CodexSandboxBuilder = (opts: CodexSandboxOptionsLike) => CodexSandboxCommandLike;

@@ -32,6 +32,7 @@ import {
   type EmbeddingPolicyEvidence,
 } from '../utils/embedding.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
+import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -39,6 +40,7 @@ const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
 const DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES = 32 * 1024;
 const PROMPT_TOO_LONG_RETRY_MIN_BYTES = 1024;
 const LLM_CALL_SETTLE_RESERVE_MS = 15_000;
+const SANDBOX_STAGING_SWEEP_AGE_MS = 60 * 60 * 1000;
 // 注入污染防線 marker：SessionStart 注入內容帶 `source=cc-memory-inject`，
 // 其字串子集為此常數；transcript 內含此字串的行整行排除，不送 LLM 抽取。
 const INJECTION_MARKER = 'cc-memory-inject';
@@ -1648,6 +1650,13 @@ export async function runCaptureWorkerOnce(
   const maxBytes = spoolMaxBytes(env);
   const maxWindowBytes = captureMaxWindowBytes(env, options.llm);
   const llmCallReserveMs = llmCallBudgetReserveMs(options.llm);
+  // codex 沙箱的 auth.json 副本目錄若因 SIGKILL 未清，每 tick 掃一次（超過 1 小時即刪）；
+  // 失敗不影響 tick。
+  try {
+    sweepOrphanedSandboxStaging(join(root, '..', 'codex-sandbox'), SANDBOX_STAGING_SWEEP_AGE_MS);
+  } catch {
+    // best-effort
+  }
   const totalBytes = await totalSpoolBytes(root);
   result.spoolBytes = totalBytes;
   result.spoolCapPct = maxBytes > 0 ? Math.round((totalBytes / maxBytes) * 100) : 0;
