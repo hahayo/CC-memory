@@ -57,9 +57,13 @@ export async function runAutoCaptureTick(): Promise<CaptureWorkerResult> {
       generateEmbedding,
       stdout: process.stdout,
     });
+    const fatal = result.fatalError ? 1 : 0;
     process.stdout.write(
-      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} blocked=${result.blocked} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed}\n`
+      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} blocked=${result.blocked} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed} primary-provider=${result.primaryProvider || 'none'} primary-success=${result.primarySuccess} fallback-success=${result.fallbackSuccess} fallback-failed=${result.fallbackFailed} fatal=${fatal} spool-bytes=${result.spoolBytes} spool-cap-pct=${result.spoolCapPct} windows=${result.windows}\n`
     );
+    if (result.fatalError) {
+      process.exitCode = 1;
+    }
     return result;
   } finally {
     await client.end();

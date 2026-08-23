@@ -314,3 +314,116 @@ describe('services/auto-capture-alerts saveAutoCaptureAlertState file mode', () 
     }
   })
 })
+
+describe('assessAutoCaptureExecution new telemetry fields', () => {
+  function makeSummary(fields: Record<string, string | number>): string {
+    const base = 'processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0'
+    const extra = Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' ')
+    return `[cc-memory] auto-capture summary: ${base} ${extra}`
+  }
+
+  it('parses primary-provider, primary-success, fallback-success, fallback-failed, fatal, spool-bytes, spool-cap-pct, windows', () => {
+    const summary = makeSummary({
+      'primary-provider': 'codex-cli',
+      'primary-success': 3,
+      'fallback-success': 1,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 120000000,
+      'spool-cap-pct': 23,
+      'windows': 4,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(true)
+    expect(result.primaryProvider).toBe('codex-cli')
+    expect(result.primarySuccessCount).toBe(3)
+    expect(result.fallbackSuccessCount).toBe(1)
+    expect(result.fallbackFailedCount).toBe(0)
+    expect(result.fatalCount).toBe(0)
+    expect(result.spoolBytes).toBe(120000000)
+    expect(result.spoolCapPct).toBe(23)
+    expect(result.windowsCount).toBe(4)
+    expect(result.warning).toBe(null)
+  })
+
+  it('fallback-failed > 0 → unhealthy', () => {
+    const summary = makeSummary({
+      'primary-provider': 'codex-cli',
+      'primary-success': 0,
+      'fallback-success': 0,
+      'fallback-failed': 1,
+      'fatal': 0,
+      'spool-bytes': 1000,
+      'spool-cap-pct': 0,
+      'windows': 1,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(false)
+    expect(result.problemLine).toBe('fallback-failed=1')
+  })
+
+  it('fatal > 0 → unhealthy', () => {
+    const summary = makeSummary({
+      'primary-provider': 'codex-cli',
+      'primary-success': 0,
+      'fallback-success': 0,
+      'fallback-failed': 0,
+      'fatal': 1,
+      'spool-bytes': 1000,
+      'spool-cap-pct': 0,
+      'windows': 0,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 1, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(false)
+    expect(result.problemLine).toBe('fatal=1')
+  })
+
+  it('spool-cap-pct 70-89 → ok=true but warning', () => {
+    const summary = makeSummary({
+      'primary-provider': 'claude-cli',
+      'primary-success': 1,
+      'fallback-success': 0,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 360000000,
+      'spool-cap-pct': 72,
+      'windows': 1,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(true)
+    expect(result.warning).toContain('spool-cap-pct=72')
+    expect(result.warning).toContain('warning')
+  })
+
+  it('spool-cap-pct >= 90 → unhealthy', () => {
+    const summary = makeSummary({
+      'primary-provider': 'claude-cli',
+      'primary-success': 0,
+      'fallback-success': 0,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 470000000,
+      'spool-cap-pct': 94,
+      'windows': 0,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(false)
+    expect(result.problemLine).toContain('spool-cap-pct=94')
+  })
+
+  it('spool-cap-pct > 100 early exit → unhealthy', () => {
+    const summary = makeSummary({
+      'primary-provider': 'claude-cli',
+      'primary-success': 0,
+      'fallback-success': 0,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 600000000,
+      'spool-cap-pct': 115,
+      'windows': 0,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(false)
+    expect(result.problemLine).toContain('spool-cap-pct=115')
+  })
+})

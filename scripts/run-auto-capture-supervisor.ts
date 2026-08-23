@@ -311,6 +311,8 @@ async function buildWorkerEnv(
   nextEnv.DATABASE_URL = databaseUrl
   nextEnv.CC_MEMORY_SPOOL_DIR =
     nextEnv.CC_MEMORY_SPOOL_DIR ?? path.join(homedir(), '.cache', 'cc-memory', 'spool')
+  // 刻意的安全預設，勿改：unit 沒指定時退回便宜且已驗證的 provider，
+  // 避免漏設 env 的執行路徑直接打貴模型。provider 由 systemd unit 顯式指定。
   nextEnv.CC_CAPTURE_LLM = nextEnv.CC_CAPTURE_LLM ?? 'claude-cli'
   nextEnv.CC_CAPTURE_CLAUDE_MODEL = nextEnv.CC_CAPTURE_CLAUDE_MODEL ?? 'haiku'
   nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK = nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK ?? '1'

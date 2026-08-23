@@ -125,13 +125,32 @@ function emptyWorkerResult(): CaptureWorkerResult {
     llmRetries: 0,
     observationsWritten: 0,
     rollupsWritten: 0,
+    primaryProvider: '',
+    primarySuccess: 0,
+    fallbackSuccess: 0,
+    fallbackFailed: 0,
+    fatalError: null,
+    spoolBytes: 0,
+    spoolCapPct: 0,
+    windows: 0,
   };
 }
 
+const NUMERIC_RESULT_KEYS: ReadonlyArray<keyof CaptureWorkerResult> = [
+  'processed', 'skipped', 'failed', 'deadLettered', 'rateLimited',
+  'malformed', 'blocked', 'parked', 'yielded', 'held', 'embeddingFailed',
+  'transcriptMissing', 'llmRetries', 'observationsWritten', 'rollupsWritten',
+  'primarySuccess', 'fallbackSuccess', 'fallbackFailed',
+  'spoolBytes', 'spoolCapPct', 'windows',
+];
+
 function addWorkerResult(target: CaptureWorkerResult, value: CaptureWorkerResult): void {
-  for (const key of Object.keys(target) as Array<keyof CaptureWorkerResult>) {
-    target[key] += value[key];
+  for (const key of NUMERIC_RESULT_KEYS) {
+    (target[key] as number) += value[key] as number;
   }
+  // Non-numeric fields: take last non-empty value
+  if (value.primaryProvider) target.primaryProvider = value.primaryProvider;
+  if (value.fatalError) target.fatalError = value.fatalError;
 }
 
 export function classifyDrainTick(

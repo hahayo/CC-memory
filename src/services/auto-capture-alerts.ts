@@ -28,6 +28,15 @@ export interface AutoCaptureAssessment {
   yieldedCount: number
   heldCount: number
   embeddingFailedCount: number
+  primaryProvider: string
+  primarySuccessCount: number
+  fallbackSuccessCount: number
+  fallbackFailedCount: number
+  fatalCount: number
+  spoolBytes: number
+  spoolCapPct: number
+  windowsCount: number
+  warning: string | null
   summaryLine: string | null
   problemLine: string | null
   nonSummaryLines: string[]
@@ -152,6 +161,40 @@ function parseEmbeddingFailedCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'embedding-failed')
 }
 
+function parsePrimarySuccessCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'primary-success')
+}
+
+function parseFallbackSuccessCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fallback-success')
+}
+
+function parseFallbackFailedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fallback-failed')
+}
+
+function parseFatalCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fatal')
+}
+
+function parseSpoolBytes(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'spool-bytes')
+}
+
+function parseSpoolCapPct(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'spool-cap-pct')
+}
+
+function parseWindowsCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'windows')
+}
+
+function parsePrimaryProvider(summaryLine: string | null): string {
+  if (!summaryLine) return ''
+  const match = summaryLine.match(/(?:^|\s)primary-provider=(\S+)/)
+  return match ? match[1] : ''
+}
+
 function truncateProblemLine(line: string): string {
   if (line.length <= MAX_PROBLEM_LINE_LENGTH) return line
   return `${line.slice(0, MAX_PROBLEM_LINE_LENGTH - 3)}...`
@@ -172,6 +215,21 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const heldCount = parseHeldCount(summaryLine)
   const blockedCount = parseBlockedCount(summaryLine)
   const embeddingFailedCount = parseEmbeddingFailedCount(summaryLine)
+  const primaryProvider = parsePrimaryProvider(summaryLine)
+  const primarySuccessCount = parsePrimarySuccessCount(summaryLine)
+  const fallbackSuccessCount = parseFallbackSuccessCount(summaryLine)
+  const fallbackFailedCount = parseFallbackFailedCount(summaryLine)
+  const fatalCount = parseFatalCount(summaryLine)
+  const spoolBytes = parseSpoolBytes(summaryLine)
+  const spoolCapPct = parseSpoolCapPct(summaryLine)
+  const windowsCount = parseWindowsCount(summaryLine)
+
+  // Spool capacity warning (70-89%) vs unhealthy (>=90%)
+  let warning: string | null = null
+  if (spoolCapPct >= 70 && spoolCapPct < 90) {
+    warning = `spool-cap-pct=${spoolCapPct} (warning: approaching capacity)`
+  }
+
   const ok =
     result.exitCode === 0 &&
     nonSummaryLines.length === 0 &&
@@ -181,7 +239,10 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     rateLimitedCount === 0 &&
     blockedCount === 0 &&
     parkedCount === 0 &&
-    embeddingFailedCount === 0
+    embeddingFailedCount === 0 &&
+    fallbackFailedCount === 0 &&
+    fatalCount === 0 &&
+    spoolCapPct < 90
 
   // Synthesize a problemLine when counts indicate issues but no explicit stdout problem line
   let problemLine: string | null = null
@@ -190,6 +251,12 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = truncateProblemLine(nonSummaryLines[0])
     } else if (stderrLines.length > 0) {
       problemLine = truncateProblemLine(stderrLines[0])
+    } else if (fatalCount > 0) {
+      problemLine = `fatal=${fatalCount}`
+    } else if (spoolCapPct >= 90) {
+      problemLine = `spool-cap-pct=${spoolCapPct} (critical)`
+    } else if (fallbackFailedCount > 0) {
+      problemLine = `fallback-failed=${fallbackFailedCount}`
     } else if (rateLimitedCount > 0) {
       problemLine = `rate-limited=${rateLimitedCount}`
     } else if (blockedCount > 0) {
@@ -233,6 +300,15 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     yieldedCount,
     heldCount,
     embeddingFailedCount,
+    primaryProvider,
+    primarySuccessCount,
+    fallbackSuccessCount,
+    fallbackFailedCount,
+    fatalCount,
+    spoolBytes,
+    spoolCapPct,
+    windowsCount,
+    warning,
     summaryLine,
     problemLine,
     nonSummaryLines,
