@@ -59,6 +59,13 @@ function makeMeasuringAdapter(): MeasuringAdapter {
   return {
     model: 'measure-only',
     provider: 'measure-only',
+    worstCaseCallBudgetMs: 0,
+    takeTelemetry: () => ({
+      primaryProvider: 'measure-only',
+      primarySuccess: 0,
+      fallbackSuccess: 0,
+      fallbackFailed: 0,
+    }),
     // disabled 必須為 false：若 true，worker 在 isCaptureLlmDisabled() 處提前
     // 跳過，extract() 永遠不被呼叫，量不到目標 elapsed。
     disabled: false,
