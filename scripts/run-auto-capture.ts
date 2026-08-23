@@ -33,34 +33,44 @@ async function dbHealthCheck(db: { execute(query: unknown): Promise<unknown> }):
   }
 }
 
-export async function runAutoCaptureTick(): Promise<CaptureWorkerResult> {
+/** Format the summary line for a completed capture worker result. */
+export function formatSummaryLine(result: CaptureWorkerResult): string {
+  const fatal = result.fatalError ? 1 : 0;
+  return `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} blocked=${result.blocked} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed} primary-provider=${result.primaryProvider || 'none'} primary-success=${result.primarySuccess} fallback-success=${result.fallbackSuccess} fallback-failed=${result.fallbackFailed} fatal=${fatal} spool-bytes=${result.spoolBytes} spool-cap-pct=${result.spoolCapPct} windows=${result.windows}`;
+}
+
+export interface RunAutoCaptureTickDeps {
+  runWorker?: (input: Parameters<typeof runCaptureWorkerOnce>[0]) => Promise<CaptureWorkerResult>;
+  stdout?: { write(chunk: string): unknown };
+}
+
+export async function runAutoCaptureTick(deps: RunAutoCaptureTickDeps = {}): Promise<CaptureWorkerResult> {
+  const stdout = deps.stdout ?? process.stdout;
+  const workerFn = deps.runWorker ?? runCaptureWorkerOnce;
   const client = postgres(config.databaseUrl, { max: 1, connect_timeout: 2, idle_timeout: 2 });
   const db = drizzle(client);
   try {
     const llm = createCaptureLlmAdapter({
       env: process.env,
-      stdout: process.stdout,
+      stdout,
       emitDisabledWarning: false,
     });
     if (isCaptureLlmDisabled(llm)) {
-      process.stdout.write(
+      stdout.write(
         formatCaptureLlmDisabledWarning(
           llm.provider ?? 'unknown',
           llm.disabledReason ?? 'capture LLM provider unavailable'
         )
       );
     }
-    const result = await runCaptureWorkerOnce({
+    const result = await workerFn({
       db,
       llm,
       dbHealthCheck: () => dbHealthCheck(db),
       generateEmbedding,
-      stdout: process.stdout,
+      stdout,
     });
-    const fatal = result.fatalError ? 1 : 0;
-    process.stdout.write(
-      `[cc-memory] auto-capture summary: processed=${result.processed} skipped=${result.skipped} dead-letter=${result.deadLettered} failed=${result.failed} rate-limited=${result.rateLimited} malformed=${result.malformed} blocked=${result.blocked} transcript-missing=${result.transcriptMissing} parked=${result.parked} yielded=${result.yielded} held=${result.held} embedding-failed=${result.embeddingFailed} primary-provider=${result.primaryProvider || 'none'} primary-success=${result.primarySuccess} fallback-success=${result.fallbackSuccess} fallback-failed=${result.fallbackFailed} fatal=${fatal} spool-bytes=${result.spoolBytes} spool-cap-pct=${result.spoolCapPct} windows=${result.windows}\n`
-    );
+    stdout.write(`${formatSummaryLine(result)}\n`);
     if (result.fatalError) {
       process.exitCode = 1;
     }

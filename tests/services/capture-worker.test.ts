@@ -3004,7 +3004,7 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
 });
 
 describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
-  it('P→F(malformed)→yield→next tick F(malformed): primary only called once, pendingRetryProvider cleared on failure', async () => {
+  it('cross-tick: tick 1 yields with pendingRetryProvider persisted, tick 2 resumes with fallback-only reserve', async () => {
     const harness = makeHarness();
     harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
@@ -3016,34 +3016,83 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
       timestamp: '2026-01-01T00:00:01.000Z',
     });
 
-    // Tick 1: P→F(malformed, retryProvider=fallback)→F retry attempt (retryExhausted=true, malformed)
+    // Tick 1: primary fails with malformed, retryProvider=fallback.
+    // After primary call completes, elapsed jumps to 160s.
+    // Retry budget check: 160s + fallback reserve (76+15=91s) = 251s > 240s → yield before retry.
+    const tick1Start = Date.now();
+    let tick1Elapsed = 0;
     const llm1 = mockLlm([
       new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
         retryProvider: 'fallback',
       }),
-      // Second attempt: forced fallback also returns malformed with retryExhausted
-      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'still bad', {
-        retryProvider: 'fallback',
-        retryExhausted: true,
-      }),
-    ]);
-    const result1 = await runWorker(harness, { db: {}, llm: llm1 });
+    ], {
+      worstCaseCallBudgetMs: 167000,
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+      // Advance clock AFTER the extract call completes (inside extract)
+      async extract(request, options) {
+        llm1.calls.push(request);
+        llm1.extractOptions!.push(options);
+        // After primary call, advance clock so retry budget check fails
+        tick1Elapsed = 160_000;
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+          retryProvider: 'fallback',
+        });
+      },
+    });
+    const result1 = await runWorker(harness, {
+      db: {},
+      llm: llm1,
+      nowMs: () => tick1Start + tick1Elapsed,
+    });
 
-    // Primary was only called once (first call), second call used forceProvider
-    expect(llm1.calls).toHaveLength(2);
+    // Tick 1: primary called once, then budget check fails → yield
+    expect(llm1.calls).toHaveLength(1);
     expect(llm1.extractOptions?.[0]?.forceProvider).toBeUndefined();
-    expect(llm1.extractOptions?.[1]?.forceProvider).toBe('fallback');
+    expect(result1.yielded).toBe(1);
 
-    // pendingRetryProvider should be cleared after failure (not persisted)
-    if (existsSync(statePath(harness))) {
-      const state = readState(harness);
-      for (const key of Object.keys(state.retries ?? {})) {
-        expect(state.retries[key].pendingRetryProvider).toBeUndefined();
-      }
-    }
+    // pendingRetryProvider persisted in state
+    expect(existsSync(statePath(harness))).toBe(true);
+    const stateAfterTick1 = readState(harness);
+    const retryKeys1 = Object.keys(stateAfterTick1.retries ?? {});
+    expect(retryKeys1.length).toBeGreaterThan(0);
+    expect(stateAfterTick1.retries[retryKeys1[0]].pendingRetryProvider).toBe('fallback');
 
-    // Terminal error was recorded (malformed → terminal after attempt 1)
-    expect(result1.failed + result1.deadLettered + result1.malformed).toBeGreaterThanOrEqual(0);
+    // Tick 2: resume on same harness — worker reads persisted state.
+    // Elapsed=100s + fallback-only reserve (76+15=91s) = 191s ≤ 240s → should proceed.
+    // Full reserve would be 182s → 100+182=282 > 240 → would yield, proving fallback-only works.
+    const tick2Start = Date.now();
+    const llm2 = mockLlm([
+      rawExtraction({
+        summary: 'retry succeeded on fallback',
+        observations: [{
+          type: 'discovery',
+          title: 'cross-tick test',
+          subtitle: '',
+          facts: ['cross-tick OK'],
+          concepts: ['retry'],
+          files: [],
+          narrative: 'Cross-tick retry passed.',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 167000,
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+    });
+    const result2 = await runWorker(harness, {
+      db: {},
+      llm: llm2,
+      nowMs: () => tick2Start + 100_000, // constant 100s elapsed
+    });
+
+    // Tick 2: fallback called directly (forceProvider='fallback'), primary NOT called
+    expect(llm2.calls).toHaveLength(1);
+    expect(llm2.extractOptions?.[0]?.forceProvider).toBe('fallback');
+    expect(result2.yielded).toBe(0);
   });
 
   it('forced fallback reserve uses fallback-only budget, not full primary+fallback', async () => {

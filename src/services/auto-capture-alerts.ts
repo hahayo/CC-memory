@@ -58,6 +58,8 @@ export interface AutoCaptureAlertState {
   fallbackSuccessStreak?: number
   /** Spool capacity warning band already alerted (e.g. '70-89') — dedup same band */
   spoolCapWarningBand?: string | null
+  /** ISO timestamp of last fallback-streak warning sent — dedup via renotify interval */
+  fallbackWarningLastSentAt?: string | null
 }
 
 export interface AutoCaptureAlertTarget {
@@ -228,13 +230,15 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const spoolCapPct = parseSpoolCapPct(summaryLine)
   const windowsCount = parseWindowsCount(summaryLine)
 
-  // Warnings: spool capacity 70-89% or fallback-success > 0
-  let warning: string | null = null
+  // Warnings: independently evaluate fallback-success and spool capacity 70-89%
+  const warnings: string[] = []
   if (fallbackSuccessCount > 0) {
-    warning = `fallback-success=${fallbackSuccessCount} (codex may be logged out, falling back to haiku)`
-  } else if (spoolCapPct >= 70 && spoolCapPct < 90) {
-    warning = `spool-cap-pct=${spoolCapPct} (warning: approaching capacity)`
+    warnings.push(`fallback-success=${fallbackSuccessCount} (codex may be logged out, falling back to haiku)`)
   }
+  if (spoolCapPct >= 70 && spoolCapPct < 90) {
+    warnings.push(`spool-cap-pct=${spoolCapPct} (warning: approaching capacity)`)
+  }
+  const warning: string | null = warnings.length > 0 ? warnings.join('; ') : null
 
   const ok =
     result.exitCode === 0 &&
@@ -442,69 +446,90 @@ export const FALLBACK_SUCCESS_STREAK_THRESHOLD = 3
 
 export interface AutoCaptureWarningDecision {
   send: boolean
+  reasons: Array<'fallback-streak' | 'spool-cap-new-band'>
+  /** @deprecated Use reasons[0] ?? 'none' — kept for backward compat */
   reason: 'fallback-streak' | 'spool-cap-new-band' | 'none'
   message: string | null
   updatedState: AutoCaptureAlertState
 }
 
 /**
- * Decide whether to send a Telegram warning based on assessment.warning.
- * - fallback-success > 0: increment streak; send when streak >= 3 consecutive ticks
+ * Decide whether to send a Telegram warning based on assessment.
+ * Both conditions are evaluated independently:
+ * - fallback-success > 0: increment streak; send when streak >= 3 consecutive ticks (dedup via renotify)
  * - spool capacity 70-89%: send once per band (dedup via spoolCapWarningBand)
- * - Both reset their respective state when the condition clears.
+ * Both reset their respective state when the condition clears.
  */
 export function decideWarningAlert(
   previousState: AutoCaptureAlertState,
   assessment: AutoCaptureAssessment,
   host: string,
-  now: Date
+  now: Date,
+  renotifyMs = DEFAULT_RENOTIFY_MS
 ): AutoCaptureWarningDecision {
   const updatedState = { ...previousState }
-  const noWarning: AutoCaptureWarningDecision = { send: false, reason: 'none', message: null, updatedState }
+  const messages: string[] = []
+  const reasons: Array<'fallback-streak' | 'spool-cap-new-band'> = []
 
-  // Fallback success streak
+  // --- Fallback success streak (independent) ---
   if (assessment.fallbackSuccessCount > 0) {
     const prevStreak = previousState.fallbackSuccessStreak ?? 0
     updatedState.fallbackSuccessStreak = prevStreak + 1
     if (updatedState.fallbackSuccessStreak >= FALLBACK_SUCCESS_STREAK_THRESHOLD) {
-      const message = [
-        '⚠️ CC-memory auto-capture warning',
-        `host=${host}`,
-        `time=${toIsoString(now)}`,
-        `fallback-success streak=${updatedState.fallbackSuccessStreak}`,
-        'codex may be logged out, falling back to haiku',
-      ].join('\n')
-      return { send: true, reason: 'fallback-streak', message, updatedState }
+      // Dedup: only send if never sent, or renotify interval elapsed, or streak was reset and crossed again
+      const lastSentMs = previousState.fallbackWarningLastSentAt
+        ? Date.parse(previousState.fallbackWarningLastSentAt)
+        : Number.NaN
+      const shouldSend =
+        Number.isNaN(lastSentMs) || now.getTime() - lastSentMs >= renotifyMs
+      if (shouldSend) {
+        updatedState.fallbackWarningLastSentAt = toIsoString(now)
+        reasons.push('fallback-streak')
+        messages.push(
+          [
+            '⚠️ CC-memory auto-capture warning',
+            `host=${host}`,
+            `time=${toIsoString(now)}`,
+            `fallback-success streak=${updatedState.fallbackSuccessStreak}`,
+            'codex may be logged out, falling back to haiku',
+          ].join('\n')
+        )
+      }
     }
-    noWarning.updatedState = updatedState
-    return noWarning
+  } else {
+    // Clear streak when no fallback-success
+    updatedState.fallbackSuccessStreak = 0
+    updatedState.fallbackWarningLastSentAt = null
   }
-  // Clear streak when no fallback-success
-  updatedState.fallbackSuccessStreak = 0
 
-  // Spool capacity warning (70-89%, one-shot per band)
-  if (assessment.warning && assessment.spoolCapPct >= 70 && assessment.spoolCapPct < 90) {
+  // --- Spool capacity warning (independent, one-shot per band) ---
+  if (assessment.spoolCapPct >= 70 && assessment.spoolCapPct < 90) {
     const band = '70-89'
     if (previousState.spoolCapWarningBand !== band) {
       updatedState.spoolCapWarningBand = band
-      const message = [
-        '⚠️ CC-memory auto-capture warning',
-        `host=${host}`,
-        `time=${toIsoString(now)}`,
-        `spool-cap-pct=${assessment.spoolCapPct} (approaching capacity)`,
-      ].join('\n')
-      return { send: true, reason: 'spool-cap-new-band', message, updatedState }
+      reasons.push('spool-cap-new-band')
+      messages.push(
+        [
+          '⚠️ CC-memory auto-capture warning',
+          `host=${host}`,
+          `time=${toIsoString(now)}`,
+          `spool-cap-pct=${assessment.spoolCapPct} (approaching capacity)`,
+        ].join('\n')
+      )
     }
-    noWarning.updatedState = updatedState
-    return noWarning
-  }
-  // Clear spool cap band when below 70% (reset for next crossing)
-  if (assessment.spoolCapPct < 70) {
+  } else if (assessment.spoolCapPct < 70) {
+    // Clear spool cap band when below 70% (reset for next crossing)
     updatedState.spoolCapWarningBand = null
   }
 
-  noWarning.updatedState = updatedState
-  return noWarning
+  const send = reasons.length > 0
+  return {
+    send,
+    reasons,
+    reason: reasons[0] ?? 'none',
+    message: messages.length > 0 ? messages.join('\n---\n') : null,
+    updatedState,
+  }
 }
 
 function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
@@ -526,6 +551,8 @@ function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
       typeof state.fallbackSuccessStreak === 'number' ? state.fallbackSuccessStreak : 0,
     spoolCapWarningBand:
       typeof state.spoolCapWarningBand === 'string' ? state.spoolCapWarningBand : null,
+    fallbackWarningLastSentAt:
+      typeof state.fallbackWarningLastSentAt === 'string' ? state.fallbackWarningLastSentAt : null,
   }
 }
 

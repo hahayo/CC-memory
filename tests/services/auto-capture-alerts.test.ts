@@ -558,4 +558,63 @@ describe('decideWarningAlert', () => {
     expect(result.send).toBe(false)
     expect(result.updatedState.spoolCapWarningBand).toBe(null)
   })
+
+  it('streak past threshold is suppressed within renotify window (dedup)', () => {
+    const sentAt = new Date(now.getTime() - 60_000).toISOString() // 1 min ago
+    const state = {
+      ...createEmptyAutoCaptureAlertState(),
+      fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD,
+      fallbackWarningLastSentAt: sentAt,
+    }
+    const assessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+    expect(result.updatedState.fallbackSuccessStreak).toBe(FALLBACK_SUCCESS_STREAK_THRESHOLD + 1)
+    // lastSentAt unchanged
+    expect(result.updatedState.fallbackWarningLastSentAt).toBe(sentAt)
+  })
+
+  it('streak past threshold re-notifies after renotify interval', () => {
+    const sentAt = new Date(now.getTime() - 7 * 60 * 60 * 1000).toISOString() // 7h ago
+    const state = {
+      ...createEmptyAutoCaptureAlertState(),
+      fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD,
+      fallbackWarningLastSentAt: sentAt,
+    }
+    const assessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    expect(result.reason).toBe('fallback-streak')
+    expect(result.updatedState.fallbackWarningLastSentAt).toBe(now.toISOString())
+  })
+
+  it('fallback streak + 72% spool → BOTH warnings delivered', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD - 1 }
+    const assessment = makeAssessment({
+      fallbackSuccessCount: 1,
+      spoolCapPct: 72,
+      warning: 'fallback-success=1 (codex may be logged out, falling back to haiku); spool-cap-pct=72 (warning: approaching capacity)',
+    })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    expect(result.reasons).toContain('fallback-streak')
+    expect(result.reasons).toContain('spool-cap-new-band')
+    expect(result.message).toContain('codex')
+    expect(result.message).toContain('spool-cap-pct=72')
+    expect(result.updatedState.spoolCapWarningBand).toBe('70-89')
+    expect(result.updatedState.fallbackSuccessStreak).toBe(FALLBACK_SUCCESS_STREAK_THRESHOLD)
+  })
+
+  it('streak resets also clears fallbackWarningLastSentAt', () => {
+    const state = {
+      ...createEmptyAutoCaptureAlertState(),
+      fallbackSuccessStreak: 5,
+      fallbackWarningLastSentAt: '2026-01-15T09:00:00.000Z',
+    }
+    const assessment = makeAssessment({ fallbackSuccessCount: 0 })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+    expect(result.updatedState.fallbackSuccessStreak).toBe(0)
+    expect(result.updatedState.fallbackWarningLastSentAt).toBe(null)
+  })
 })

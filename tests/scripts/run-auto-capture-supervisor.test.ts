@@ -1040,6 +1040,117 @@ describe('scripts/run-auto-capture-supervisor SIGKILL escalation', () => {
   })
 })
 
+describe('supervisor warning notification path', () => {
+  it('returns notification=warning and alerted=true when fallback streak Telegram succeeds', async () => {
+    const sentMessages: string[] = []
+    const THRESHOLD = 3
+
+    const result = await runAutoCaptureSupervisorTick(
+      {
+        projectUrl: 'postgres://project-db.example/cc_memory',
+        alertTarget: {
+          botToken: 'bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        now: () => new Date('2026-08-20T10:00:00.000Z'),
+        hostname: () => 'cc-memory-host',
+        loadState: async () => ({
+          ...createEmptyAutoCaptureAlertState(),
+          fallbackSuccessStreak: THRESHOLD - 1,
+        }),
+        saveState: async () => {},
+        runWorker: async () => ({
+          exitCode: 0,
+          stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0 primary-provider=codex-cli primary-success=0 fallback-success=1 fallback-failed=0 fatal=0 spool-bytes=1000 spool-cap-pct=10 windows=1\n',
+          stderr: '',
+        }),
+        sendTelegram: async (_target, text) => { sentMessages.push(text) },
+      }
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.notification).toBe('warning')
+    expect(result.alerted).toBe(true)
+    expect(sentMessages).toHaveLength(1)
+    expect(sentMessages[0]).toContain('fallback-success streak')
+    expect(result.state.fallbackWarningLastSentAt).toBe('2026-08-20T10:00:00.000Z')
+  })
+
+  it('returns notification=none when fallback streak is below threshold', async () => {
+    const result = await runAutoCaptureSupervisorTick(
+      {
+        projectUrl: 'postgres://project-db.example/cc_memory',
+        alertTarget: {
+          botToken: 'bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        now: () => new Date('2026-08-20T10:00:00.000Z'),
+        loadState: async () => createEmptyAutoCaptureAlertState(),
+        saveState: async () => {},
+        runWorker: async () => ({
+          exitCode: 0,
+          stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0 primary-provider=codex-cli primary-success=0 fallback-success=1 fallback-failed=0 fatal=0 spool-bytes=1000 spool-cap-pct=10 windows=1\n',
+          stderr: '',
+        }),
+        sendTelegram: async () => {},
+      }
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.notification).toBe('none')
+    expect(result.alerted).toBe(false)
+  })
+
+  it('recovery takes priority over warning when both apply', async () => {
+    const sentMessages: string[] = []
+    const THRESHOLD = 3
+
+    const result = await runAutoCaptureSupervisorTick(
+      {
+        projectUrl: 'postgres://project-db.example/cc_memory',
+        alertTarget: {
+          botToken: 'bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        now: () => new Date('2026-08-20T10:00:00.000Z'),
+        hostname: () => 'cc-memory-host',
+        loadState: async () => ({
+          ...createEmptyAutoCaptureAlertState(),
+          activeFingerprint: 'abc123def456',
+          firstFailedAt: '2026-08-19T00:00:00.000Z',
+          lastAlertedAt: '2026-08-19T00:00:00.000Z',
+          fallbackSuccessStreak: THRESHOLD - 1,
+        }),
+        saveState: async () => {},
+        runWorker: async () => ({
+          exitCode: 0,
+          stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0 primary-provider=codex-cli primary-success=0 fallback-success=1 fallback-failed=0 fatal=0 spool-bytes=1000 spool-cap-pct=10 windows=1\n',
+          stderr: '',
+        }),
+        sendTelegram: async (_target, text) => { sentMessages.push(text) },
+      }
+    )
+
+    // Recovery notification takes priority
+    expect(result.notification).toBe('recovery')
+    expect(result.alerted).toBe(true)
+    // Both warning and recovery messages were sent
+    expect(sentMessages.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
 describe('scripts/run-auto-capture maskDsnCredentials', () => {
   // 動態組裝含帳密 DSN 以避免 secret-scan hook 誤判
   const scheme = 'postgres://'

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { maskDsnCredentials } from '../../scripts/run-auto-capture.js';
+import { maskDsnCredentials, formatSummaryLine, runAutoCaptureTick } from '../../scripts/run-auto-capture.js';
 import { assessAutoCaptureExecution } from '../../src/services/auto-capture-alerts.js';
+import type { CaptureWorkerResult } from '../../src/services/capture-worker.js';
 
 describe('run-auto-capture runner', () => {
   it('maskDsnCredentials hides credentials in DSN strings', () => {
@@ -49,8 +50,74 @@ describe('run-auto-capture runner', () => {
   });
 });
 
+describe('run-auto-capture formatSummaryLine', () => {
+  it('formats fatal=1 correctly in summary line', () => {
+    const result: CaptureWorkerResult = {
+      processed: 0, skipped: 0, failed: 0, deadLettered: 0, rateLimited: 0,
+      malformed: 0, blocked: 0, parked: 0, yielded: 0, held: 0, embeddingFailed: 0,
+      transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
+      primaryProvider: 'codex-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0,
+      fatalError: 'test fatal error', spoolBytes: 0, spoolCapPct: 0, windows: 0,
+    };
+    const line = formatSummaryLine(result);
+    expect(line).toContain('fatal=1');
+    expect(line).toContain('[cc-memory] auto-capture summary:');
+
+    // The summary line should be parsed as unhealthy by assessAutoCaptureExecution
+    const assessment = assessAutoCaptureExecution({ exitCode: 1, stdout: line, stderr: '' });
+    expect(assessment.ok).toBe(false);
+    expect(assessment.fatalCount).toBe(1);
+    expect(assessment.problemLine).toBe('fatal=1');
+  });
+
+  it('formats fatal=0 when no fatalError', () => {
+    const result: CaptureWorkerResult = {
+      processed: 1, skipped: 0, failed: 0, deadLettered: 0, rateLimited: 0,
+      malformed: 0, blocked: 0, parked: 0, yielded: 0, held: 0, embeddingFailed: 0,
+      transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
+      primaryProvider: 'claude-cli', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0,
+      fatalError: null, spoolBytes: 1000, spoolCapPct: 10, windows: 1,
+    };
+    const line = formatSummaryLine(result);
+    expect(line).toContain('fatal=0');
+    const assessment = assessAutoCaptureExecution({ exitCode: 0, stdout: line, stderr: '' });
+    expect(assessment.ok).toBe(true);
+  });
+});
+
+describe('run-auto-capture fatal path via injectable runWorker', () => {
+  it('runAutoCaptureTick with injected fatal worker prints fatal=1 summary and sets exitCode=1', async () => {
+    const output: string[] = [];
+    const fatalResult: CaptureWorkerResult = {
+      processed: 0, skipped: 0, failed: 0, deadLettered: 0, rateLimited: 0,
+      malformed: 0, blocked: 0, parked: 0, yielded: 0, held: 0, embeddingFailed: 0,
+      transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
+      primaryProvider: 'none', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0,
+      fatalError: 'injected fatal for test', spoolBytes: 0, spoolCapPct: 0, windows: 0,
+    };
+
+    // Save and restore process.exitCode
+    const savedExitCode = process.exitCode;
+    try {
+      const result = await runAutoCaptureTick({
+        runWorker: async () => fatalResult,
+        stdout: { write: (chunk: string) => { output.push(chunk); return true; } },
+      });
+      expect(result.fatalError).toBe('injected fatal for test');
+      expect(process.exitCode).toBe(1);
+
+      // Verify summary line contains fatal=1
+      const summaryOutput = output.find(line => line.includes('[cc-memory] auto-capture summary:'));
+      expect(summaryOutput).toBeDefined();
+      expect(summaryOutput).toContain('fatal=1');
+    } finally {
+      process.exitCode = savedExitCode;
+    }
+  });
+});
+
 describe('supervisor fallback-success streak alert integration', () => {
-  it('three consecutive ticks with fallback-success trigger Telegram alert', async () => {
+  it('three consecutive ticks trigger alert, fourth is suppressed (dedup)', async () => {
     const {
       decideWarningAlert,
       createEmptyAutoCaptureAlertState,
@@ -79,11 +146,16 @@ describe('supervisor fallback-success streak alert integration', () => {
       const decision = decideWarningAlert(state, assessment, host, tickNow);
 
       if (tick < threshold) {
+        // Below threshold: accumulating streak, no send
         expect(decision.send).toBe(false);
-      } else {
+      } else if (tick === threshold) {
+        // Exactly at threshold: first send
         expect(decision.send).toBe(true);
         expect(decision.reason).toBe('fallback-streak');
         expect(decision.message).toContain('codex');
+      } else {
+        // Past threshold, within renotify window: suppressed (dedup)
+        expect(decision.send).toBe(false);
       }
 
       state = decision.updatedState;

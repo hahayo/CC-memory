@@ -77,7 +77,7 @@ export interface AutoCaptureSupervisorOptions {
 
 export interface AutoCaptureSupervisorTickResult {
   exitCode: number
-  notification: 'none' | 'failure' | 'recovery'
+  notification: 'none' | 'failure' | 'recovery' | 'warning'
   alerted: boolean
   state: AutoCaptureAlertState
 }
@@ -512,12 +512,15 @@ export async function runAutoCaptureSupervisorTick(
 
     // Process warnings (fallback-success streak, spool capacity) even on healthy ticks
     const warningDecision = decideWarningAlert(previousState, assessment, hostname, now)
-    // Carry warning streak/band state into nextState
+    // Carry warning streak/band/dedup state into nextState
     nextState.fallbackSuccessStreak = warningDecision.updatedState.fallbackSuccessStreak
     nextState.spoolCapWarningBand = warningDecision.updatedState.spoolCapWarningBand
+    nextState.fallbackWarningLastSentAt = warningDecision.updatedState.fallbackWarningLastSentAt
+    let warningSent = false
     if (warningDecision.send && alertTarget && warningDecision.message) {
       try {
         await sendTelegram(alertTarget, warningDecision.message)
+        warningSent = true
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error)
         stderr.write(`[run-auto-capture-supervisor] warning alert failed: ${messageText}\n`)
@@ -526,7 +529,9 @@ export async function runAutoCaptureSupervisorTick(
 
     if (!previousState.activeFingerprint) {
       await saveState(nextState)
-      return { exitCode: 0, notification: 'none', alerted: false, state: nextState }
+      // Return 'warning' notification when a warning was actually sent; recovery takes priority below
+      const notification = warningSent ? 'warning' as const : 'none' as const
+      return { exitCode: 0, notification, alerted: warningSent, state: nextState }
     }
 
     const message = formatAutoCaptureRecoveryMessage({
