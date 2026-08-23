@@ -1995,6 +1995,7 @@ export async function runCaptureWorkerOnce(
           let terminalRawResponse: CaptureLlmRawResponse | null = null;
           let runtimeStopped = false;
           let promptSplit = false;
+          let wasBlocked = false;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             if (
               budget > 0 &&
@@ -2084,19 +2085,26 @@ export async function runCaptureWorkerOnce(
                     if (altAction === 'rate-limited' || altAction === 'disabled' || altAction === 'blocked') {
                       // Non-destructive: skip this tick, data not abandoned
                       result.blocked += 1;
+                      wasBlocked = true;
                       handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
                       runtimeStopped = true;
                       break;
                     }
+                    // Destructive alternate (terminal/exit-nonzero) → terminal retry
+                    terminalError = error;
+                    terminalRawResponse = attemptRawResponse;
+                    break;
                   }
-                  // No alternateCategory or destructive alternate → blocked
+                  // No alternateCategory → blocked
                   result.blocked += 1;
+                  wasBlocked = true;
                   handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
                   runtimeStopped = true;
                   break;
                 }
                 case 'blocked': {
                   result.blocked += 1;
+                  wasBlocked = true;
                   handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
                   runtimeStopped = true;
                   break;
@@ -2114,7 +2122,7 @@ export async function runCaptureWorkerOnce(
           if (promptSplit) continue;
           if (runtimeStopped) {
             // For blocked action: persist state and check dead-letter threshold
-            const blockedEntry = state.retries[retryKey];
+            const blockedEntry = wasBlocked ? state.retries[retryKey] : undefined;
             if (blockedEntry && (blockedEntry.blockedAttempts ?? 0) > 0) {
               await stateWriter(statePath, state);
               const blockedCount = blockedEntry.blockedAttempts ?? 0;

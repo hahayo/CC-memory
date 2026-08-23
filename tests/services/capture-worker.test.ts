@@ -2593,6 +2593,84 @@ describe('Phase 1: blocked action lifecycle', () => {
     expect(result6.parked).toBe(1);
   });
 
+  it('alternateCategory terminal goes to terminal retry, not blocked', async () => {
+    const harness = makeHarness();
+    // Tiny transcript that cannot be split
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x'.repeat(200) },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'terminal',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.blocked).toBe(0);
+    // Should go through terminal retry path: attempts incremented
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('alternateCategory rate-limited goes to blocked, not terminal', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x'.repeat(200) },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'rate-limited',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.blocked).toBe(1);
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(0);
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(1);
+  });
+
+  it('contentHash change resets blockedAttempts (new key)', async () => {
+    const harness = makeHarness();
+    // First transcript content
+    const transcriptEnd1 = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'original-content-aaa' },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: transcriptEnd1, timestamp: '2026-07-06T10:00:00.000Z' });
+    // First blocked
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    const state1 = readState(harness);
+    const keys1 = Object.keys(state1.retries);
+    expect(keys1).toHaveLength(1);
+    expect(state1.retries[keys1[0]].blockedAttempts).toBe(1);
+
+    // Mutate transcript content (simulates hooks appending more data to same range)
+    // Since retryKey includes contentHash, a new hash = new entry = fresh blockedAttempts
+    writeFileSync(harness.transcriptPath, JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', message: 'changed-content-bbb' }) + '\n');
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm2, now: new Date('2026-07-06T11:00:00.000Z') });
+    const state2 = readState(harness);
+    const keys2 = Object.keys(state2.retries);
+    // Old key cleared (content changed → different retryKey), new key with blockedAttempts=1
+    const nonZeroBlocked = keys2.filter(k => (state2.retries[k].blockedAttempts ?? 0) > 0);
+    expect(nonZeroBlocked).toHaveLength(1);
+    expect(state2.retries[nonZeroBlocked[0]].blockedAttempts).toBe(1);
+  });
+
   it('category change does NOT reset blockedAttempts', async () => {
     const harness = makeHarness();
     await appendSimpleWindow(harness);
