@@ -1631,6 +1631,7 @@ export async function runCaptureWorkerOnce(
   const getNowMs = options.nowMs ?? (() => Date.now());
   const budget = tickBudgetMs(env);
   const tickStartMs = getNowMs();
+  let windowsThisTick = 0;
 
   try {
 
@@ -1672,7 +1673,6 @@ export async function runCaptureWorkerOnce(
   let handledSessions = 0;
   const stateWriter = options.stateWriter ?? writeCaptureStateAtomically;
   const maxWindowsPerTick = captureMaxWindowsPerTick(env);
-  let windowsThisTick = 0;
 
   for (const spool of sessions) {
     if (budget > 0 && getNowMs() - tickStartMs >= budget) {
@@ -2331,13 +2331,12 @@ export async function runCaptureWorkerOnce(
     }
   }
 
-  result.windows = windowsThisTick;
-
   } catch (fatalErr) {
     // D1b: capture fatal error, telemetry still flows via result
     result.fatalError = fatalErr instanceof Error ? fatalErr.message : String(fatalErr);
   } finally {
     // D1b: takeTelemetry exactly once in function-level finally
+    result.windows = windowsThisTick;
     const telemetry = options.llm.takeTelemetry();
     result.primaryProvider = telemetry.primaryProvider;
     result.primarySuccess += telemetry.primarySuccess;

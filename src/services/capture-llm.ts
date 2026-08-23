@@ -809,7 +809,7 @@ class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
         text: response.text ?? '',
       };
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (controller.signal.aborted) {
         throw new CaptureLlmValidationError(
           'LLM_TIMEOUT',
           `gemini-flash timed out after ${this.timeoutMs}ms`,
@@ -918,9 +918,11 @@ export class FallbackCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 
   async extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
-    // forceProvider: route directly to the named adapter
+    // forceProvider: route directly to the named adapter.
+    // Accepts the role string 'fallback' (from retryProvider) or a provider id.
     if (options?.forceProvider) {
-      const target = options.forceProvider === (this.fallback.provider ?? '')
+      const fp = options.forceProvider;
+      const target = (fp === 'fallback' || fp === (this.fallback.provider ?? ''))
         ? this.fallback
         : this.primary;
       const response = await target.extract(request);

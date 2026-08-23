@@ -136,18 +136,20 @@ function emptyWorkerResult(): CaptureWorkerResult {
   };
 }
 
-const NUMERIC_RESULT_KEYS: ReadonlyArray<keyof CaptureWorkerResult> = [
+const SUM_RESULT_KEYS: ReadonlyArray<keyof CaptureWorkerResult> = [
   'processed', 'skipped', 'failed', 'deadLettered', 'rateLimited',
   'malformed', 'blocked', 'parked', 'yielded', 'held', 'embeddingFailed',
   'transcriptMissing', 'llmRetries', 'observationsWritten', 'rollupsWritten',
-  'primarySuccess', 'fallbackSuccess', 'fallbackFailed',
-  'spoolBytes', 'spoolCapPct', 'windows',
+  'primarySuccess', 'fallbackSuccess', 'fallbackFailed', 'windows',
 ];
 
 function addWorkerResult(target: CaptureWorkerResult, value: CaptureWorkerResult): void {
-  for (const key of NUMERIC_RESULT_KEYS) {
+  for (const key of SUM_RESULT_KEYS) {
     (target[key] as number) += value[key] as number;
   }
+  // Capacity: take last (each tick reports its own snapshot)
+  target.spoolBytes = value.spoolBytes;
+  target.spoolCapPct = value.spoolCapPct;
   // Non-numeric fields: take last non-empty value
   if (value.primaryProvider) target.primaryProvider = value.primaryProvider;
   if (value.fatalError) target.fatalError = value.fatalError;

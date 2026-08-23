@@ -2750,28 +2750,28 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
       timestamp: '2026-01-01T00:00:01.000Z',
     });
     let telemetryCalled = false;
-    // Force a fatal by throwing from stateWriter during the outer logic (before the per-session try/catch)
-    const llm = mockLlm(
-      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled')],
-      {
-        disabled: true,
-        disabledReason: 'disabled',
-        takeTelemetry() {
-          telemetryCalled = true;
-          return { primaryProvider: 'test-p', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
-        },
-      }
-    );
-    // Inject a stateWriter that throws on write, which happens after spool lock is acquired
-    // The error will be caught by the per-session catch, not the outer one.
-    // To force a fatal error through the outer try/catch, we'd need to corrupt
-    // something before the session loop. Instead, let's verify that telemetry
-    // always flows even on a normal successful path.
-    const result = await runWorker(harness, { db: {}, llm });
+    const llm = mockLlm([], {
+      takeTelemetry() {
+        telemetryCalled = true;
+        return { primaryProvider: 'test-p', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+      },
+    });
+    // Force a fatal by making nowMs throw on its second call.
+    // The first call sets tickStartMs; the second is the budget check
+    // inside the session for-loop, outside the per-session try/catch.
+    let nowMsCallCount = 0;
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        nowMsCallCount += 1;
+        if (nowMsCallCount > 1) throw new Error('FATAL_CLOCK_FAIL');
+        return 0;
+      },
+    });
+    expect(result.fatalError).toBe('FATAL_CLOCK_FAIL');
     expect(telemetryCalled).toBe(true);
     expect(result.primaryProvider).toBe('test-p');
-    // fatalError is null on normal path
-    expect(result.fatalError).toBe(null);
   });
 
   it('spool-cap early exit records spoolBytes and spoolCapPct', async () => {

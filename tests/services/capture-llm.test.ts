@@ -748,16 +748,6 @@ describe('worstCaseCallBudgetMs', () => {
     expect(adapter.worstCaseCallBudgetMs).toBe(75000 + KILL_GRACE_MS);
   });
 
-  it('factory fail-fast on non-finite worstCaseCallBudgetMs', () => {
-    // An adapter that returns Infinity
-    expect(() => createCaptureLlmAdapter(
-      adapterOptions({
-        env: { CC_CAPTURE_LLM: 'unknown-provider' },
-        stdout: stdoutSink().stdout,
-      })
-    )).not.toThrow(); // unsupported has worstCaseCallBudgetMs=0, disabled=false => but throws on extract
-  });
-
   it('gemini-flash adapter reports timeout from env', () => {
     const adapter = createCaptureLlmAdapter(
       adapterOptions({
@@ -1005,6 +995,20 @@ describe('FallbackCaptureLlmAdapter step 2: fallback also fails', () => {
 });
 
 describe('FallbackCaptureLlmAdapter forceProvider routing', () => {
+  it('forceProvider "fallback" role string routes to fallback adapter', async () => {
+    const pExtract = vi.fn(async () => ({ model: 'gpt-5', text: extractionJson() }));
+    const fExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // Worker sends 'fallback' (role string from retryProvider), not 'claude-cli'
+    const result = await wrapper.extract(request(), { forceProvider: 'fallback' });
+    expect(result.model).toBe('haiku');
+    expect(pExtract).not.toHaveBeenCalled();
+    expect(fExtract).toHaveBeenCalled();
+  });
+
   it('forceProvider routes to fallback adapter directly', async () => {
     const pExtract = vi.fn(async () => ({ model: 'gpt-5', text: extractionJson() }));
     const fExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
