@@ -698,10 +698,14 @@ export function isCaptureRetryHeld(
 }
 
 function llmCallBudgetReserveMs(
-  llm: Pick<CaptureLlmAdapter, 'worstCaseCallBudgetMs'>
+  llm: Pick<CaptureLlmAdapter, 'worstCaseCallBudgetMs' | 'worstCaseCallBudgetMsFor'>,
+  forceProvider?: string,
 ): number {
-  if (llm.worstCaseCallBudgetMs <= 0) return 0;
-  return llm.worstCaseCallBudgetMs + LLM_CALL_SETTLE_RESERVE_MS;
+  const budgetMs = forceProvider && llm.worstCaseCallBudgetMsFor
+    ? llm.worstCaseCallBudgetMsFor(forceProvider)
+    : llm.worstCaseCallBudgetMs;
+  if (budgetMs <= 0) return 0;
+  return budgetMs + LLM_CALL_SETTLE_RESERVE_MS;
 }
 
 async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
@@ -2022,14 +2026,13 @@ export async function runCaptureWorkerOnce(
             break;
           }
 
-          // Window counting: increment before the first extract for this chunk
+          // Window limit check (increment deferred until budget check passes)
           if (windowsThisTick >= maxWindowsPerTick) {
             result.yielded += 1;
             sessionStopped = true;
             snapshotCompleted = false;
             break;
           }
-          windowsThisTick += 1;
 
           let rawResponse: CaptureLlmRawResponse | null = null;
           let extraction: CaptureLlmExtraction | null = null;
@@ -2042,10 +2045,14 @@ export async function runCaptureWorkerOnce(
           let retryProvider: string | undefined =
             state.retries[retryKey]?.pendingRetryProvider ?? undefined;
           for (let attempt = 0; attempt < 2; attempt += 1) {
+            // Use provider-specific budget when forcing a specific provider
+            const effectiveReserveMs = retryProvider
+              ? llmCallBudgetReserveMs(options.llm, retryProvider)
+              : llmCallReserveMs;
             if (
               budget > 0 &&
-              llmCallReserveMs > 0 &&
-              getNowMs() - tickStartMs + llmCallReserveMs > budget
+              effectiveReserveMs > 0 &&
+              getNowMs() - tickStartMs + effectiveReserveMs > budget
             ) {
               // If we have a pending retryProvider, persist it for the next tick
               if (retryProvider) {
@@ -2069,6 +2076,10 @@ export async function runCaptureWorkerOnce(
               result.yielded += 1;
               runtimeStopped = true;
               break;
+            }
+            // Count window only after budget check passes and before first extract
+            if (attempt === 0) {
+              windowsThisTick += 1;
             }
             const retryPromptPrefix =
               attempt === 0 && !retryProvider ? undefined : MALFORMED_JSON_RETRY_PROMPT_PREFIX;
@@ -2096,6 +2107,13 @@ export async function runCaptureWorkerOnce(
               retryProvider = undefined;
               break;
             } catch (error) {
+              // Clear pendingRetryProvider on both success and failure (prevents P→F→F→P cycle)
+              if (state.retries[retryKey]?.pendingRetryProvider) {
+                delete state.retries[retryKey].pendingRetryProvider;
+                await stateWriter(statePath, state);
+              }
+              retryProvider = undefined;
+
               const category: FailureCategory = toFailureCategory(error);
               const timeoutSubtype =
                 error instanceof CaptureLlmValidationError && typeof error.details.timeoutSubtype === 'string'
@@ -2103,7 +2121,11 @@ export async function runCaptureWorkerOnce(
                   : undefined;
               const action = toWorkerAction(category, { timeoutSubtype });
               // Capture retryProvider from error details for next attempt
+              // but NOT if the retry is already exhausted (forced-provider call failed)
+              const retryExhausted =
+                error instanceof CaptureLlmValidationError && error.details.retryExhausted === true;
               const errorRetryProvider =
+                !retryExhausted &&
                 error instanceof CaptureLlmValidationError && typeof error.details.retryProvider === 'string'
                   ? error.details.retryProvider
                   : undefined;
@@ -2163,7 +2185,7 @@ export async function runCaptureWorkerOnce(
                       // Non-destructive: skip this tick, data not abandoned
                       result.blocked += 1;
                       wasBlocked = true;
-                      handleBlockedAction(state, retryKey, chunk, sourceContentHash, category, options);
+                      handleBlockedAction(state, retryKey, chunk, sourceContentHash, alternateCategory, options);
                       runtimeStopped = true;
                       break;
                     }

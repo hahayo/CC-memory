@@ -7,6 +7,8 @@ import {
   assessAutoCaptureExecution,
   createEmptyAutoCaptureAlertState,
   decideFailureAlert,
+  decideWarningAlert,
+  FALLBACK_SUCCESS_STREAK_THRESHOLD,
   loadAutoCaptureAlertState,
   parseSimpleEnvFile,
   resolveAutoCaptureAlertTarget,
@@ -343,7 +345,8 @@ describe('assessAutoCaptureExecution new telemetry fields', () => {
     expect(result.spoolBytes).toBe(120000000)
     expect(result.spoolCapPct).toBe(23)
     expect(result.windowsCount).toBe(4)
-    expect(result.warning).toBe(null)
+    // fallback-success=1 now generates a warning (codex findings fix #1)
+    expect(result.warning).toContain('fallback-success=1')
   })
 
   it('fallback-failed > 0 → unhealthy', () => {
@@ -425,5 +428,134 @@ describe('assessAutoCaptureExecution new telemetry fields', () => {
     const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
     expect(result.ok).toBe(false)
     expect(result.problemLine).toContain('spool-cap-pct=115')
+  })
+})
+
+describe('assessAutoCaptureExecution fallback-success warning', () => {
+  function makeSummary(fields: Record<string, string | number>): string {
+    const base = 'processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0'
+    const extra = Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' ')
+    return `[cc-memory] auto-capture summary: ${base} ${extra}`
+  }
+
+  it('fallback-success > 0 → ok=true but warning mentions codex', () => {
+    const summary = makeSummary({
+      'primary-provider': 'codex-cli',
+      'primary-success': 0,
+      'fallback-success': 2,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 1000,
+      'spool-cap-pct': 10,
+      'windows': 1,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(true)
+    expect(result.warning).toContain('fallback-success=2')
+    expect(result.warning).toContain('codex')
+  })
+
+  it('fallback-success=0 → no warning from fallback', () => {
+    const summary = makeSummary({
+      'primary-provider': 'codex-cli',
+      'primary-success': 1,
+      'fallback-success': 0,
+      'fallback-failed': 0,
+      'fatal': 0,
+      'spool-bytes': 1000,
+      'spool-cap-pct': 10,
+      'windows': 1,
+    })
+    const result = assessAutoCaptureExecution({ exitCode: 0, stdout: summary, stderr: '' })
+    expect(result.ok).toBe(true)
+    expect(result.warning).toBe(null)
+  })
+})
+
+describe('decideWarningAlert', () => {
+  const host = 'test-host'
+  const now = new Date('2026-01-15T10:00:00Z')
+
+  function makeAssessment(overrides: Partial<ReturnType<typeof assessAutoCaptureExecution>>): ReturnType<typeof assessAutoCaptureExecution> {
+    return {
+      ok: true,
+      exitCode: 0,
+      deadLetterCount: 0,
+      failedCount: 0,
+      rateLimitedCount: 0,
+      malformedCount: 0,
+      blockedCount: 0,
+      transcriptMissingCount: 0,
+      parkedCount: 0,
+      yieldedCount: 0,
+      heldCount: 0,
+      embeddingFailedCount: 0,
+      primaryProvider: 'codex-cli',
+      primarySuccessCount: 1,
+      fallbackSuccessCount: 0,
+      fallbackFailedCount: 0,
+      fatalCount: 0,
+      spoolBytes: 1000,
+      spoolCapPct: 10,
+      windowsCount: 1,
+      warning: null,
+      summaryLine: null,
+      problemLine: null,
+      nonSummaryLines: [],
+      stderrLines: [],
+      fingerprint: null,
+      ...overrides,
+    }
+  }
+
+  it('single tick fallback-success: increments streak but does NOT send', () => {
+    const state = createEmptyAutoCaptureAlertState()
+    const assessment = makeAssessment({ fallbackSuccessCount: 2, warning: 'fallback-success=2 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+    expect(result.updatedState.fallbackSuccessStreak).toBe(1)
+  })
+
+  it('streak reaches threshold: sends Telegram warning', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), fallbackSuccessStreak: FALLBACK_SUCCESS_STREAK_THRESHOLD - 1 }
+    const assessment = makeAssessment({ fallbackSuccessCount: 1, warning: 'fallback-success=1 (codex may be logged out, falling back to haiku)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    expect(result.reason).toBe('fallback-streak')
+    expect(result.message).toContain('codex')
+    expect(result.message).toContain('haiku')
+    expect(result.updatedState.fallbackSuccessStreak).toBe(FALLBACK_SUCCESS_STREAK_THRESHOLD)
+  })
+
+  it('streak resets when fallbackSuccessCount is 0', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), fallbackSuccessStreak: 2 }
+    const assessment = makeAssessment({ fallbackSuccessCount: 0 })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+    expect(result.updatedState.fallbackSuccessStreak).toBe(0)
+  })
+
+  it('70% spool cap sends one-time warning', () => {
+    const state = createEmptyAutoCaptureAlertState()
+    const assessment = makeAssessment({ spoolCapPct: 75, warning: 'spool-cap-pct=75 (warning: approaching capacity)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(true)
+    expect(result.reason).toBe('spool-cap-new-band')
+    expect(result.updatedState.spoolCapWarningBand).toBe('70-89')
+  })
+
+  it('same spool cap band → suppressed (dedup)', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), spoolCapWarningBand: '70-89' }
+    const assessment = makeAssessment({ spoolCapPct: 80, warning: 'spool-cap-pct=80 (warning: approaching capacity)' })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+  })
+
+  it('spool cap drops below 70 → band resets for next crossing', () => {
+    const state = { ...createEmptyAutoCaptureAlertState(), spoolCapWarningBand: '70-89' }
+    const assessment = makeAssessment({ spoolCapPct: 60 })
+    const result = decideWarningAlert(state, assessment, host, now)
+    expect(result.send).toBe(false)
+    expect(result.updatedState.spoolCapWarningBand).toBe(null)
   })
 })

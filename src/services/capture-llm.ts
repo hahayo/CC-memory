@@ -160,6 +160,8 @@ export interface CaptureLlmAdapter {
   readonly disabled?: boolean;
   readonly disabledReason?: string;
   readonly worstCaseCallBudgetMs: number;
+  /** Optional: return the worst-case budget for a specific provider role (e.g. 'fallback'). */
+  worstCaseCallBudgetMsFor?(provider: string): number;
   extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse>;
   takeTelemetry(): CaptureTelemetrySnapshot;
 }
@@ -640,7 +642,21 @@ function parseClaudeCliRateLimit(stdout: string, model: string): Record<string, 
 export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<ClaudeCliRunResult> {
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env, ...(input.env ?? {}) };
+    // Strip secrets that the claude-cli child process does not need
     delete childEnv.GEMINI_API_KEY;
+    delete childEnv.DATABASE_URL;
+    delete childEnv.DATABASE_URL_PERSONAL;
+    delete childEnv.TODOIST_API_TOKEN;
+    delete childEnv.CC_MEMORY_ALERT_BOT_TOKEN;
+    delete childEnv.CC_MEMORY_ALERT_CHAT_ID;
+    delete childEnv.AWS_ACCESS_KEY_ID;
+    delete childEnv.AWS_SECRET_ACCESS_KEY;
+    // Strip all PG* variables (PGPASSWORD, PGHOST, etc.)
+    for (const key of Object.keys(childEnv)) {
+      if (key.startsWith('PG')) {
+        delete childEnv[key];
+      }
+    }
     const child = spawn(input.command, input.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv,
@@ -1256,6 +1272,13 @@ export class FallbackCaptureLlmAdapter implements CaptureLlmAdapter {
     return reasons.join('; ');
   }
 
+  worstCaseCallBudgetMsFor(provider: string): number {
+    if (provider === 'fallback' || provider === (this.fallback.provider ?? '')) {
+      return this.fallback.worstCaseCallBudgetMs;
+    }
+    return this.primary.worstCaseCallBudgetMs;
+  }
+
   takeTelemetry(): CaptureTelemetrySnapshot {
     const snapshot: CaptureTelemetrySnapshot = {
       primaryProvider: this.primary.provider ?? 'unknown',
@@ -1277,13 +1300,25 @@ export class FallbackCaptureLlmAdapter implements CaptureLlmAdapter {
       const target = (fp === 'fallback' || fp === (this.fallback.provider ?? ''))
         ? this.fallback
         : this.primary;
-      const response = await target.extract(request);
-      if (target === this.fallback) {
-        this._fallbackSuccess += 1;
-      } else {
-        this._primarySuccess += 1;
+      try {
+        const response = await target.extract(request);
+        if (target === this.fallback) {
+          this._fallbackSuccess += 1;
+        } else {
+          this._primarySuccess += 1;
+        }
+        return response;
+      } catch (error) {
+        // Mark retry as exhausted so worker does not retry again with forceProvider
+        if (error instanceof CaptureLlmValidationError) {
+          error.details.retryExhausted = true;
+          error.details.retryProvider = fp;
+        }
+        if (target === this.fallback) {
+          this._fallbackFailed += 1;
+        }
+        throw error;
       }
-      return response;
     }
 
     // Step 1: try primary

@@ -7,6 +7,7 @@ import {
   assessAutoCaptureExecution,
   buildSuccessState,
   decideFailureAlert,
+  decideWarningAlert,
   formatAutoCaptureFailureMessage,
   formatAutoCaptureRecoveryMessage,
   loadAutoCaptureAlertState,
@@ -508,6 +509,20 @@ export async function runAutoCaptureSupervisorTick(
 
   if (assessment.ok) {
     const nextState = buildSuccessState(previousState, now)
+
+    // Process warnings (fallback-success streak, spool capacity) even on healthy ticks
+    const warningDecision = decideWarningAlert(previousState, assessment, hostname, now)
+    // Carry warning streak/band state into nextState
+    nextState.fallbackSuccessStreak = warningDecision.updatedState.fallbackSuccessStreak
+    nextState.spoolCapWarningBand = warningDecision.updatedState.spoolCapWarningBand
+    if (warningDecision.send && alertTarget && warningDecision.message) {
+      try {
+        await sendTelegram(alertTarget, warningDecision.message)
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error)
+        stderr.write(`[run-auto-capture-supervisor] warning alert failed: ${messageText}\n`)
+      }
+    }
 
     if (!previousState.activeFingerprint) {
       await saveState(nextState)

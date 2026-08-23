@@ -1790,3 +1790,78 @@ describe('gemini-flash abort via generateContent injection', () => {
     await expect(adapter.extract(request())).rejects.toThrow('API key invalid');
   });
 });
+
+describe('claude-cli subprocess env stripping', () => {
+  it('never passes DATABASE_URL or alert tokens to claude-cli child', async () => {
+    const result = await runClaudeCliSubprocess({
+      command: process.execPath,
+      args: ['-e', `
+        const secrets = ['DATABASE_URL', 'DATABASE_URL_PERSONAL', 'TODOIST_API_TOKEN',
+          'CC_MEMORY_ALERT_BOT_TOKEN', 'CC_MEMORY_ALERT_CHAT_ID',
+          'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+          'PGPASSWORD', 'PGHOST', 'PGUSER'];
+        const found = secrets.filter(k => process.env[k] !== undefined);
+        process.stdout.write(JSON.stringify(found));
+      `],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: {
+        DATABASE_URL: 'test-db-value',
+        DATABASE_URL_PERSONAL: 'test-personal-value',
+        TODOIST_API_TOKEN: 'test-todoist-value',
+        CC_MEMORY_ALERT_BOT_TOKEN: 'test-bot-value',
+        CC_MEMORY_ALERT_CHAT_ID: 'test-chat-value',
+        AWS_ACCESS_KEY_ID: 'test-aws-key',
+        AWS_SECRET_ACCESS_KEY: 'test-aws-secret',
+        PGPASSWORD: 'test-pg-pass',
+        PGHOST: 'test-pg-host',
+        PGUSER: 'test-pg-user',
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+  });
+});
+
+describe('FallbackCaptureLlmAdapter forceProvider error handling', () => {
+  it('forced fallback error carries retryExhausted=true', async () => {
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_TIMEOUT', 'primary timeout');
+    });
+    const fExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad output');
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // Normal call: P→F(malformed) → error with retryProvider
+    const error1 = await expectValidationError(wrapper.extract(request()));
+    expect(error1.details.retryProvider).toBe('fallback');
+    expect(error1.details.retryExhausted).toBeUndefined();
+
+    // Forced call: forced F fails → retryExhausted=true
+    const error2 = await expectValidationError(
+      wrapper.extract(request(), { forceProvider: 'fallback' })
+    );
+    expect(error2.details.retryExhausted).toBe(true);
+    expect(error2.details.retryProvider).toBe('fallback');
+
+    // Telemetry: fallbackFailed should be counted for the forced failure
+    const snap = wrapper.takeTelemetry();
+    expect(snap.fallbackFailed).toBeGreaterThanOrEqual(1);
+  });
+
+  it('worstCaseCallBudgetMsFor returns fallback-only budget', () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', worstCaseCallBudgetMs: 91000 });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', worstCaseCallBudgetMs: 76000 });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    expect(wrapper.worstCaseCallBudgetMs).toBe(167000);  // sum
+    expect(wrapper.worstCaseCallBudgetMsFor('fallback')).toBe(76000);
+    expect(wrapper.worstCaseCallBudgetMsFor('claude-cli')).toBe(76000);
+    expect(wrapper.worstCaseCallBudgetMsFor('primary')).toBe(91000);
+    expect(wrapper.worstCaseCallBudgetMsFor('codex-cli')).toBe(91000);
+  });
+});

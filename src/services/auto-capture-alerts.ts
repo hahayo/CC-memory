@@ -54,6 +54,10 @@ export interface AutoCaptureAlertState {
   lastExitCode: number | null
   lastDeadLetterCount: number | null
   recoveryFailureCount?: number
+  /** Consecutive ticks with fallback-success > 0 (streak for escalation) */
+  fallbackSuccessStreak?: number
+  /** Spool capacity warning band already alerted (e.g. '70-89') — dedup same band */
+  spoolCapWarningBand?: string | null
 }
 
 export interface AutoCaptureAlertTarget {
@@ -224,9 +228,11 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const spoolCapPct = parseSpoolCapPct(summaryLine)
   const windowsCount = parseWindowsCount(summaryLine)
 
-  // Spool capacity warning (70-89%) vs unhealthy (>=90%)
+  // Warnings: spool capacity 70-89% or fallback-success > 0
   let warning: string | null = null
-  if (spoolCapPct >= 70 && spoolCapPct < 90) {
+  if (fallbackSuccessCount > 0) {
+    warning = `fallback-success=${fallbackSuccessCount} (codex may be logged out, falling back to haiku)`
+  } else if (spoolCapPct >= 70 && spoolCapPct < 90) {
     warning = `spool-cap-pct=${spoolCapPct} (warning: approaching capacity)`
   }
 
@@ -432,6 +438,75 @@ export function formatAutoCaptureRecoveryMessage(input: {
   return lines.join('\n')
 }
 
+export const FALLBACK_SUCCESS_STREAK_THRESHOLD = 3
+
+export interface AutoCaptureWarningDecision {
+  send: boolean
+  reason: 'fallback-streak' | 'spool-cap-new-band' | 'none'
+  message: string | null
+  updatedState: AutoCaptureAlertState
+}
+
+/**
+ * Decide whether to send a Telegram warning based on assessment.warning.
+ * - fallback-success > 0: increment streak; send when streak >= 3 consecutive ticks
+ * - spool capacity 70-89%: send once per band (dedup via spoolCapWarningBand)
+ * - Both reset their respective state when the condition clears.
+ */
+export function decideWarningAlert(
+  previousState: AutoCaptureAlertState,
+  assessment: AutoCaptureAssessment,
+  host: string,
+  now: Date
+): AutoCaptureWarningDecision {
+  const updatedState = { ...previousState }
+  const noWarning: AutoCaptureWarningDecision = { send: false, reason: 'none', message: null, updatedState }
+
+  // Fallback success streak
+  if (assessment.fallbackSuccessCount > 0) {
+    const prevStreak = previousState.fallbackSuccessStreak ?? 0
+    updatedState.fallbackSuccessStreak = prevStreak + 1
+    if (updatedState.fallbackSuccessStreak >= FALLBACK_SUCCESS_STREAK_THRESHOLD) {
+      const message = [
+        '⚠️ CC-memory auto-capture warning',
+        `host=${host}`,
+        `time=${toIsoString(now)}`,
+        `fallback-success streak=${updatedState.fallbackSuccessStreak}`,
+        'codex may be logged out, falling back to haiku',
+      ].join('\n')
+      return { send: true, reason: 'fallback-streak', message, updatedState }
+    }
+    noWarning.updatedState = updatedState
+    return noWarning
+  }
+  // Clear streak when no fallback-success
+  updatedState.fallbackSuccessStreak = 0
+
+  // Spool capacity warning (70-89%, one-shot per band)
+  if (assessment.warning && assessment.spoolCapPct >= 70 && assessment.spoolCapPct < 90) {
+    const band = '70-89'
+    if (previousState.spoolCapWarningBand !== band) {
+      updatedState.spoolCapWarningBand = band
+      const message = [
+        '⚠️ CC-memory auto-capture warning',
+        `host=${host}`,
+        `time=${toIsoString(now)}`,
+        `spool-cap-pct=${assessment.spoolCapPct} (approaching capacity)`,
+      ].join('\n')
+      return { send: true, reason: 'spool-cap-new-band', message, updatedState }
+    }
+    noWarning.updatedState = updatedState
+    return noWarning
+  }
+  // Clear spool cap band when below 70% (reset for next crossing)
+  if (assessment.spoolCapPct < 70) {
+    updatedState.spoolCapWarningBand = null
+  }
+
+  noWarning.updatedState = updatedState
+  return noWarning
+}
+
 function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
   if (!input || typeof input !== 'object') return createEmptyAutoCaptureAlertState()
   const state = input as Partial<AutoCaptureAlertState>
@@ -447,6 +522,10 @@ function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
       typeof state.lastDeadLetterCount === 'number' ? state.lastDeadLetterCount : null,
     recoveryFailureCount:
       typeof state.recoveryFailureCount === 'number' ? state.recoveryFailureCount : 0,
+    fallbackSuccessStreak:
+      typeof state.fallbackSuccessStreak === 'number' ? state.fallbackSuccessStreak : 0,
+    spoolCapWarningBand:
+      typeof state.spoolCapWarningBand === 'string' ? state.spoolCapWarningBand : null,
   }
 }
 

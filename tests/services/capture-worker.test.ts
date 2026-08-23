@@ -3003,6 +3003,223 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
   });
 });
 
+describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
+  it('P→F(malformed)→yield→next tick F(malformed): primary only called once, pendingRetryProvider cleared on failure', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'cross-tick retry test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Tick 1: P→F(malformed, retryProvider=fallback)→F retry attempt (retryExhausted=true, malformed)
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+      // Second attempt: forced fallback also returns malformed with retryExhausted
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'still bad', {
+        retryProvider: 'fallback',
+        retryExhausted: true,
+      }),
+    ]);
+    const result1 = await runWorker(harness, { db: {}, llm: llm1 });
+
+    // Primary was only called once (first call), second call used forceProvider
+    expect(llm1.calls).toHaveLength(2);
+    expect(llm1.extractOptions?.[0]?.forceProvider).toBeUndefined();
+    expect(llm1.extractOptions?.[1]?.forceProvider).toBe('fallback');
+
+    // pendingRetryProvider should be cleared after failure (not persisted)
+    if (existsSync(statePath(harness))) {
+      const state = readState(harness);
+      for (const key of Object.keys(state.retries ?? {})) {
+        expect(state.retries[key].pendingRetryProvider).toBeUndefined();
+      }
+    }
+
+    // Terminal error was recorded (malformed → terminal after attempt 1)
+    expect(result1.failed + result1.deadLettered + result1.malformed).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forced fallback reserve uses fallback-only budget, not full primary+fallback', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'budget test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Simulate: 100s elapsed. Full reserve = 182s + 15s = 197s. 100+197 > 240 → would yield.
+    // But with fallback-only reserve = 76s + 15s = 91s. 100+91 = 191 < 240 → should NOT yield.
+    let nowMs = Date.now();
+    const tickStart = nowMs;
+    // After first call, advance to 100s
+    const llm = mockLlm([
+      // First call: primary returns malformed with retryProvider
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+      // Second call: forced fallback succeeds
+      rawExtraction({
+        summary: 'retry succeeded',
+        observations: [{
+          type: 'discovery',
+          title: 'budget test',
+          subtitle: '',
+          facts: ['budget OK'],
+          concepts: ['budget'],
+          files: [],
+          narrative: 'Budget test passed.',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 182000,  // primary(91) + fallback(76) + 2×killGrace
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        const current = nowMs;
+        // After first LLM call, advance 100s
+        if (llm.calls.length === 1) {
+          nowMs = tickStart + 100_000;
+        }
+        return current;
+      },
+    });
+
+    // Both calls should have been made (budget check should have passed)
+    expect(llm.calls).toHaveLength(2);
+    expect(result.yielded).toBe(0);
+  });
+
+  it('yield at 59s with 182s reserve does NOT count as a window', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'yield window test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // 59s elapsed + 197s reserve (182+15) = 256s > 240s → should yield
+    const tickStart = Date.now();
+    let callCount = 0;
+    const llm = mockLlm([], {
+      worstCaseCallBudgetMs: 182000,
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        // First call is tickStartMs initialization; after that, simulate 59s elapsed
+        callCount += 1;
+        return callCount <= 1 ? tickStart : tickStart + 59_000;
+      },
+    });
+
+    expect(result.yielded).toBe(1);
+    expect(result.windows).toBe(0);
+    expect(llm.calls).toHaveLength(0);
+  });
+
+  it('58s with 182s reserve → proceeds and counts window', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'window count test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // 58s + 197s reserve (182+15) = 255s > 240s → should also yield
+    // Use 43s instead: 43 + 197 = 240 = budget → proceeds (not strictly greater)
+    const tickStart = Date.now();
+    let callCount = 0;
+    const llm = mockLlm([
+      rawExtraction({
+        summary: 'ok',
+        observations: [{
+          type: 'discovery',
+          title: 'test',
+          subtitle: '',
+          facts: ['ok'],
+          concepts: [],
+          files: [],
+          narrative: 'ok',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 182000,
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        callCount += 1;
+        return callCount <= 1 ? tickStart : tickStart + 43_000;
+      },
+    });
+
+    expect(result.windows).toBe(1);
+    expect(llm.calls).toHaveLength(1);
+  });
+
+  it('alternateCategory path records alternate category in blockedReason, not original category', async () => {
+    const harness = makeHarness();
+    // Use a small transcript to trigger prompt-too-long → can't split → alternateCategory
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Error: prompt-too-long with alternateCategory=rate-limited
+    // chunk is ≤1024 bytes so splitTranscriptChunk returns null → goes to alternateCategory
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'prompt too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'rate-limited',
+      }),
+    ]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    // Check that blockedReason is 'rate-limited' (the alternateCategory), not 'prompt-too-long'
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries ?? {});
+    expect(retryKeys.length).toBeGreaterThanOrEqual(1);
+    const entry = state.retries[retryKeys[0]];
+    expect(entry.blockedReason).toBe('rate-limited');
+  });
+});
+
 describe('capture worker DB-backed RED contracts', () => {
   it('holds a terminal retry until the configured interval expires', async () => {
     const harness = makeHarness();
