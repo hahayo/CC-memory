@@ -2945,8 +2945,17 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
     expect(llm.extractOptions?.[0]?.forceProvider).toBeUndefined();
     // Second call: forceProvider='fallback' from retryProvider in error details
     expect(llm.extractOptions?.[1]?.forceProvider).toBe('fallback');
-    // Result should show successful processing
+    // Second call carries the retry prompt prefix
+    expect(llm.calls[1].retryPromptPrefix).toBeDefined();
+    // Result should show the extraction was processed
     expect(result.llmRetries).toBeGreaterThanOrEqual(1);
+    // pendingRetryProvider should be cleared after success
+    if (existsSync(statePath(harness))) {
+      const state = readState(harness);
+      for (const key of Object.keys(state.retries ?? {})) {
+        expect(state.retries[key].pendingRetryProvider).toBeUndefined();
+      }
+    }
   });
 
   it('six ticks with both providers rate-limited: retry state stays empty, zero dead-letter', async () => {
@@ -2976,23 +2985,19 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
       results.push(result);
     }
 
-    // All ticks should have been stopped by rate-limiting (rateLimited > 0)
+    // All ticks should have been stopped by rate-limiting
     for (const r of results) {
       expect(r.rateLimited).toBeGreaterThan(0);
+      expect(r.deadLettered).toBe(0);
     }
 
-    // No dead-letters should have been written
-    const files = readdirSync(harness.spoolDir);
-    const deadLetterFiles = files.filter((f: string) => f.includes('dead-letter'));
-    expect(deadLetterFiles).toHaveLength(0);
-
-    // Retry state should be empty (rate-limited does not increment attempts)
-    const stateFile = join(harness.spoolDir, '.cc-capture-state.json');
+    // State file: if it exists, no retry entry should have attempts > 0
+    const stateFile = statePath(harness);
     if (existsSync(stateFile)) {
-      const state = JSON.parse(readFileSync(stateFile, 'utf-8')) as CaptureStateV2;
-      const retryEntry = state.retries?.[Object.keys(state.retries ?? {})[0]];
-      if (retryEntry) {
-        expect(retryEntry.attempts).toBe(0);
+      const state = readState(harness);
+      const retryKeys = Object.keys(state.retries ?? {});
+      for (const key of retryKeys) {
+        expect(state.retries[key].attempts).toBe(0);
       }
     }
   });
