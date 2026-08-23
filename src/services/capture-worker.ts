@@ -2131,7 +2131,7 @@ export async function runCaptureWorkerOnce(
                   : undefined;
               switch (action) {
                 case 'retry-malformed': {
-                  if (attempt === 0) {
+                  if (attempt === 0 && !retryExhausted) {
                     result.llmRetries += 1;
                     retryProvider = errorRetryProvider;
                     continue;

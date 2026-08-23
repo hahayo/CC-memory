@@ -3058,8 +3058,8 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
       timestamp: '2026-01-01T00:00:01.000Z',
     });
 
-    // Simulate: 100s elapsed. Full reserve = 182s + 15s = 197s. 100+197 > 240 → would yield.
-    // But with fallback-only reserve = 76s + 15s = 91s. 100+91 = 191 < 240 → should NOT yield.
+    // 100s elapsed. Full reserve = 167s + 15s = 182s. 100+182 = 282 > 240 → old code would yield.
+    // With fallback-only reserve = 76s + 15s = 91s. 100+91 = 191 ≤ 240 → should NOT yield.
     let nowMs = Date.now();
     const tickStart = nowMs;
     // After first call, advance to 100s
@@ -3083,7 +3083,7 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
         model: 'haiku',
       }),
     ], {
-      worstCaseCallBudgetMs: 182000,  // primary(91) + fallback(76) + 2×killGrace
+      worstCaseCallBudgetMs: 167000,  // primary(91) + fallback(76); reserve = 167 + 15 = 182s
       worstCaseCallBudgetMsFor(provider: string): number {
         return provider === 'fallback' ? 76000 : 91000;
       },
@@ -3123,7 +3123,7 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
     const tickStart = Date.now();
     let callCount = 0;
     const llm = mockLlm([], {
-      worstCaseCallBudgetMs: 182000,
+      worstCaseCallBudgetMs: 167000,
     });
 
     const result = await runWorker(harness, {
@@ -3153,8 +3153,7 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
       timestamp: '2026-01-01T00:00:01.000Z',
     });
 
-    // 58s + 197s reserve (182+15) = 255s > 240s → should also yield
-    // Use 43s instead: 43 + 197 = 240 = budget → proceeds (not strictly greater)
+    // 58s + 182s reserve (167+15) = 240s = budget → proceeds (not strictly greater)
     const tickStart = Date.now();
     let callCount = 0;
     const llm = mockLlm([
@@ -3172,7 +3171,7 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
         model: 'haiku',
       }),
     ], {
-      worstCaseCallBudgetMs: 182000,
+      worstCaseCallBudgetMs: 167000,
     });
 
     const result = await runWorker(harness, {
@@ -3180,7 +3179,7 @@ describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
       llm,
       nowMs: () => {
         callCount += 1;
-        return callCount <= 1 ? tickStart : tickStart + 43_000;
+        return callCount <= 1 ? tickStart : tickStart + 58_000;
       },
     });
 
