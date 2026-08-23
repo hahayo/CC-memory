@@ -3,15 +3,24 @@
 // CC-memory v0.5 M2b capture LLM adapter + schema validation.
 
 import { spawn } from 'node:child_process';
-import { constants, accessSync } from 'node:fs';
+import { constants, accessSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { GoogleGenAI } from '@google/genai';
+import {
+  buildCodexSandboxCommand,
+  findCodexPackageRoot,
+  findCodexHome,
+} from './codex-sandbox.js';
 
 export const DEFAULT_CAPTURE_LLM_PROVIDER = 'claude-cli';
 export const CLAUDE_CLI_PROVIDER_ID = 'claude-cli';
+export const CODEX_CLI_CAPTURE_LLM_PROVIDER = 'codex-cli';
 export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
 export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
 export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
+export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_CODEX_CLI_TIMEOUT_MS = 90_000;
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
 export const DEFAULT_GEMINI_FLASH_TIMEOUT_MS = 90_000;
 export const KILL_GRACE_MS = 1_000;
@@ -174,11 +183,57 @@ export interface ClaudeCliRunResult {
 
 export type ClaudeCliRunner = (request: ClaudeCliRunRequest) => Promise<ClaudeCliRunResult>;
 
+export interface CodexCliRunRequest {
+  command: string;
+  args: string[];
+  stdin: string;
+  timeoutMs: number;
+  /** Spawn env — must contain ONLY the sandbox-specified keys (PATH). */
+  env: Record<string, string>;
+  /** Host path where codex writes the result JSON (caller reads it). */
+  outputFile: string;
+}
+
+export interface CodexCliRunResult {
+  stdout: string;
+  stderr?: string;
+  exitCode: number | null;
+  signal?: string | null;
+  timedOut?: boolean;
+}
+
+export type CodexCliRunner = (request: CodexCliRunRequest) => Promise<CodexCliRunResult>;
+
+export interface CodexSandboxCommandLike {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cleanup(): Promise<void>;
+  schemaFile: string;
+  outputFile: string;
+}
+
+export interface CodexSandboxOptionsLike {
+  codexPackageRoot: string;
+  hostCodexHome: string;
+  hostOutputDir: string;
+  hostCwd: string;
+  model: string;
+  timeoutMs: number;
+  stagingRoot?: string;
+}
+
+export type CodexSandboxBuilder = (opts: CodexSandboxOptionsLike) => CodexSandboxCommandLike;
+
 export interface CreateCaptureLlmAdapterOptions {
   env?: Record<string, string | undefined>;
   stdout?: { write(chunk: string): unknown };
   runClaudeCli?: ClaudeCliRunner;
   findClaudeCli?: (env: Record<string, string | undefined>) => string;
+  runCodexCli?: CodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: CodexSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
   emitDisabledWarning?: boolean;
 }
 
@@ -777,16 +832,313 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Codex CLI subprocess runner + adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Default codex package root finder — delegates to findCodexPackageRoot()
+ * from codex-sandbox.ts.
+ */
+function defaultFindCodexCli(): string | null {
+  return findCodexPackageRoot();
+}
+
+/**
+ * Spawn a sandboxed codex exec subprocess.
+ *
+ * Contract:
+ *   - `input.env` is passed as-is to `spawn()` — no merging with `process.env`.
+ *     This prevents /proc/1/environ from leaking host secrets.
+ *   - Timeout: SIGTERM → 1 s grace → SIGKILL (mirrors runClaudeCliSubprocess).
+ *   - Result is read from `input.outputFile` by the caller after exit.
+ */
+export function runCodexCliSubprocess(input: CodexCliRunRequest): Promise<CodexCliRunResult> {
+  return new Promise((resolve, reject) => {
+    // Contract (b): only pass cmd.env — never merge process.env.
+    const child = spawn(input.command, input.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: input.env,
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+
+    const finish = (result: CodexCliRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      resolve(result);
+    };
+
+    // Contract (c): adapter enforces timeout with SIGTERM → 1s → SIGKILL.
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, KILL_GRACE_MS);
+    }, input.timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(error);
+    });
+    child.on('close', (exitCode, signal) => {
+      finish({
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        timedOut,
+      });
+    });
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(input.stdin);
+  });
+}
+
+/**
+ * Detect model-unavailable messages in codex stderr/stdout.
+ * Phase 0 finding: sandbox + clean env → "The 'gpt-5.6-luna' model requires
+ * a newer version of Codex" or "unknown model" or "unknown variant".
+ */
+function isCodexModelUnavailable(combined: string): boolean {
+  const lower = combined.toLowerCase();
+  return lower.includes('requires a newer version') ||
+    lower.includes('unknown model') ||
+    lower.includes('unknown variant');
+}
+
+/**
+ * Detect rate-limit / quota messages in codex output.
+ * Codex reports quota exhaustion as a text message or a structured error.
+ */
+function isCodexRateLimited(combined: string): boolean {
+  const lower = combined.toLowerCase();
+  return lower.includes('rate limit') ||
+    lower.includes('rate_limit') ||
+    lower.includes('quota') ||
+    lower.includes('too many requests') ||
+    /\b429\b/.test(lower);
+}
+
+class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider = CODEX_CLI_CAPTURE_LLM_PROVIDER;
+  readonly worstCaseCallBudgetMs: number;
+
+  constructor(
+    readonly model: string,
+    private readonly codexPackageRoot: string,
+    private readonly timeoutMs: number,
+    private readonly runCodexCli: CodexCliRunner,
+    private readonly buildSandboxFn: CodexSandboxBuilder,
+    private readonly spoolDir: string
+  ) {
+    this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    // Contract (d): hostOutputDir and hostCwd created by adapter, deleted in finally.
+    const hostOutputDir = mkdtempSync(join(tmpdir(), 'ccm-codex-out-'));
+    const hostCwd = mkdtempSync(join(tmpdir(), 'ccm-codex-cwd-'));
+
+    // cmd may be undefined if buildSandboxFn throws (e.g. missing bwrap or auth.json).
+    let cmd: CodexSandboxCommandLike | undefined;
+
+    try {
+      // Contract (e): explicit stagingRoot derived from CC_MEMORY_SPOOL_DIR (or default spool),
+      // walking up one level then into codex-sandbox/. This ensures the sandbox staging
+      // area is co-located with the spool directory rather than using the sandbox's default.
+      const stagingRoot = join(this.spoolDir, '..', 'codex-sandbox');
+
+      try {
+        cmd = this.buildSandboxFn({
+          codexPackageRoot: this.codexPackageRoot,
+          hostCodexHome: findCodexHome(),
+          hostOutputDir,
+          hostCwd,
+          model: this.model,
+          timeoutMs: this.timeoutMs,
+          stagingRoot,
+        });
+      } catch (error) {
+        // Sandbox build failure (missing bwrap, missing auth.json, etc.) →
+        // CAPTURE_LLM_DISABLED so FallbackCaptureLlmAdapter can try haiku.
+        throw new CaptureLlmValidationError(
+          'CAPTURE_LLM_DISABLED',
+          `codex sandbox unavailable: ${errorMessage(error)}`,
+          { model: this.model, provider: this.provider, cause: errorMessage(error) }
+        );
+      }
+
+      // Write the output schema so codex knows what shape to produce.
+      writeFileSync(cmd.schemaFile, JSON.stringify(CAPTURE_EXTRACTION_JSON_SCHEMA));
+
+      let result: CodexCliRunResult;
+      try {
+        result = await this.runCodexCli({
+          command: cmd.command,
+          args: cmd.args,
+          stdin: buildCapturePrompt(request, { includeOpeningInstructions: true }),
+          timeoutMs: this.timeoutMs,
+          env: cmd.env,
+          outputFile: cmd.outputFile,
+        });
+      } catch (error) {
+        if (isErrnoCode(error, 'ENOENT')) {
+          throw new CaptureLlmValidationError(
+            'CAPTURE_LLM_DISABLED',
+            'codex CLI (bwrap) not found; ensure bubblewrap is installed',
+            { model: this.model, provider: this.provider }
+          );
+        }
+        throw new CaptureLlmValidationError('LLM_EXTRACT_FAILED', 'codex-cli subprocess failed', {
+          model: this.model,
+          provider: this.provider,
+          cause: errorMessage(error),
+        });
+      }
+
+      // Contract (c): timeout → LLM_TIMEOUT with default subtype service-or-network.
+      if (result.timedOut) {
+        throw new CaptureLlmValidationError(
+          'LLM_TIMEOUT',
+          `codex-cli timed out after ${this.timeoutMs}ms`,
+          {
+            model: this.model,
+            provider: this.provider,
+            timeoutMs: this.timeoutMs,
+            timeoutSubtype: 'service-or-network',
+          }
+        );
+      }
+
+      if (result.exitCode !== 0) {
+        // Check both stdout AND stderr combined (Phase 1 fix: no masking bug).
+        const combined = `${result.stdout}\n${result.stderr ?? ''}`;
+
+        // Model unavailable → CAPTURE_LLM_DISABLED (not silent degradation).
+        if (isCodexModelUnavailable(combined)) {
+          throw new CaptureLlmValidationError(
+            'CAPTURE_LLM_DISABLED',
+            `codex model unavailable: ${this.model}`,
+            {
+              model: this.model,
+              provider: this.provider,
+              ...optionalRawOutput(combined.trim()),
+            }
+          );
+        }
+
+        // Rate limit / quota → LLM_RATE_LIMITED.
+        if (isCodexRateLimited(combined)) {
+          throw new CaptureLlmValidationError(
+            'LLM_RATE_LIMITED',
+            'codex-cli rate limited',
+            {
+              model: this.model,
+              provider: this.provider,
+              ...optionalRawOutput(combined.trim()),
+            }
+          );
+        }
+
+        // Generic nonzero exit.
+        throw new CaptureLlmValidationError(
+          'CODEX_CLI_EXIT_NONZERO',
+          `codex-cli exited with code ${result.exitCode ?? 'null'}`,
+          {
+            model: this.model,
+            provider: this.provider,
+            exitCode: result.exitCode,
+            signal: result.signal ?? null,
+            ...optionalRawOutput(combined.trim()),
+          }
+        );
+      }
+
+      // Read result from the output file (codex writes to -o <file>).
+      let outputText: string;
+      try {
+        outputText = readFileSync(cmd.outputFile, 'utf-8');
+      } catch (error) {
+        throw new CaptureLlmValidationError(
+          'LLM_MALFORMED_JSON',
+          'codex-cli output file missing or unreadable',
+          {
+            model: this.model,
+            provider: this.provider,
+            cause: errorMessage(error),
+          }
+        );
+      }
+
+      // Validate the extraction JSON.
+      let text: string;
+      try {
+        text = jsonObjectCandidate(outputText);
+        parseCaptureLlmExtraction({ model: this.model, text });
+      } catch (error) {
+        if (error instanceof CaptureLlmValidationError) {
+          throw ensureValidationErrorHasModel(error, this.model, this.provider, {
+            rawOutput: outputText,
+          });
+        }
+        throw error;
+      }
+
+      return { model: this.model, text };
+    } finally {
+      // Contract (d): cleanup all three: hostOutputDir, hostCwd, and sandbox disposable dir.
+      if (cmd) await cmd.cleanup();
+      try { rmSync(hostOutputDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      try { rmSync(hostCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+}
+
+/** Injection seam for testing without a real Gemini API key. */
+export type GeminiGenerateContent = (
+  request: { model: string; contents: string; config?: { abortSignal?: AbortSignal } }
+) => Promise<{ text?: string | null }>;
+
 class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly provider = GEMINI_FLASH_CAPTURE_LLM_PROVIDER;
   readonly worstCaseCallBudgetMs: number;
-  private readonly ai: GoogleGenAI;
+  private readonly generateFn: GeminiGenerateContent;
   private readonly timeoutMs: number;
 
-  constructor(readonly model: string, apiKey: string, timeoutMs: number) {
-    this.ai = new GoogleGenAI({ apiKey });
+  constructor(
+    readonly model: string,
+    apiKey: string,
+    timeoutMs: number,
+    generateContent?: GeminiGenerateContent
+  ) {
     this.timeoutMs = timeoutMs;
     this.worstCaseCallBudgetMs = timeoutMs;
+    if (generateContent) {
+      this.generateFn = generateContent;
+    } else {
+      const ai = new GoogleGenAI({ apiKey });
+      this.generateFn = (req) => ai.models.generateContent(req);
+    }
   }
 
   takeTelemetry(): CaptureTelemetrySnapshot {
@@ -797,7 +1149,7 @@ class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await this.ai.models.generateContent({
+      const response = await this.generateFn({
         model: this.model,
         contents: buildCapturePrompt(request, { includeOpeningInstructions: true }),
         config: {
@@ -1096,6 +1448,31 @@ function createSingleAdapter(
     );
   }
 
+  if (provider === CODEX_CLI_CAPTURE_LLM_PROVIDER) {
+    const model = env.CC_CAPTURE_CODEX_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL;
+    const timeoutMs = parsePositiveIntegerEnv(
+      env.CC_CAPTURE_CODEX_TIMEOUT_MS,
+      DEFAULT_CODEX_CLI_TIMEOUT_MS
+    );
+    const codexPackageRoot = (options.findCodexCli ?? defaultFindCodexCli)();
+    if (!codexPackageRoot) {
+      const reason = 'codex CLI (@openai/codex) not found; install globally and ensure the native binary is present';
+      if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+      return new DisabledCaptureLlmAdapter(model, reason, provider);
+    }
+
+    const spoolDir = env.CC_MEMORY_SPOOL_DIR?.trim() ||
+      join(process.env.HOME ?? '/tmp', '.cache', 'cc-memory', 'spool');
+    return new CodexCliCaptureLlmAdapter(
+      model,
+      codexPackageRoot,
+      timeoutMs,
+      options.runCodexCli ?? runCodexCliSubprocess,
+      options.buildSandbox ?? buildCodexSandboxCommand,
+      spoolDir
+    );
+  }
+
   if (provider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER) {
     return new UnsupportedCaptureLlmAdapter('unknown', provider);
   }
@@ -1112,7 +1489,7 @@ function createSingleAdapter(
     env.CC_CAPTURE_GEMINI_TIMEOUT_MS,
     DEFAULT_GEMINI_FLASH_TIMEOUT_MS
   );
-  return new GeminiFlashCaptureLlmAdapter(model, apiKey, geminiTimeoutMs);
+  return new GeminiFlashCaptureLlmAdapter(model, apiKey, geminiTimeoutMs, options.generateContent);
 }
 
 export function createCaptureLlmAdapter(

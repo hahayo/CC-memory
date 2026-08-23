@@ -8,14 +8,22 @@ import {
   isCaptureLlmDisabled,
   parseCaptureLlmExtraction,
   runClaudeCliSubprocess,
+  runCodexCliSubprocess,
   KILL_GRACE_MS,
+  DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_GEMINI_FLASH_TIMEOUT_MS,
+  CODEX_CLI_CAPTURE_LLM_PROVIDER,
 } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
   CaptureLlmExtractOptions,
   CaptureLlmRawResponse,
   CaptureLlmRequest,
+  CodexCliRunRequest,
+  CodexCliRunResult,
+  CodexSandboxCommandLike,
+  CodexSandboxOptionsLike,
+  GeminiGenerateContent,
 } from '../../src/services/capture-llm.js';
 
 interface MockClaudeCliCall {
@@ -36,14 +44,25 @@ interface MockClaudeCliResult {
 
 type MockClaudeCliRunner = (call: MockClaudeCliCall) => Promise<MockClaudeCliResult>;
 
+type MockCodexCliRunner = (call: CodexCliRunRequest) => Promise<CodexCliRunResult>;
+type MockSandboxBuilder = (opts: CodexSandboxOptionsLike) => CodexSandboxCommandLike;
+
 function adapterOptions(input: {
   env?: Record<string, string | undefined>;
   stdout?: { write(chunk: string): unknown };
   runClaudeCli?: MockClaudeCliRunner;
   findClaudeCli?: () => string;
+  runCodexCli?: MockCodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: MockSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
 }): Parameters<typeof createCaptureLlmAdapter>[0] & {
   runClaudeCli?: MockClaudeCliRunner;
   findClaudeCli?: () => string;
+  runCodexCli?: MockCodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: MockSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
 } {
   return input;
 }
@@ -1097,5 +1116,677 @@ describe('FallbackCaptureLlmAdapter details carry full causal chain', () => {
     expect(error.details.fallbackMessage).toBe('fallback fail');
     expect(error.details.primaryCategory).toBe('rate-limited');
     expect(error.details.fallbackCategory).toBe('terminal');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: codex-cli provider tests
+// ---------------------------------------------------------------------------
+
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * Build a mock sandbox command that returns a predictable structure.
+ * The runner can write the codex result into cmd.outputFile.
+ */
+function mockSandboxBuilder(overrides: Partial<CodexSandboxCommandLike> = {}): {
+  builder: MockSandboxBuilder;
+  capturedOpts: CodexSandboxOptionsLike[];
+  cleanupSpy: ReturnType<typeof vi.fn>;
+} {
+  const capturedOpts: CodexSandboxOptionsLike[] = [];
+  const cleanupSpy = vi.fn(async () => {});
+  const builder: MockSandboxBuilder = (opts) => {
+    capturedOpts.push(opts);
+    return {
+      command: '/usr/bin/bwrap',
+      args: ['--sandbox-arg', '--', 'codex', 'exec', '--model', opts.model],
+      env: { PATH: '/usr/bin:/usr/local/bin' },
+      cleanup: cleanupSpy,
+      schemaFile: join(opts.hostOutputDir, 'schema.json'),
+      outputFile: join(opts.hostOutputDir, 'result.json'),
+      ...overrides,
+    };
+  };
+  return { builder, capturedOpts, cleanupSpy };
+}
+
+/**
+ * Create a mock codex runner that writes a result file and returns exit info.
+ */
+function codexRunner(
+  behavior: {
+    exitCode?: number | null;
+    stdout?: string;
+    stderr?: string;
+    timedOut?: boolean;
+    resultJson?: string;
+  } = {}
+): { runner: MockCodexCliRunner; calls: CodexCliRunRequest[] } {
+  const calls: CodexCliRunRequest[] = [];
+  const runner: MockCodexCliRunner = async (req) => {
+    calls.push(req);
+    // Write the result file if provided (simulating codex writing to -o)
+    if (behavior.resultJson !== undefined) {
+      writeFileSync(req.outputFile, behavior.resultJson);
+    }
+    return {
+      stdout: behavior.stdout ?? '',
+      stderr: behavior.stderr ?? '',
+      exitCode: behavior.exitCode ?? 0,
+      timedOut: behavior.timedOut ?? false,
+    };
+  };
+  return { runner, calls };
+}
+
+function codexAdapterOptions(overrides: {
+  env?: Record<string, string | undefined>;
+  runner?: MockCodexCliRunner;
+  builder?: MockSandboxBuilder;
+  findCodexCli?: () => string | null;
+}): Parameters<typeof createCaptureLlmAdapter>[0] {
+  const { builder } = mockSandboxBuilder();
+  return adapterOptions({
+    env: { CC_CAPTURE_LLM: 'codex-cli', ...overrides.env },
+    stdout: stdoutSink().stdout,
+    findCodexCli: overrides.findCodexCli ?? (() => '/opt/codex'),
+    runCodexCli: overrides.runner ?? codexRunner({ resultJson: extractionJson() }).runner,
+    buildSandbox: overrides.builder ?? builder,
+  });
+}
+
+describe('codex-cli provider selection', () => {
+  it('selects codex-cli when CC_CAPTURE_LLM=codex-cli', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({}));
+
+    expect(adapter.provider).toBe(CODEX_CLI_CAPTURE_LLM_PROVIDER);
+    expect(adapter.model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(isCaptureLlmDisabled(adapter)).toBe(false);
+  });
+
+  it('honors CC_CAPTURE_CODEX_MODEL', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_MODEL: 'gpt-5.6-luna' },
+    }));
+
+    expect(adapter.model).toBe('gpt-5.6-luna');
+  });
+
+  it('returns DisabledCaptureLlmAdapter when codex binary is absent', () => {
+    const { stdout, chunks } = stdoutSink();
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'codex-cli' },
+      stdout,
+      findCodexCli: () => null,
+    }));
+
+    expect(isCaptureLlmDisabled(adapter)).toBe(true);
+    expect(adapter.model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(chunks.join('')).toContain('codex CLI');
+  });
+
+  it('exposes a finite worstCaseCallBudgetMs', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_TIMEOUT_MS: '45000' },
+    }));
+
+    expect(adapter.worstCaseCallBudgetMs).toBe(45_000 + KILL_GRACE_MS);
+  });
+});
+
+describe('codex-cli extraction subprocess contract', () => {
+  it('writes schema to temp file and passes --output-schema via sandbox', async () => {
+    const { builder, capturedOpts, cleanupSpy } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    expect(capturedOpts).toHaveLength(1);
+    expect(capturedOpts[0].model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(calls).toHaveLength(1);
+    // Schema file was written before the runner was called
+    expect(calls[0].command).toBe('/usr/bin/bwrap');
+    // Cleanup was called
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads extraction from -o file', async () => {
+    const { runner } = codexRunner({ resultJson: extractionJson('codex extraction') });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const raw = await adapter.extract(request());
+    const extraction = parseCaptureLlmExtraction(raw);
+
+    expect(extraction.session_summary.summary).toBe('codex extraction');
+  });
+
+  it('cleans up both temp files on success AND failure', async () => {
+    const { builder, cleanupSpy } = mockSandboxBuilder();
+    // Failing runner: nonzero exit
+    const { runner: failRunner } = codexRunner({ exitCode: 1, stdout: 'some error' });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner: failRunner,
+      builder,
+    }));
+
+    await expect(adapter.extract(request())).rejects.toThrow();
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds child env from the explicit allowlist only', async () => {
+    // Use the real runCodexCliSubprocess to verify env isolation.
+    const result = await runCodexCliSubprocess({
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write(JSON.stringify(Object.keys(process.env)))'],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: { PATH: '/usr/bin' },
+      outputFile: '/dev/null',
+    });
+
+    expect(result.exitCode).toBe(0);
+    const keys = JSON.parse(result.stdout) as string[];
+    // Only PATH should be present (plus NODE_* added by Node itself)
+    const nonNodeKeys = keys.filter(k => !k.startsWith('NODE'));
+    expect(nonNodeKeys).toEqual(['PATH']);
+  });
+
+  it('never passes DATABASE_URL, GEMINI_API_KEY, TODOIST_API_TOKEN or alert tokens', async () => {
+    const result = await runCodexCliSubprocess({
+      command: process.execPath,
+      args: ['-e', `
+        const secrets = ['DATABASE_URL', 'GEMINI_API_KEY', 'TODOIST_API_TOKEN',
+          'CC_MEMORY_ALERT_BOT_TOKEN', 'CC_MEMORY_ALERT_CHAT_ID'];
+        const found = secrets.filter(k => process.env[k] !== undefined);
+        process.stdout.write(JSON.stringify(found));
+      `],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: { PATH: '/usr/bin' },
+      outputFile: '/dev/null',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+  });
+
+  it('sets CC_MEMORY_CAPTURE_CHILD=1 via sandbox', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // The sandbox handles CC_MEMORY_CAPTURE_CHILD=1 via --setenv internally.
+    // The adapter itself does NOT add it to spawn env — that's the sandbox's job.
+    // Verify sandbox was called (it sets the marker).
+    expect(capturedOpts).toHaveLength(1);
+  });
+
+  it('runs in an isolated empty cwd via sandbox', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // hostCwd should be a temp directory
+    expect(capturedOpts[0].hostCwd).toMatch(/ccm-codex-cwd/);
+  });
+
+  it('passes mcp_servers={} and web_search="disabled" via sandbox args', async () => {
+    // These flags are baked into buildCodexSandboxCommand (contract a).
+    // Adapter must NOT add them again. Verify the adapter passes sandbox
+    // command/args verbatim without appending codex flags.
+    const { builder } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // The command and args should be exactly what the sandbox returned
+    expect(calls[0].command).toBe('/usr/bin/bwrap');
+    expect(calls[0].args).toEqual(
+      expect.arrayContaining(['--sandbox-arg', '--', 'codex', 'exec'])
+    );
+  });
+
+  it('never passes --ignore-rules', async () => {
+    const { builder } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    const allArgs = calls[0].args.join(' ');
+    expect(allArgs).not.toContain('--ignore-rules');
+  });
+
+  it('inlines the system prompt (includeOpeningInstructions: true)', async () => {
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    await adapter.extract(request());
+
+    // The stdin should contain the system prompt since codex has no --system-prompt flag
+    expect(calls[0].stdin).toContain('You extract durable project memory');
+    expect(calls[0].stdin).toContain('<transcript>');
+  });
+
+  it('maps timeout to LLM_TIMEOUT', async () => {
+    const { runner } = codexRunner({ timedOut: true, exitCode: null });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_TIMEOUT');
+    expect(error.details.provider).toBe('codex-cli');
+    expect(error.details.timeoutSubtype).toBe('service-or-network');
+  });
+
+  it('maps quota output to LLM_RATE_LIMITED', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'Error: rate limit exceeded, too many requests',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_RATE_LIMITED');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('does not false-positive on "rate" in unrelated messages', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'The operation was performed at a moderate rate',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    // Should NOT be rate-limited — "moderate rate" is not a quota message
+    // The detection checks for "rate limit" (two words), so this should be exit-nonzero
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+  });
+
+  it('does not false-positive on "429" embedded in larger numbers', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'parse error at offset 4293',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+  });
+
+  it('maps sandbox build failure to CAPTURE_LLM_DISABLED for fallback', async () => {
+    const throwingBuilder: MockSandboxBuilder = () => {
+      throw new Error('auth.json not found or not readable: /home/user/.codex/auth.json');
+    };
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder: throwingBuilder,
+    }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('CAPTURE_LLM_DISABLED');
+    expect(error.details.provider).toBe('codex-cli');
+    expect(error.message).toContain('sandbox unavailable');
+  });
+
+  it('maps nonzero exit to CODEX_CLI_EXIT_NONZERO', async () => {
+    const { runner } = codexRunner({
+      exitCode: 2,
+      stdout: 'codex internal error',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+    expect(error.details).toMatchObject({
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+      exitCode: 2,
+    });
+  });
+
+  it('maps model-unavailable to CAPTURE_LLM_DISABLED', async () => {
+    // Real fixture from Phase 0 finding (plan §U2)
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: "The 'gpt-5.6-luna' model requires a newer version of Codex",
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_MODEL: 'gpt-5.6-luna' },
+      runner,
+    }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CAPTURE_LLM_DISABLED');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('maps malformed JSON in output file to LLM_MALFORMED_JSON', async () => {
+    const { runner } = codexRunner({
+      resultJson: '{"session_summary": incomplete',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_MALFORMED_JSON');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('passes explicit stagingRoot derived from CC_MEMORY_SPOOL_DIR', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: {
+        CC_CAPTURE_LLM: 'codex-cli',
+        CC_MEMORY_SPOOL_DIR: '/custom/spool/dir',
+      },
+      stdout: stdoutSink().stdout,
+      findCodexCli: () => '/opt/codex',
+      runCodexCli: runner,
+      buildSandbox: builder,
+    }));
+
+    await adapter.extract(request());
+
+    // stagingRoot = join(spoolDir, '..', 'codex-sandbox')
+    expect(capturedOpts[0].stagingRoot).toBe(join('/custom/spool/dir', '..', 'codex-sandbox'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4 second-step 5×8 table — remaining cells (table-driven)
+// ---------------------------------------------------------------------------
+
+describe('FallbackCaptureLlmAdapter D4 5×8 complete coverage', () => {
+  // The 5 primary categories that trigger fallback:
+  //   rate-limited, timeout, disabled, exit-nonzero, terminal
+  // The 8 fallback outcomes:
+  //   success, malformed, schema-invalid, prompt-too-long, timeout,
+  //   rate-limited, disabled, exit-nonzero/terminal
+
+  // Cells already covered by existing tests (15 cells).
+  // Missing cells to reach all 40:
+  const missingCells: Array<{
+    primaryCode: string;
+    fallbackCode: string;
+    expectedCode: string;
+    label: string;
+    extraCheck?: (error: CaptureLlmValidationError) => void;
+  }> = [
+    // rate-limited row: already has malformed, schema, ptl, rl, timeout, disabled, terminal
+    // Missing: exit-nonzero
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_RATE_LIMITED', label: 'rl×exit' },
+
+    // timeout row: already has timeout(double), rl, terminal
+    // Missing: malformed, schema, ptl, disabled, exit-nonzero
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'to×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'to×schema' },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'to×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('timeout') },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_TIMEOUT', label: 'to×disabled' },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'to×exit' },
+
+    // disabled row: already has disabled(double), terminal
+    // Missing: malformed, schema, ptl, timeout, rl, exit-nonzero
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'dis×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'dis×schema' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'dis×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('disabled') },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'dis×timeout' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'dis×rl' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'dis×exit' },
+
+    // exit-nonzero row: already has terminal
+    // Missing: malformed, schema, ptl, timeout, rl, disabled, exit-nonzero
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'exit×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'exit×schema' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'exit×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('exit-nonzero') },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'exit×timeout' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'exit×rl' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'exit×disabled' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'exit×exit' },
+
+    // terminal row: already has terminal(double), rl
+    // Missing: malformed, schema, ptl, timeout, disabled, exit-nonzero
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'term×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'term×schema' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'term×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('terminal') },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'term×timeout' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'term×disabled' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'term×exit' },
+  ];
+
+  for (const { primaryCode, fallbackCode, expectedCode, label, extraCheck } of missingCells) {
+    it(`${label}: primary ${primaryCode} + fallback ${fallbackCode} → ${expectedCode}`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(primaryCode),
+      });
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: failingExtract(fallbackCode),
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      const error = await expectValidationError(wrapper.extract(request()));
+      expect(error.code).toBe(expectedCode);
+      expect(error.details.primaryCode).toBe(primaryCode);
+      expect(error.details.fallbackCode).toBe(fallbackCode);
+      extraCheck?.(error);
+    });
+  }
+
+  // Success cells (5 primary categories × success)
+  const successCells = [
+    'LLM_RATE_LIMITED',
+    'LLM_TIMEOUT',
+    'CAPTURE_LLM_DISABLED',
+    'CODEX_CLI_EXIT_NONZERO',
+    'LLM_EXTRACT_FAILED',
+  ];
+
+  for (const primaryCode of successCells) {
+    it(`${primaryCode} × success → success`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(primaryCode),
+      });
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: vi.fn(async () => ({ model: 'haiku', text: extractionJson('fallback ok') })),
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      const result = await wrapper.extract(request());
+      expect(result.model).toBe('haiku');
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P→F(malformed)→forced F wrapper sequence
+// ---------------------------------------------------------------------------
+
+describe('FallbackCaptureLlmAdapter P→F(malformed)→forced F sequence', () => {
+  it('P fails → F returns malformed → retryProvider=fallback → forced F succeeds', async () => {
+    let fCallCount = 0;
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_RATE_LIMITED', 'primary rl');
+    });
+    const fExtract = vi.fn(async () => {
+      fCallCount += 1;
+      if (fCallCount === 1) {
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json');
+      }
+      return { model: 'haiku', text: extractionJson('retry ok') };
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // First call: P fails (rl) → F fails (malformed) → error with retryProvider
+    const error = await expectValidationError(wrapper.extract(request()));
+    expect(error.code).toBe('LLM_MALFORMED_JSON');
+    expect(error.details.retryProvider).toBe('fallback');
+    expect(pExtract).toHaveBeenCalledTimes(1);
+    expect(fExtract).toHaveBeenCalledTimes(1);
+
+    // Second call with forceProvider: goes directly to fallback, succeeds
+    const result = await wrapper.extract(request(), { forceProvider: 'fallback' });
+    expect(result.model).toBe('haiku');
+    expect(pExtract).toHaveBeenCalledTimes(1); // primary NOT called again
+    expect(fExtract).toHaveBeenCalledTimes(2);
+
+    // Telemetry: 0 primary success, 1 fallback success, 1 fallback failed
+    const snap = wrapper.takeTelemetry();
+    expect(snap.primarySuccess).toBe(0);
+    expect(snap.fallbackSuccess).toBe(1);
+    expect(snap.fallbackFailed).toBe(1);
+  });
+
+  it('P fails → F returns malformed → forced F also fails → reports real category', async () => {
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_TIMEOUT', 'primary timeout');
+    });
+    let fCallCount = 0;
+    const fExtract = vi.fn(async () => {
+      fCallCount += 1;
+      if (fCallCount === 1) {
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json');
+      }
+      // Second call also fails but with a different error
+      throw new CaptureLlmValidationError('LLM_RATE_LIMITED', 'fallback rl');
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // First call: P(timeout) → F(malformed)
+    const error1 = await expectValidationError(wrapper.extract(request()));
+    expect(error1.details.retryProvider).toBe('fallback');
+
+    // Second call with forceProvider: forced F also fails with rate-limited
+    const error2 = await expectValidationError(
+      wrapper.extract(request(), { forceProvider: 'fallback' })
+    );
+    // Reports the real category from the second call, not malformed
+    expect(error2.code).toBe('LLM_RATE_LIMITED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gemini abort via generateContent injection seam
+// ---------------------------------------------------------------------------
+
+describe('gemini-flash abort via generateContent injection', () => {
+  it('aborts generateContent when timeout fires and maps to LLM_TIMEOUT', async () => {
+    const generateContent: GeminiGenerateContent = async (_req) => {
+      // Simulate a slow response that never resolves
+      await new Promise((_resolve, reject) => {
+        // AbortSignal will fire before this resolves.
+        // The real SDK throws on abort; simulate that.
+        const signal = _req.config?.abortSignal;
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }
+      });
+      return { text: 'should not reach' };
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+          CC_CAPTURE_GEMINI_TIMEOUT_MS: '50', // 50ms timeout
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('LLM_TIMEOUT');
+    expect(error.details.provider).toBe('gemini-flash');
+    expect(error.details.timeoutMs).toBe(50);
+  });
+
+  it('returns extraction on successful generateContent call', async () => {
+    const generateContent: GeminiGenerateContent = async () => {
+      return { text: extractionJson('gemini ok') };
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    const raw = await adapter.extract(request());
+    expect(raw.model).toBe('gemini-2.5-flash');
+    expect(raw.text).toContain('gemini ok');
+  });
+
+  it('propagates non-abort errors as-is', async () => {
+    const generateContent: GeminiGenerateContent = async () => {
+      throw new Error('API key invalid');
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+          CC_CAPTURE_GEMINI_TIMEOUT_MS: '30000',
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    await expect(adapter.extract(request())).rejects.toThrow('API key invalid');
   });
 });

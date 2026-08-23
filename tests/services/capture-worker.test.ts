@@ -39,6 +39,7 @@ import {
 import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
+  CaptureLlmExtractOptions,
   CaptureLlmObservation,
   CaptureLlmRawResponse,
   CaptureLlmRequest,
@@ -51,6 +52,7 @@ const SECRET_TRANSCRIPT_TEXT = 'SECRET_TRANSCRIPT_BODY_MUST_NOT_BE_DEAD_LETTERED
 
 interface MockCaptureLlm extends CaptureLlmAdapter {
   calls: CaptureLlmRequest[];
+  extractOptions?: Array<CaptureLlmExtractOptions | undefined>;
 }
 
 type MockLlmStep = CaptureLlmRawResponse | Error;
@@ -266,12 +268,15 @@ function rawExtraction(input: {
 function mockLlm(steps: MockLlmStep[], overrides?: Partial<MockCaptureLlm>): MockCaptureLlm {
   const pending = [...steps];
   const calls: CaptureLlmRequest[] = [];
+  const extractOptions: Array<CaptureLlmExtractOptions | undefined> = [];
   return {
     model: TEST_MODEL,
     worstCaseCallBudgetMs: 0,
     calls,
-    async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
+    extractOptions,
+    async extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
       calls.push(request);
+      extractOptions.push(options);
       const step = pending.shift();
       if (!step) {
         throw new Error('unexpected capture LLM call');
@@ -2898,6 +2903,98 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
     expect(r1.primarySuccess).toBe(1);
     const r2 = await runWorker(harness, { db: {}, llm });
     expect(r2.primarySuccess).toBe(2);
+  });
+
+  it('P→F(malformed)→forced F: worker passes forceProvider on retry attempt', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'malformed retry test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Step 1: wrapper returns malformed with retryProvider='fallback'
+    // Step 2: retry succeeds (worker should pass forceProvider='fallback')
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+      rawExtraction({
+        summary: 'retry succeeded',
+        observations: [{
+          type: 'discovery',
+          title: 'retry test',
+          subtitle: '',
+          facts: ['retried successfully'],
+          concepts: ['retry'],
+          files: [],
+          narrative: 'The retry with forceProvider worked.',
+        }],
+        model: 'haiku',
+      }),
+    ]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+
+    // Two extract calls should have been made
+    expect(llm.calls).toHaveLength(2);
+    // First call: no forceProvider (or undefined)
+    expect(llm.extractOptions?.[0]?.forceProvider).toBeUndefined();
+    // Second call: forceProvider='fallback' from retryProvider in error details
+    expect(llm.extractOptions?.[1]?.forceProvider).toBe('fallback');
+    // Result should show successful processing
+    expect(result.llmRetries).toBeGreaterThanOrEqual(1);
+  });
+
+  it('six ticks with both providers rate-limited: retry state stays empty, zero dead-letter', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'rate-limited session' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Both providers rate-limited: primary throws LLM_RATE_LIMITED, fallback too.
+    // The FallbackCaptureLlmAdapter would produce LLM_RATE_LIMITED (rl×rl → rl).
+    const llm = mockLlm(
+      // Provide enough steps for 6 ticks (rate-limited stops the tick after first call)
+      Array.from({ length: 6 }, () =>
+        new CaptureLlmValidationError('LLM_RATE_LIMITED', 'both rate limited')
+      ),
+    );
+
+    // Run 6 ticks
+    const results = [];
+    for (let tick = 0; tick < 6; tick += 1) {
+      const result = await runWorker(harness, { db: {}, llm });
+      results.push(result);
+    }
+
+    // All ticks should have been stopped by rate-limiting (rateLimited > 0)
+    for (const r of results) {
+      expect(r.rateLimited).toBeGreaterThan(0);
+    }
+
+    // No dead-letters should have been written
+    const files = readdirSync(harness.spoolDir);
+    const deadLetterFiles = files.filter((f: string) => f.includes('dead-letter'));
+    expect(deadLetterFiles).toHaveLength(0);
+
+    // Retry state should be empty (rate-limited does not increment attempts)
+    const stateFile = join(harness.spoolDir, '.cc-capture-state.json');
+    if (existsSync(stateFile)) {
+      const state = JSON.parse(readFileSync(stateFile, 'utf-8')) as CaptureStateV2;
+      const retryEntry = state.retries?.[Object.keys(state.retries ?? {})[0]];
+      if (retryEntry) {
+        expect(retryEntry.attempts).toBe(0);
+      }
+    }
   });
 });
 
