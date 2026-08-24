@@ -1,7 +1,7 @@
 ---
 id: DEC-20260823T044312Z-codex-primary-haiku-fallback-sandbox
 title: auto-capture 主力 LLM 改 codex-cli，haiku 降為 fallback，並採 bwrap+execpolicy 沙箱
-status: proposed
+status: active
 decided_at: 2026-08-23T04:43:12Z
 scope: CC-memory
 supersedes: []
@@ -85,4 +85,4 @@ spec.md 紅線 3 修訂：2026-07-07「便宜模型優先」精神保留，具�
 
 ## 後續結果與沿革
 
-草稿。待使用者審閱並確認 `supersedes`（取代）與 `related_to`（相關）欄位後升格為 active。
+2026-08-24 使用者本人審閱後接受，升格為 active；四種持久化關係經確認皆留空（本卡為新增設定，未取代既有卡）。實作已隨 PR #19 併入 main（merge commit 9948fee）。Phase 7 canary 與 Phase 8 觀察窗尚未執行。
