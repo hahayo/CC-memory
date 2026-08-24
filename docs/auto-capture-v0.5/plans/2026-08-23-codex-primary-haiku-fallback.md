@@ -912,7 +912,7 @@ Round 3 正確指出：移除舊 §9 的「backlog 切代」時，一併移除�
 |---|---|
 | `CLAUDE.md`（repo 根） | env 清單新增 `CC_CAPTURE_LLM_FALLBACK`／`CC_CAPTURE_CODEX_MODEL`／`CC_CAPTURE_CODEX_TIMEOUT_MS`／`CC_CAPTURE_MAX_WINDOWS_PER_TICK`／`CC_CAPTURE_GEMINI_TIMEOUT_MS`；`CC_CAPTURE_LLM` 預設值敘述 |
 | `CLAUDE.md` 同段（既有 drift，順修） | 現寫 claude-cli 窗口預設 96 KiB，`capture-worker.ts:37` 實為 **32 KiB** |
-| **`docs/auto-capture-v0.5/spec.md:183`（RAM 紅線 3）** | **⚠️ 本次唯一的 spec 反轉點**——該紅線標題就是「observation 抽取用便宜模型」，並載明 2026-07-07 拍板改 claude-cli/haiku 的理由（訂閱已付、不為 Gemini 另付 API 費）。把 `gpt-5.6-luna` 立為 primary 是**反轉這條紅線，不是 additive 補充**，必須正式改寫並在決策卡記錄 |
+| **`docs/auto-capture-v0.5/spec.md:183`（RAM 紅線 3）** | **⚠️ 本次唯一的 spec 反轉點**——該紅線標題就是「observation 抽取用便宜模型」，並載明 2026-07-07 拍板改 claude-cli/haiku 的理由（訂閱已付、不為 Gemini 另付 API 費）。把 codex-cli（實際模型 `gpt-5.6-sol`；早期草稿誤植 `gpt-5.6-luna`，2026-08-23 更正）立為 primary 是**反轉這條紅線，不是 additive 補充**，必須正式改寫並在決策卡記錄 |
 | `docs/auto-capture-v0.5/spec.md:166`（LLM 降級表） | primary＝codex-cli、fallback＝claude-cli、gemini-flash 仍可切 |
 | `docs/auto-capture-v0.5/spec.md:41`／`:53`（歷史對照表） | 沿用該表「不改原文、加後記」慣例，補 2026-08-23 後記 |
 | `docs/auto-capture-v0.5/plan.md:252-258`（Environment Variables 表） | 新增五個變數；`CC_CAPTURE_LLM` 預設改 codex-cli；window bytes 那列加 codex |
@@ -950,7 +950,7 @@ npx vitest run tests/services/capture-worker.test.ts
 ```bash
 npx vitest run tests/integration/codex-sandbox.test.ts
 ```
-L1 確定性探測必須全部 `ENOENT`／`EACCES`；L2 事件流證明工具呼叫被拒；L3 正常抽取。
+L1 確定性探測必須全部 `ENOENT`／`EACCES`；L2 事件流零 tool-call event 且輸出合法 JSON（2026-08-23 修正，對齊「沙箱驗收」權威定義）；L3 正常抽取。
 
 **全套回歸**
 ```bash
