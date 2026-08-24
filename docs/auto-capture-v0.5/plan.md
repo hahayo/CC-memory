@@ -448,10 +448,12 @@ v0.5 規則：
 
 ### Phase 3：quality gate
 
-1. 跑 M6 benchmark。
-2. 人工標註 Top-5/rank/錯抓率。
-3. Go：停用 claude-mem plugin、停止 worker/chroma、保留 SQLite 檔。
-4. No-Go：關閉 CC-memory auto-capture，保留資料供分析。
+> 2026-08-23 後記：本節降為歷史紀錄——benchmark 與人工標註已拍板降為 advisory，Go/No-Go 改依 `memory-ops-cutover.md` §9 替換版（canary → 觀察窗 → 使用者核准長跑）。
+
+1. ~~跑 M6 benchmark。~~
+2. ~~人工標註 Top-5/rank/錯抓率。~~
+3. ~~Go：停用 claude-mem plugin、停止 worker/chroma、保留 SQLite 檔。~~
+4. ~~No-Go：關閉 CC-memory auto-capture，保留資料供分析。~~
 
 ## Risks
 

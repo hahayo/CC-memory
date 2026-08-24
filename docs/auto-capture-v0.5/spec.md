@@ -166,12 +166,12 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Capture hook | PostToolUse/Stop thin spool append | hook 不走網路 |
 | Worker | Stop／SessionStart 驅動 systemd oneshot，批次 harvest（收割）+ LLM extract（抽取）+ DB write | 不做 daemon、不設 auto-capture timer |
 | LLM | `claude-cli` 預設（訂閱額度、`CC_CAPTURE_CLAUDE_MODEL` 預設 haiku）；`CC_CAPTURE_LLM` 可切 gemini-flash；provider 不可用靜默停用 | 仿 `src/utils/embedding.ts` 降級 |
-
-> 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
 | Benchmark | 對 claude-mem 10.5.2 觀察級行為 | 併用 2 週 |
+
+> 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 
 > 2026-07-16 註：先前 hermes cron／systemd user timer 路線已由 hook-driven systemd oneshot 正式取代（見 `memory-ops-cutover.md`）；「跑完即退」的非常駐要求不變。
 

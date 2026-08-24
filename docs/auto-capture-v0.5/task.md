@@ -386,7 +386,7 @@
 
 > 狀態：✅ 已交付（2026-07-08，PR #9-#18 merged）——checkbox 保留原樣作歷史紀錄
 
-> 目標：用資料決定是否停用 claude-mem。對比單位是 rollup；observation 是 drill-down。
+> 目標：用資料決定是否停用 claude-mem。對比單位是 rollup；observation 是 drill-down。（2026-08-23 後記：benchmark 降為 advisory，停用決定改依 `memory-ops-cutover.md` §9 canary 制。）
 
 > **2026-08-12 readiness audit**：正式資料時間與數量門檻已達標，近 7 日真實 MCP query 已為 5/5。最新 `benchmark-2026-08-12.md` 完成固定 5＋真實 5 的 keyword baseline，並以 claude-mem 公開 session detail 對 10/10 題補證 project scope；production active 非個人語料 embedding coverage 為 27/14,229，尚缺 14,202。報告因此是 `PARTIAL`／No-Go 證據，不是正式 Go/No-Go 報告。claude-mem 既有 project metadata 可能包含內容上屬於其他工作的 session，人工標註仍須按結果內容判斷，不能只信 project label（專案標籤）。
 
@@ -421,7 +421,7 @@
 - [ ] `npx tsx scripts/benchmark-v05.ts --fixtures docs/auto-capture-v0.5/benchmark-fixtures.md` 可跑完
 - [ ] 報告列出 CC-memory rollup Top-5 與 claude-mem Top-5
 - [ ] 人工標註後可計算三硬指標
-- [ ] 若 ≥14 天且 ≥30 筆 auto rollup/observation，產 Go/No-Go 建議
+- [ ] ~~若 ≥14 天且 ≥30 筆 auto rollup/observation，產 Go/No-Go 建議~~ → 2026-08-23 後記：advisory 參考報告，非上線閘門
 - [ ] 10 組 query（固定 5 + 真實 5）量化表完整
 
 ---
@@ -432,9 +432,9 @@
 - [ ] 0012 已套 Coolify project DB；0013 已套 Coolify personal DB
 - [ ] 兩側 DB 都就位後，才 merge 含 `observations` schema 的 worker working tree
 - [ ] hook settings 走 draft-first：先草稿、人審後落地
-- [ ] 併用期 2 週：CC-memory auto-capture 與 claude-mem 並行
-- [ ] 併用期 `CC_MEMORY_INJECT_RECENT=off`
-- [ ] 累積 ≥30 筆 auto rollup/observation
+- [ ] ~~併用期 2 週：CC-memory auto-capture 與 claude-mem 並行~~ → 2026-08-23 後記：降為 advisory 參考，實際以 §9 canary＋觀察窗為準
+- [ ] ~~併用期 `CC_MEMORY_INJECT_RECENT=off`~~ → 同上（advisory）
+- [ ] ~~累積 ≥30 筆 auto rollup/observation~~ → 同上（advisory）
 - [ ] ~~品質閘三硬指標 AND~~ → 2026-08-23 後記：benchmark 降為 advisory，見 `memory-ops-cutover.md` §9
 - [ ] 上線走 canary + 觀察窗 + 使用者核准長跑（七項清單見 §9）
 - [ ] Go：pause claude-mem capture（保留套件與資料，記錄 rollback 操作），不做 uninstall 或資料刪除
@@ -455,4 +455,4 @@
 - [ ] Injection flag off 無輸出
 - [ ] Injection flag on 有 Recent Activity index 且不寫 `search_feedback`
 - [ ] `refine_delete` 可刪錯抓且被 read-only 擋
-- [ ] Benchmark 可產 Go/No-Go 報告
+- [ ] ~~Benchmark 可產 Go/No-Go 報告~~ → 2026-08-23 後記：產出降為 advisory 報告
