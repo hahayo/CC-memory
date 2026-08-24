@@ -169,7 +169,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
-| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | ~~併用 2 週~~（2026-08-23 降 advisory，見下方後記） |
+| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | ~~併用 2 週~~（2026-08-23 降 advisory（參考用），政策見 `memory-ops-cutover.md` §9） |
 
 > 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 

@@ -272,7 +272,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 ## Injection Pollution Defense（注入污染防線）
 
 - `CC_MEMORY_INJECT_RECENT=off` 預設。
-- ~~併用期兩週內只 capture，不注入。~~ （2026-08-23 後記：併用期／筆數門檻降為 advisory，上線改依 `memory-ops-cutover.md` §9 canary 制。）
+- ~~併用期兩週內只 capture，不注入。~~ （2026-08-23 後記：併用期／筆數門檻降為 advisory（參考用），上線改依 `memory-ops-cutover.md` §9 canary 制。）
 - 注入內容加 metadata marker（標記）`source=cc-memory-inject`；worker 看到該 marker 直接排除。
 - **遞迴 capture 斷路器**（2026-07-07 claude-cli provider 連帶補強；2026-08-23 codex-cli 雙層強化）：worker spawn 的子程序帶 `CC_MEMORY_CAPTURE_CHILD=1` env，兩支 capture hook 開頭偵測到即 exit 0——抽取 session 自身不得再進 spool。codex-cli 子程序另以 bwrap（bubblewrap 沙箱）+ execpolicy（執行策略）兩層防護、`--ignore-user-config` 不載使用者設定，雙重確保遞迴斷路；claude-cli 子程序仍帶 `--strict-mcp-config` 不載使用者 MCP servers。
 - token budget 預設 1,200；超過先截 observations ids，再截 summary text。
