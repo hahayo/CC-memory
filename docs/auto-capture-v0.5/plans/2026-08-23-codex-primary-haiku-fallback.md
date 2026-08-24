@@ -642,7 +642,7 @@ reserve 的組成資料由 D1b 的 required `worstCaseCallBudgetMs` 提供（不
 - **L1 確定性探測**（非 LLM）：**完全依「沙箱驗收」章節執行，不在此重述、不得簡化**——含五個欄位的 mountinfo 核對（destination／resolved source／fstype／ro-rw／propagation）與 nonce 交叉驗證；清單為——五個秘密檔、repo 根、`~/.ssh`／`~/.config`／`~/.claude`、`/etc/environment`／`/etc/wsl.conf`、`/proc/1/root/...`、父程序 `/proc/<pid>/environ`——斷言 `ENOENT`／`EACCES`；mountinfo 核對依權威章節的五欄位規則（非僅頂層掛載點）。
   （Round 4 #2 與 Round 6 #7 都指出此處曾退回成簡化版；本節一律以「沙箱驗收」章節為唯一真相。）
 - **L1 負向 env 測試**：`PATH`／`HOME`／`TMPDIR` 設成惡意值時掛載面不擴大。
-- **L2 對抗式探測**：`codex exec --json`，通過條件＝事件流證明工具呼叫被嘗試且被拒。
+- **L2 對抗式探測**：`codex exec --json`，通過條件＝事件流無任何 tool call 事件且輸出合法 JSON（2026-08-24 修正：對齊「沙箱驗收」權威章節 :209 的零 tool-call event 定義，先前誤寫為「工具呼叫被嘗試且被拒」）。
 - **L3 功能正向**：32 KiB transcript 仍抽得出合法 JSON。
 - 併驗：逾時、SIGTERM/SIGKILL、DNS、output 檔寫入、暫存檔清理、孤兒回收、model cache 行為；**auth.json 依「臨時 CODEX_HOME」單一規則實作**：測試 host 端 `auth.json` 的 hash 與 inode 呼叫前後不變、臨時目錄確實被清除。
 - 這些是**整合測試**（真的 spawn codex），標記為需 codex CLI 的群組，與純單元測試分開跑。

@@ -435,11 +435,9 @@
 - [ ] 併用期 2 週：CC-memory auto-capture 與 claude-mem 並行
 - [ ] 併用期 `CC_MEMORY_INJECT_RECENT=off`
 - [ ] 累積 ≥30 筆 auto rollup/observation
-- [ ] 品質閘三硬指標 AND：
-  - [ ] 10 組 query 中 ≥7 組的 Top-5 交集 ≥3
-  - [ ] 10 組 query 平均 first-relevant rank ≤ claude-mem 平均 rank
-  - [ ] 錯抓率 <10%
-- [ ] Go：停用 claude-mem plugin + worker/chroma，下線後保留 SQLite 檔備查
+- [ ] ~~品質閘三硬指標 AND~~ → 2026-08-23 後記：benchmark 降為 advisory，見 `memory-ops-cutover.md` §9
+- [ ] 上線走 canary + 觀察窗 + 使用者核准長跑（七項清單見 §9）
+- [ ] Go：pause claude-mem capture（保留套件與資料，記錄 rollback 操作），不做 uninstall 或資料刪除
 - [ ] No-Go：關閉 CC-memory capture，保留資料分析差距
 
 ---

@@ -64,7 +64,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 2. **維持 CC-memory 既有優勢**：PostgreSQL + pgvector（向量擴充模組）+ Gemini embedding（向量嵌入）+ cross-device（跨裝置）同步，不退回本機 SQLite/Chroma。
 3. **把 RAM 成本壓到本機近零常駐**：不新增常駐 daemon，不新增本機 DB sidecar（旁掛服務）；RAM 量測摘要中的 claude-mem 常駐成本是停用後的回收目標。
 4. **提供 token 經濟學**：SessionStart 注入與 search 都先給輕索引與 `discovery_tokens`，讓 agent 按需付費展開。
-5. **用資料判斷 Go/No-Go**：併用 2 週、至少 30 筆 auto rollup/observation 後，以 10 組 benchmark query（基準查詢）量化三項硬指標，AND 全達才停用 claude-mem。
+5. **用資料判斷 Go/No-Go**：benchmark 降為 advisory（參考用），不再是啟用前置硬閘門（2026-08-23 拍板）；上線走 canary + 觀察窗 + 使用者核准長跑。七項 Go/No-Go 清單見 `memory-ops-cutover.md` §9。
 6. **所有 schema 變更 additive（增量）且雙側一致**：project/personal/test 三側欄位一致；per-DB CHECK constraint 只放各側不變量。
 
 ## User Stories
@@ -145,7 +145,9 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 驗收條件：
 - 品質閘對手是 claude-mem 10.5.2 的 observation + 3 層 retrieval 行為。
 - 結果對比單位定義為 rollup；observation 是 drill-down。
-- 10 組 query（固定 5 + 真實 5）中，至少 7 組的 Top-5 交集 ≥3；10 組平均 first-relevant rank ≤ claude-mem；錯抓率 <10%，三項 AND 全達才 Go。
+- ~~10 組 query（固定 5 + 真實 5）中，至少 7 組的 Top-5 交集 ≥3；10 組平均 first-relevant rank ≤ claude-mem；錯抓率 <10%，三項 AND 全達才 Go。~~
+
+> 2026-08-23 後記：benchmark 已降為 advisory（參考用），不再是啟用前置硬閘門。上線改走 canary + 觀察窗 + 使用者核准長跑制。見 `memory-ops-cutover.md` §9。
 
 ## Non-goals
 
@@ -164,6 +166,8 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Capture hook | PostToolUse/Stop thin spool append | hook 不走網路 |
 | Worker | Stop／SessionStart 驅動 systemd oneshot，批次 harvest（收割）+ LLM extract（抽取）+ DB write | 不做 daemon、不設 auto-capture timer |
 | LLM | `claude-cli` 預設（訂閱額度、`CC_CAPTURE_CLAUDE_MODEL` 預設 haiku）；`CC_CAPTURE_LLM` 可切 gemini-flash；provider 不可用靜默停用 | 仿 `src/utils/embedding.ts` 降級 |
+
+> 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
@@ -334,14 +338,16 @@ worker 對 LLM output 採 all-or-nothing（全有或全無）策略：
 
 ### claude-mem Go/No-Go
 
-併用條件：至少 14 天，且累積 ≥30 筆 CC-memory auto rollup/observation。併用期 CC-memory 只 capture，注入 flag 保持 off。
+> 2026-08-23 後記：下方舊三硬指標已降為 advisory（參考用），不再是啟用前置硬閘門。正式 Go/No-Go 七項清單見 `memory-ops-cutover.md` §9，上線走 canary + 觀察窗 + 使用者核准長跑制。
 
-三項硬指標 AND：
-- 10 組 benchmark query（固定 5 + 從 `search_feedback` 抽樣真實 5）中，至少 7 組的 CC-memory rollup Top-5 與 claude-mem Top-5 交集 ≥3。
-- 10 組 query 的人工 first-relevant rank 平均值 ≤ claude-mem 平均值。
-- 錯抓率 <10%。
+~~併用條件：至少 14 天，且累積 ≥30 筆 CC-memory auto rollup/observation。併用期 CC-memory 只 capture，注入 flag 保持 off。~~
 
-Go：停用 claude-mem plugin、下線 worker/chroma，回收 RAM 量測摘要列出的本機常駐成本，claude-mem SQLite 留檔備查。
+~~三項硬指標 AND：~~
+- ~~10 組 benchmark query（固定 5 + 從 `search_feedback` 抽樣真實 5）中，至少 7 組的 CC-memory rollup Top-5 與 claude-mem Top-5 交集 ≥3。~~
+- ~~10 組 query 的人工 first-relevant rank 平均值 ≤ claude-mem 平均值。~~
+- ~~錯抓率 <10%。~~
+
+~~Go：停用 claude-mem plugin、下線 worker/chroma，回收 RAM 量測摘要列出的本機常駐成本，claude-mem SQLite 留檔備查。~~
 
 No-Go：保留 claude-mem，回 Phase 2 補強 query/taxonomy/worker。
 

@@ -9,7 +9,7 @@
 | 流程 | 觸發方式 | systemd unit | Hermes 切換條件 |
 |---|---|---|---|
 | PostToolUse capture | 只 append 本機 spool；不啟動 worker | 無 | 不適用 |
-| Stop capture | append sentinel 後，以 `systemctl --no-block` 快速啟動 | `cc-memory-auto-capture.service` | `cc-memory-auto-capture` 保持 paused；provider 已切 codex-cli 主力 + claude-cli fallback（見 §2.5） |
+| Stop capture | append sentinel 後，以 `systemctl --no-block` 快速啟動 | `cc-memory-auto-capture.service` | `cc-memory-auto-capture` 保持 paused；程式已備妥 codex-cli 主力 + claude-cli fallback（PR #19），但 Phase 7（安裝 unit＋marker＋canary）尚未執行，現行安裝仍為舊 unit（見 §2.5） |
 | SessionStart capture | 每次快速啟動 backlog；注入由 feature flag（功能開關）獨立控制 | `cc-memory-auto-capture.service` | 不適用 |
 | reminders | systemd timer 每 5 分鐘 | `cc-memory-reminders.{service,timer}` | 手動執行與一個 timer 週期均通過後才 pause |
 | Todoist sync | systemd timer 每 15 分鐘 | `cc-memory-todoist-sync.{service,timer}` | 手動執行與一個 timer 週期均通過後才 pause |
