@@ -106,7 +106,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 **作為** 開新 session 的使用者，我希望 Claude 看到最近活動清單與讀取成本，**以便** 它能自行決定是否展開細節。
 
 驗收條件：
-- `CC_MEMORY_INJECT_RECENT=off` 預設關閉；併用期只 capture，不注入。
+- `CC_MEMORY_INJECT_RECENT=off` 預設關閉；~~併用期只 capture，不注入~~（2026-08-23 後記：併用期／筆數門檻降為 advisory，上線改依 `memory-ops-cutover.md` §9 canary 制。）
 - 開啟後只注入 rollup 索引列，每列含 `discovery_tokens` 與 drill-down ids（下鑽識別）。
 - rollup 的 `discovery_tokens` 寫入時存於 `metadata.capture.discovery_tokens`；注入器只讀，不即時計算。
 - 注入內容不寫 `search_feedback`，也不被 capture worker 反向摘要。
@@ -169,7 +169,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
-| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | 併用 2 週 |
+| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | ~~併用 2 週~~（2026-08-23 降 advisory，見下方後記） |
 
 > 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 

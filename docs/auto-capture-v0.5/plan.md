@@ -272,7 +272,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 ## Injection Pollution Defense（注入污染防線）
 
 - `CC_MEMORY_INJECT_RECENT=off` 預設。
-- 併用期兩週內只 capture，不注入。
+- ~~併用期兩週內只 capture，不注入。~~ （2026-08-23 後記：併用期／筆數門檻降為 advisory，上線改依 `memory-ops-cutover.md` §9 canary 制。）
 - 注入內容加 metadata marker（標記）`source=cc-memory-inject`；worker 看到該 marker 直接排除。
 - **遞迴 capture 斷路器**（2026-07-07 claude-cli provider 連帶補強；2026-08-23 codex-cli 雙層強化）：worker spawn 的子程序帶 `CC_MEMORY_CAPTURE_CHILD=1` env，兩支 capture hook 開頭偵測到即 exit 0——抽取 session 自身不得再進 spool。codex-cli 子程序另以 bwrap（bubblewrap 沙箱）+ execpolicy（執行策略）兩層防護、`--ignore-user-config` 不載使用者設定，雙重確保遞迴斷路；claude-cli 子程序仍帶 `--strict-mcp-config` 不載使用者 MCP servers。
 - token budget 預設 1,200；超過先截 observations ids，再截 summary text。
@@ -438,11 +438,13 @@ v0.5 規則：
 
 ### Phase 2：capture only 併用期
 
+> 2026-08-23 後記：本節兩週／≥30 筆／注入關閉皆降為 advisory 歷史紀錄，上線閘門改依 `memory-ops-cutover.md` §9 canary 制。
+
 1. hook settings 走 draft-first：同時產 Claude Code 與 Codex 草稿，不直接寫 `~/.claude/settings.json` 或 `~/.codex/config.toml`。
 2. PostToolUse 只 append；Stop／SessionStart quick-kick `cc-memory-auto-capture.service`，不建立 auto-capture timer。
 3. reminders／Todoist 以 systemd timers 接手，驗證後才逐支 pause Hermes jobs。
 4. `CC_MEMORY_INJECT_RECENT=off`。
-5. 並行 claude-mem 2 週，收 ≥30 筆 auto rollup/observation。
+5. ~~並行 claude-mem 2 週，收 ≥30 筆 auto rollup/observation。~~（advisory，見上方後記）
 
 > 2026-07-16 註：現行觸發與切換語意以正式 decision card（決策卡）及 `memory-ops-cutover.md` 為準。
 
@@ -477,7 +479,7 @@ v0.5 規則：
 | hermes cron draft review | ✅ closed/historical（hook-driven systemd oneshot 取代，見 memory-ops-cutover.md） |
 | Search contract design | M3 前 |
 | CJK token estimate acceptance | M4 前 |
-| ≥30 auto records | M6 品質閘前 |
+| ~~≥30 auto records~~（2026-08-23 降 advisory） | ~~M6 品質閘前~~ |
 
 > 2026-07-16 註：auto-capture 現行路線是 Stop／SessionStart 驅動 systemd oneshot，不設 timer；cutover 手順見 `memory-ops-cutover.md`。
 
