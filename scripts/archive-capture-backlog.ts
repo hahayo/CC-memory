@@ -18,6 +18,7 @@ import {
   renameSync,
   rmSync,
   rmdirSync,
+  statfsSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -668,9 +669,38 @@ export function verifyCaptureEpochArchive(
   }
 }
 
+export interface CopyLiveSpoolFileManifest {
+  relpath: string;
+  originalBytes: number;
+  approvedBytes: number;
+  trimmedLines: number;
+  sha256: string;
+  type: 'jsonl-prefix' | 'whole-file';
+}
+
+export interface CopyLiveArchiveManifest {
+  version: 1;
+  mode: 'copy-live';
+  snapshotId: string;
+  snapshotAt: string;
+  spoolArchive: { relpath: string; bytes: number; sha256: string };
+  spoolFiles: CopyLiveSpoolFileManifest[];
+  transcripts: CaptureTranscriptManifest[];
+  counts: {
+    spoolFiles: number;
+    jsonlPrefixFiles: number;
+    wholeFiles: number;
+    totalTrimmedLines: number;
+    transcriptsReferenced: number;
+    transcriptsSnapshotted: number;
+    transcriptsUnrecoverable: number;
+  };
+}
+
 interface ArchiveBacklogCliOptions {
   execute: boolean;
   json: boolean;
+  copyLive: boolean;
   spoolDir: string;
   epochsDir: string;
   archiveRoot: string;
@@ -679,6 +709,9 @@ interface ArchiveBacklogCliOptions {
   settleMs: number;
   allowShortSettle: boolean;
   resumeEpochDir?: string;
+  copyLiveStagingRoot: string;
+  copyLiveArchiveRoot: string;
+  copyLiveMaxArchives: number;
 }
 
 function optionValue(args: string[], name: string): string | undefined {
@@ -704,14 +737,17 @@ export function parseArchiveBacklogArgs(
   const spoolDir = optionValue(args, '--spool-dir') ??
     env.CC_MEMORY_SPOOL_DIR ?? path.join(homedir(), '.cache', 'cc-memory', 'spool');
   const execute = args.includes('--execute');
+  const copyLive = args.includes('--copy-live');
   const settleMs = nonNegativeInteger(optionValue(args, '--settle-ms'), 600_000, '--settle-ms');
   const allowShortSettle = args.includes('--allow-short-settle');
-  if (execute && settleMs < 600_000 && !allowShortSettle) {
+  if (execute && !copyLive && settleMs < 600_000 && !allowShortSettle) {
     throw new Error('short settle requires the explicit --allow-short-settle acknowledgement');
   }
+  const cacheRoot = path.join(homedir(), '.cache', 'cc-memory');
   return {
     execute,
     json: args.includes('--json'),
+    copyLive,
     spoolDir,
     epochsDir: optionValue(args, '--epochs-dir') ??
       path.join(path.dirname(spoolDir), 'spool-epochs'),
@@ -720,10 +756,17 @@ export function parseArchiveBacklogArgs(
     approvalFile: optionValue(args, '--approval-file') ??
       path.join(homedir(), '.ccm-backlog-cutoff-approved'),
     lockFile: optionValue(args, '--lock-file') ??
-      path.join(homedir(), '.cache', 'cc-memory', 'auto-capture-run.lock'),
+      path.join(cacheRoot, 'auto-capture-run.lock'),
     settleMs,
     allowShortSettle,
     resumeEpochDir: optionValue(args, '--resume-epoch-dir'),
+    copyLiveStagingRoot: optionValue(args, '--copy-live-staging') ??
+      path.join(cacheRoot, 'copy-live-staging'),
+    copyLiveArchiveRoot: optionValue(args, '--copy-live-archive') ??
+      path.join(cacheRoot, 'backlog-archives'),
+    copyLiveMaxArchives: nonNegativeInteger(
+      optionValue(args, '--copy-live-max-archives'), 2, '--copy-live-max-archives',
+    ),
   };
 }
 
@@ -775,6 +818,353 @@ function reexecUnderFlock(options: ArchiveBacklogCliOptions): number | null {
     return 3;
   }
   return child.status ?? 1;
+}
+
+// ---------------------------------------------------------------------------
+// copy-live: read-only spool snapshot (never calls bootstrapCaptureEpochs)
+// ---------------------------------------------------------------------------
+
+/**
+ * For .jsonl files: retreat to the last complete newline within `maxBytes`,
+ * then validate each line as JSON. Returns the approved prefix length
+ * (always at a newline boundary) and the count of trimmed (invalid) lines.
+ */
+export function approvedJsonlPrefix(
+  content: Buffer,
+  maxBytes: number,
+): { approvedBytes: number; trimmedLines: number } {
+  // Retreat to the last complete newline
+  let end = Math.min(content.length, maxBytes);
+  while (end > 0 && content[end - 1] !== 0x0a) end--;
+  if (end === 0) return { approvedBytes: 0, trimmedLines: 0 };
+
+  // Validate each line as JSON; cut at first invalid line
+  const prefix = content.subarray(0, end).toString('utf8');
+  const lines = prefix.split('\n');
+  let approvedBytes = 0;
+  let trimmedLines = 0;
+
+  for (const line of lines) {
+    if (line === '') {
+      // Empty line after final newline — skip
+      continue;
+    }
+    try {
+      JSON.parse(line);
+      // +1 for the newline
+      approvedBytes += Buffer.byteLength(line, 'utf8') + 1;
+    } catch {
+      // Invalid line — stop here, count remaining non-empty lines
+      trimmedLines++;
+      for (let i = lines.indexOf(line) + 1; i < lines.length; i++) {
+        if (lines[i] !== '') trimmedLines++;
+      }
+      break;
+    }
+  }
+
+  return { approvedBytes, trimmedLines };
+}
+
+/**
+ * Copy a single spool file with appropriate consistency rules:
+ * - .jsonl files: retreat to last newline, validate JSON, hash approved prefix
+ * - Other files: whole-file copy with hash
+ */
+export function copyLiveSpoolFile(
+  sourcePath: string,
+  destPath: string,
+  sourceSize: number,
+): CopyLiveSpoolFileManifest {
+  const relpath = path.basename(destPath);
+  const content = readFileSync(sourcePath);
+
+  if (sourcePath.endsWith('.jsonl')) {
+    const { approvedBytes, trimmedLines } = approvedJsonlPrefix(content, sourceSize);
+    if (approvedBytes > 0) {
+      const approvedContent = content.subarray(0, approvedBytes);
+      writeFileSync(destPath, approvedContent, { mode: 0o600 });
+      return {
+        relpath,
+        originalBytes: content.length,
+        approvedBytes,
+        trimmedLines,
+        sha256: sha256Buffer(approvedContent),
+        type: 'jsonl-prefix',
+      };
+    }
+    // Empty approved prefix — write empty file
+    writeFileSync(destPath, '', { mode: 0o600 });
+    return {
+      relpath,
+      originalBytes: content.length,
+      approvedBytes: 0,
+      trimmedLines,
+      sha256: sha256Buffer(''),
+      type: 'jsonl-prefix',
+    };
+  }
+
+  // Non-jsonl files: whole-file copy, verify exact match
+  writeFileSync(destPath, content, { mode: 0o600 });
+  return {
+    relpath,
+    originalBytes: content.length,
+    approvedBytes: content.length,
+    trimmedLines: 0,
+    sha256: sha256Buffer(content),
+    type: 'whole-file',
+  };
+}
+
+export function copyLiveCapacityCheck(
+  spoolDir: string,
+  options: { statfsFn?: (p: string) => { bavail: number; bsize: number } },
+): { ok: boolean; reason?: string; requiredBytes?: number; availableBytes?: number } {
+  // Calculate spool size
+  const spoolFiles = walkFiles(spoolDir);
+  const spoolBytes = spoolFiles.reduce((sum, f) => sum + statSync(f).size, 0);
+
+  // Calculate transcript sizes (deduplicated by path, matching transcriptBoundaries口径)
+  const transcriptPaths = new Set<string>();
+  for (const spoolFile of spoolFiles.filter((f) => f.endsWith('.jsonl'))) {
+    for (const line of readFileSync(spoolFile, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as Record<string, unknown>;
+        const source = typeof record.transcript_path === 'string' ? record.transcript_path : '';
+        if (source) transcriptPaths.add(source);
+      } catch { /* malformed line */ }
+    }
+  }
+  let transcriptBytes = 0;
+  for (const tp of transcriptPaths) {
+    if (existsSync(tp)) {
+      transcriptBytes += statSync(tp).size;
+    }
+  }
+
+  const totalSourceBytes = spoolBytes + transcriptBytes;
+  const requiredBytes = totalSourceBytes * 2 + 1024 * 1024 * 1024; // ×2 + 1 GB
+
+  const doStatfs = options.statfsFn ?? ((p: string) => {
+    const s = statfsSync(p);
+    return { bavail: Number(s.bavail), bsize: Number(s.bsize) };
+  });
+  const fsInfo = doStatfs(spoolDir);
+  const availableBytes = fsInfo.bavail * fsInfo.bsize;
+
+  if (availableBytes < requiredBytes) {
+    return {
+      ok: false,
+      reason: `insufficient space: need ${requiredBytes} bytes, have ${availableBytes}`,
+      requiredBytes,
+      availableBytes,
+    };
+  }
+  return { ok: true, requiredBytes, availableBytes };
+}
+
+export function executeCopyLiveSnapshot(input: {
+  spoolDir: string;
+  stagingDir: string;
+  snapshotId: string;
+  snapshotAt: string;
+}): CopyLiveArchiveManifest {
+  const spoolDir = path.resolve(input.spoolDir);
+  const stagingDir = path.resolve(input.stagingDir);
+  mkdirSync(stagingDir, { recursive: false, mode: 0o700 });
+  mkdirSync(path.join(stagingDir, 'spool'), { mode: 0o700 });
+  mkdirSync(path.join(stagingDir, 'transcripts'), { mode: 0o700 });
+
+  // Snapshot size of each file first (under lock)
+  const allFiles = walkFiles(spoolDir);
+  const fileSizes = new Map<string, number>();
+  for (const f of allFiles) {
+    fileSizes.set(f, statSync(f).size);
+  }
+
+  // Copy spool files with appropriate rules
+  const spoolFileManifests: CopyLiveSpoolFileManifest[] = [];
+  const copiedSpoolDir = path.join(stagingDir, 'spool');
+
+  for (const sourceFile of allFiles) {
+    const relpath = path.relative(spoolDir, sourceFile);
+    const destDir = path.join(copiedSpoolDir, path.dirname(relpath));
+    mkdirSync(destDir, { recursive: true, mode: 0o700 });
+    const destFile = path.join(copiedSpoolDir, relpath);
+    const manifest = copyLiveSpoolFile(sourceFile, destFile, fileSizes.get(sourceFile) ?? 0);
+    manifest.relpath = relpath;
+    spoolFileManifests.push(manifest);
+  }
+
+  // Snapshot transcripts (reusing transcriptBoundaries from the copied spool)
+  const boundaries = transcriptBoundaries(copiedSpoolDir);
+  const transcripts = [...boundaries.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([source, maxBoundary]) => snapshotTranscriptPrefix(source, maxBoundary, stagingDir));
+
+  // Create spool archive
+  const spoolArchive = createStrictSpoolArchive(copiedSpoolDir, stagingDir);
+
+  const manifest: CopyLiveArchiveManifest = {
+    version: 1,
+    mode: 'copy-live',
+    snapshotId: input.snapshotId,
+    snapshotAt: input.snapshotAt,
+    spoolArchive,
+    spoolFiles: spoolFileManifests,
+    transcripts,
+    counts: {
+      spoolFiles: spoolFileManifests.length,
+      jsonlPrefixFiles: spoolFileManifests.filter((f) => f.type === 'jsonl-prefix').length,
+      wholeFiles: spoolFileManifests.filter((f) => f.type === 'whole-file').length,
+      totalTrimmedLines: spoolFileManifests.reduce((sum, f) => sum + f.trimmedLines, 0),
+      transcriptsReferenced: transcripts.length,
+      transcriptsSnapshotted: transcripts.filter((t) => t.status === 'snapshotted').length,
+      transcriptsUnrecoverable: transcripts.filter((t) => t.status !== 'snapshotted').length,
+    },
+  };
+
+  const manifestPath = path.join(stagingDir, 'manifest.json');
+  const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(manifestPath, manifestSource, { mode: 0o600, flag: 'wx' });
+  writeFileSync(
+    path.join(stagingDir, 'manifest.sha256'),
+    `${sha256Buffer(manifestSource)}  manifest.json\n`,
+    { mode: 0o600, flag: 'wx' },
+  );
+
+  return manifest;
+}
+
+export function verifyCopyLiveArchive(archiveDir: string): { ok: boolean; reason?: string } {
+  const manifestPath = path.join(archiveDir, 'manifest.json');
+  if (!existsSync(manifestPath)) return { ok: false, reason: 'manifest.json not found' };
+
+  const manifestSource = readFileSync(manifestPath, 'utf8');
+  const expectedHash = sha256Buffer(manifestSource);
+  const hashFilePath = path.join(archiveDir, 'manifest.sha256');
+  if (!existsSync(hashFilePath)) return { ok: false, reason: 'manifest.sha256 not found' };
+
+  const hashLine = readFileSync(hashFilePath, 'utf8').trim();
+  if (!hashLine.startsWith(expectedHash)) {
+    return { ok: false, reason: 'manifest hash mismatch' };
+  }
+
+  let manifest: CopyLiveArchiveManifest;
+  try {
+    manifest = JSON.parse(manifestSource) as CopyLiveArchiveManifest;
+  } catch {
+    return { ok: false, reason: 'manifest.json is not valid JSON' };
+  }
+
+  // Verify spool archive exists and matches
+  const archivePath = path.join(archiveDir, manifest.spoolArchive.relpath);
+  if (!existsSync(archivePath)) return { ok: false, reason: 'spool archive missing' };
+  if (sha256File(archivePath) !== manifest.spoolArchive.sha256) {
+    return { ok: false, reason: 'spool archive hash mismatch' };
+  }
+
+  // Verify transcripts
+  for (const t of manifest.transcripts) {
+    if (t.status === 'snapshotted' && t.snapshotRelpath) {
+      const tPath = path.join(archiveDir, t.snapshotRelpath);
+      if (!existsSync(tPath)) return { ok: false, reason: `transcript snapshot missing: ${t.snapshotRelpath}` };
+      if (sha256File(tPath) !== t.sha256) {
+        return { ok: false, reason: `transcript hash mismatch: ${t.snapshotRelpath}` };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+export function pruneCopyLiveArchives(archiveRoot: string, maxArchives: number): void {
+  if (!existsSync(archiveRoot)) return;
+  const entries = readdirSync(archiveRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name.startsWith('copy-live-'))
+    .map((e) => e.name)
+    .sort(); // lexicographic = chronological with cutoffId naming
+  while (entries.length > maxArchives) {
+    const oldest = entries.shift()!;
+    rmSync(path.join(archiveRoot, oldest), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Release the inherited flock fd. After copy-live snapshot is done, we release
+ * the lock so that archive/verify/prune run unlocked (plan: 「複製完成後才釋放鎖」).
+ */
+export function releaseCopyLiveLock(lockFile: string): void {
+  if (process.env.CC_MEMORY_ARCHIVE_LOCK_PATH === undefined) return;
+  let lockInfo;
+  try { lockInfo = statSync(lockFile); } catch { return; }
+  for (const rawFd of readdirSync('/proc/self/fd')) {
+    const fd = Number(rawFd);
+    if (!Number.isSafeInteger(fd) || fd < 3) continue;
+    try {
+      const info = fstatSync(fd);
+      if (info.isFile() && info.dev === lockInfo.dev && info.ino === lockInfo.ino) {
+        closeSync(fd);
+        return;
+      }
+    } catch {
+      // skip
+    }
+  }
+}
+
+async function executeCopyLive(options: ArchiveBacklogCliOptions): Promise<number> {
+  const now = new Date();
+  const id = cutoffId(now);
+  const spoolDir = path.resolve(options.spoolDir);
+
+  // Capacity precheck (under lock — lock was acquired by reexecUnderFlock)
+  const capCheck = copyLiveCapacityCheck(spoolDir, {});
+  if (!capCheck.ok) {
+    throw new Error(`copy-live capacity check failed: ${capCheck.reason}`);
+  }
+
+  mkdirSync(options.copyLiveStagingRoot, { recursive: true, mode: 0o700 });
+  mkdirSync(options.copyLiveArchiveRoot, { recursive: true, mode: 0o700 });
+
+  const stagingDir = path.join(options.copyLiveStagingRoot, `staging-${id}`);
+  const archiveDir = path.join(options.copyLiveArchiveRoot, `copy-live-${id}`);
+
+  // Execute snapshot under lock
+  const manifest = executeCopyLiveSnapshot({
+    spoolDir,
+    stagingDir,
+    snapshotId: id,
+    snapshotAt: now.toISOString(),
+  });
+
+  // Release the flock AFTER copy, BEFORE archive/verify/prune
+  releaseCopyLiveLock(options.lockFile);
+
+  // Archive, verify, prune — all unlocked
+  mkdirSync(options.copyLiveArchiveRoot, { recursive: true, mode: 0o700 });
+  renameSync(stagingDir, archiveDir);
+
+  const verification = verifyCopyLiveArchive(archiveDir);
+  if (!verification.ok) throw new Error(verification.reason ?? 'copy-live archive verification failed');
+
+  pruneCopyLiveArchives(options.copyLiveArchiveRoot, options.copyLiveMaxArchives);
+
+  // Clean staging root if empty
+  if (existsSync(options.copyLiveStagingRoot)) {
+    try { rmdirSync(options.copyLiveStagingRoot); } catch { /* not empty */ }
+  }
+
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    mode: 'copy-live',
+    snapshotId: id,
+    archiveDir,
+    counts: manifest.counts,
+  })}\n`);
+  return 0;
 }
 
 async function executeCutoff(options: ArchiveBacklogCliOptions): Promise<number> {
@@ -850,6 +1240,31 @@ async function executeCutoff(options: ArchiveBacklogCliOptions): Promise<number>
 
 async function main(): Promise<number> {
   const options = parseArchiveBacklogArgs(process.argv.slice(2));
+
+  // --copy-live branches BEFORE fingerprint/approval — approval gating is
+  // structurally impossible for live spool (hooks keep appending, fingerprint
+  // drifts between dry-run and execute). Copy-live is read-only, no cutoff.
+  if (options.copyLive) {
+    if (!options.execute) {
+      const files = captureEpochBaseline(path.resolve(options.spoolDir));
+      const output = {
+        dryRun: true,
+        mode: 'copy-live',
+        spoolDir: options.spoolDir,
+        spoolFiles: files.length,
+        spoolBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+        stagingRoot: options.copyLiveStagingRoot,
+        archiveRoot: options.copyLiveArchiveRoot,
+        maxArchives: options.copyLiveMaxArchives,
+      };
+      process.stdout.write(`${JSON.stringify(output, null, options.json ? 0 : 2)}\n`);
+      return 0;
+    }
+    const flockStatus = reexecUnderFlock(options);
+    if (flockStatus !== null) return flockStatus;
+    return executeCopyLive(options);
+  }
+
   const sourceDir = path.resolve(options.resumeEpochDir ?? options.spoolDir);
   const fingerprint = captureEpochFingerprint(sourceDir);
   if (!options.execute) {

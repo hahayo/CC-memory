@@ -40,6 +40,7 @@ function result(overrides: Partial<CaptureWorkerResult> = {}): CaptureWorkerResu
     deadLettered: 0,
     rateLimited: 0,
     malformed: 0,
+    blocked: 0,
     parked: 0,
     yielded: 0,
     held: 0,
@@ -48,6 +49,14 @@ function result(overrides: Partial<CaptureWorkerResult> = {}): CaptureWorkerResu
     llmRetries: 0,
     observationsWritten: 0,
     rollupsWritten: 0,
+    primaryProvider: '',
+    primarySuccess: 0,
+    fallbackSuccess: 0,
+    fallbackFailed: 0,
+    fatalError: null,
+    spoolBytes: 0,
+    spoolCapPct: 0,
+    windows: 0,
     ...overrides,
   };
 }

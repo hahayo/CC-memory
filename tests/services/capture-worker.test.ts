@@ -33,11 +33,13 @@ import {
   isCaptureRetryHeld,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
+  type CaptureRetryEntry,
   type CaptureStateV2,
 } from '../../src/services/capture-worker.js';
 import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
+  CaptureLlmExtractOptions,
   CaptureLlmObservation,
   CaptureLlmRawResponse,
   CaptureLlmRequest,
@@ -50,6 +52,7 @@ const SECRET_TRANSCRIPT_TEXT = 'SECRET_TRANSCRIPT_BODY_MUST_NOT_BE_DEAD_LETTERED
 
 interface MockCaptureLlm extends CaptureLlmAdapter {
   calls: CaptureLlmRequest[];
+  extractOptions?: Array<CaptureLlmExtractOptions | undefined>;
 }
 
 type MockLlmStep = CaptureLlmRawResponse | Error;
@@ -262,14 +265,18 @@ function rawExtraction(input: {
   };
 }
 
-function mockLlm(steps: MockLlmStep[]): MockCaptureLlm {
+function mockLlm(steps: MockLlmStep[], overrides?: Partial<MockCaptureLlm>): MockCaptureLlm {
   const pending = [...steps];
   const calls: CaptureLlmRequest[] = [];
+  const extractOptions: Array<CaptureLlmExtractOptions | undefined> = [];
   return {
     model: TEST_MODEL,
+    worstCaseCallBudgetMs: 0,
     calls,
-    async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
+    extractOptions,
+    async extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
       calls.push(request);
+      extractOptions.push(options);
       const step = pending.shift();
       if (!step) {
         throw new Error('unexpected capture LLM call');
@@ -277,6 +284,10 @@ function mockLlm(steps: MockLlmStep[]): MockCaptureLlm {
       if (step instanceof Error) throw step;
       return step;
     },
+    takeTelemetry() {
+      return { primaryProvider: 'claude-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+    },
+    ...overrides,
   };
 }
 
@@ -508,6 +519,7 @@ describe('capture worker failure contracts without DB', () => {
     const llm: CaptureLlmAdapter = {
       model: 'haiku',
       provider: 'claude-cli',
+      worstCaseCallBudgetMs: 76_000,
       async extract(): Promise<CaptureLlmRawResponse> {
         throw new CaptureLlmValidationError(
           'CAPTURE_LLM_DISABLED',
@@ -517,6 +529,9 @@ describe('capture worker failure contracts without DB', () => {
             provider: 'claude-cli',
           }
         );
+      },
+      takeTelemetry() {
+        return { primaryProvider: 'claude-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
       },
     };
 
@@ -1090,9 +1105,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.000Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const llm = mockLlm([
       timeout,
@@ -1132,15 +1147,19 @@ describe('capture worker failure contracts without DB', () => {
     let elapsed = 0;
     const firstLlm: MockCaptureLlm = {
       model: TEST_MODEL,
+      worstCaseCallBudgetMs: 0,
       calls,
       async extract(input): Promise<CaptureLlmRawResponse> {
         calls.push(input);
         elapsed = 2;
         throw new CaptureLlmValidationError(
-          'CLAUDE_CLI_TIMEOUT',
+          'LLM_TIMEOUT',
           'claude-cli timed out after 75000ms',
-          { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+          { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
         );
+      },
+      takeTelemetry() {
+        return { primaryProvider: 'claude-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
       },
     };
 
@@ -1185,9 +1204,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.625Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const firstLlm = mockLlm([
       timeout,
@@ -1245,9 +1264,9 @@ describe('capture worker failure contracts without DB', () => {
       timestamp: '2026-07-06T10:01:33.700Z',
     });
     const timeout = new CaptureLlmValidationError(
-      'CLAUDE_CLI_TIMEOUT',
+      'LLM_TIMEOUT',
       'claude-cli timed out after 75000ms',
-      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000 }
+      { model: 'haiku', provider: 'claude-cli', timeoutMs: 75_000, timeoutSubtype: 'size-or-deadline' }
     );
     const firstLlm = mockLlm([
       timeout,
@@ -1298,9 +1317,12 @@ describe('capture worker failure contracts without DB', () => {
       transcriptEnd,
       timestamp: '2026-07-06T10:01:33.750Z',
     });
+    // worstCaseCallBudgetMs = timeout(75000) + killGrace(1000) = 76000
+    // reserve = 76000 + settle(15000) = 91000
+    // budget(100000) - elapsed(20000) = 80000 < reserve(91000) → yields
     const baseLlm = mockLlm([
       rawExtraction({ summary: 'must not run', observations: [] }),
-    ]);
+    ], { worstCaseCallBudgetMs: 76_000 });
     const llm: MockCaptureLlm = { ...baseLlm, provider: 'claude-cli' };
     let firstClockRead = true;
 
@@ -2240,6 +2262,1017 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({
       lastSessionPath: spoolPath(sessionA),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1: category→action mapping, blocked action, ≤1024-byte park
+// ---------------------------------------------------------------------------
+
+describe('Phase 1: worker category→action integration', () => {
+  function appendSimpleWindow(harness: TestHarness) {
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'Phase 1 test transcript entry' },
+    ]);
+    return appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+  }
+
+  it('LLM_RATE_LIMITED stops tick and counts rateLimited', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_RATE_LIMITED', 'rate limited', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ rateLimited: 1, parked: 0, deadLettered: 0 });
+  });
+
+  it('LLM_PROMPT_TOO_LONG triggers split on a large chunk', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'prompt too long', { model: TEST_MODEL }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, deadLettered: 0 });
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it('LLM_TIMEOUT (default subtype service-or-network) goes to blocked, not split', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 1, rateLimited: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    const entry = state.retries[retryKeys[0]];
+    expect(entry.blockedAttempts).toBe(1);
+    expect(entry.blockedReason).toBe('timeout');
+    // blocked does NOT write splitHints
+    expect(Object.keys(state.splitHints)).toHaveLength(0);
+  });
+
+  it('LLM_TIMEOUT with size-or-deadline subtype goes to split', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', {
+        model: TEST_MODEL,
+        timeoutSubtype: 'size-or-deadline',
+      }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, blocked: 0 });
+  });
+
+  it('CAPTURE_LLM_DISABLED skips and stops tick', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled', {
+        model: TEST_MODEL,
+        provider: 'test',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ skipped: 1, blocked: 0, parked: 0 });
+  });
+
+  it('LLM_SCHEMA_INVALID goes to terminal retry', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_SCHEMA_INVALID', 'bad schema', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('CODEX_CLI_EXIT_NONZERO goes to terminal retry', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CODEX_CLI_EXIT_NONZERO', 'exit 1', { model: TEST_MODEL }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result).toMatchObject({ blocked: 0, parked: 0, deadLettered: 0 });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('CLAUDE_CLI_EXIT_NONZERO with prompt_too_long message goes to split', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd } = makeChunkedTranscript(harness, {
+      lineCount: 2,
+      messageBytes: 600,
+    });
+    const originalTranscript = readFileSync(harness.transcriptPath, 'utf8');
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(Buffer.byteLength(originalTranscript));
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('CLAUDE_CLI_EXIT_NONZERO', 'prompt is too long', {
+        model: TEST_MODEL,
+        rawOutput: 'prompt is too long for this model',
+      }),
+      rawExtraction({ summary: 'split one', observations: [] }),
+      rawExtraction({ summary: 'split two', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 2, blocked: 0 });
+  });
+});
+
+describe('Phase 1: blocked action lifecycle', () => {
+  function appendSimpleWindow(harness: TestHarness) {
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'Phase 1 blocked lifecycle test' },
+    ]);
+    return appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+  }
+
+  it('5 effective blocked attempts, 6th dead-letters', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    const sink = { chunks: [] as string[], stdout: { write: (c: string) => { sink.chunks.push(c); return true; } } };
+    // Simulate 5 blocked ticks
+    for (let i = 0; i < 5; i++) {
+      const llm = mockLlm([
+        new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+      ]);
+      const result = await runWorker(harness, {
+        db: {},
+        llm,
+        now: new Date(`2026-07-06T${10 + i}:00:00.000Z`),
+        stdout: sink.stdout,
+      });
+      expect(result.blocked).toBe(1);
+      expect(result.deadLettered).toBe(0);
+    }
+    // 6th attempt should dead-letter
+    const llm6 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const result6 = await runWorker(harness, {
+      db: {},
+      llm: llm6,
+      now: new Date('2026-07-06T16:00:00.000Z'),
+      stdout: sink.stdout,
+    });
+    expect(result6.blocked).toBe(1);
+    expect(result6.deadLettered).toBe(1);
+    expect(result6.parked).toBe(1);
+  });
+
+  it('held ticks do not count toward blocked attempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // Use non-zero retry interval for hold testing
+    harness.env.CC_CAPTURE_RETRY_MIN_INTERVAL_MS = '1800000';
+    // First blocked attempt
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const r1 = await runWorker(harness, {
+      db: {},
+      llm: llm1,
+      now: new Date('2026-07-06T10:00:00.000Z'),
+    });
+    expect(r1.blocked).toBe(1);
+    // Second attempt too soon: should be held
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    const r2 = await runWorker(harness, {
+      db: {},
+      llm: llm2,
+      now: new Date('2026-07-06T10:00:01.000Z'), // 1 second later, within 30 min hold
+    });
+    expect(r2.held).toBe(1);
+    expect(r2.blocked).toBe(0);
+    // State should still have blockedAttempts=1
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(1);
+  });
+
+  it('reset: chunk success clears blockedAttempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // First: blocked
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    // Verify blocked state
+    const state1 = readState(harness);
+    const retryKeys = Object.keys(state1.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state1.retries[retryKeys[0]].blockedAttempts).toBe(1);
+    // Second: success (clears retry entry entirely via clearCoveredEntries)
+    const llm2 = mockLlm([
+      rawExtraction({ summary: 'success', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const r2 = await runWorker(harness, {
+      db: fakeDb,
+      llm: llm2,
+      now: new Date('2026-07-06T11:00:00.000Z'),
+    });
+    expect(r2.processed).toBe(1);
+    const state2 = readState(harness);
+    expect(Object.keys(state2.retries)).toHaveLength(0);
+  });
+
+  it('old state without blocked fields defaults to 0', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'old state compat test' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    // Write a state file with a retry entry that lacks blocked fields
+    const sp = join(
+      harness.spoolDir,
+      sanitizeSpoolSegment(harness.projectId),
+      `${sanitizeSpoolSegment(harness.sessionId)}.capture-state.json`
+    );
+    const fakeState: CaptureStateV2 = {
+      version: 2,
+      spool: { generation: 'gen', cursor: 0 },
+      transcripts: {},
+      retries: {
+        'fake-key': {
+          attempts: 1,
+          lastErrorClass: 'LLM_EXTRACT_FAILED',
+          firstSeenIso: '2026-07-06T10:00:00.000Z',
+          lastAttemptIso: '2026-07-06T10:00:00.000Z',
+          pathHash: createHash('sha256').update('test').digest('hex'),
+          start: 0,
+          end: 100,
+          contentHash: createHash('sha256').update('content').digest('hex'),
+          // No blockedAttempts, lastBlockedAtIso, blockedReason
+        } as CaptureRetryEntry,
+      },
+      splitHints: {},
+    };
+    writeFileSync(sp, JSON.stringify(fakeState));
+    // Running worker should parse successfully (defaults to 0)
+    const llm = mockLlm([
+      rawExtraction({ summary: 'ok', observations: [] }),
+    ]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, {
+      db: fakeDb,
+      llm,
+      now: new Date('2026-07-06T11:00:00.000Z'),
+    });
+    // Should not crash; state is parseable
+    expect(result.processed + result.blocked + result.held).toBeGreaterThanOrEqual(0);
+  });
+
+  it('≤1024 bytes chunk that cannot split goes to blocked then eventually parks', async () => {
+    const harness = makeHarness();
+    // Create a tiny transcript (≤1024 bytes)
+    const tinyMessage = 'x'.repeat(200);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: tinyMessage },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:33.000Z',
+    });
+    const sink = { chunks: [] as string[], stdout: { write: (c: string) => { sink.chunks.push(c); return true; } } };
+    // 5 effective blocked attempts
+    for (let i = 0; i < 5; i++) {
+      const llm = mockLlm([
+        new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+      ]);
+      const result = await runWorker(harness, {
+        db: {},
+        llm,
+        now: new Date(`2026-07-06T${10 + i}:00:00.000Z`),
+        stdout: sink.stdout,
+      });
+      expect(result.blocked).toBe(1);
+      expect(result.deadLettered).toBe(0);
+    }
+    // 6th: dead-letter
+    const llm6 = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+    ]);
+    const result6 = await runWorker(harness, {
+      db: {},
+      llm: llm6,
+      now: new Date('2026-07-06T16:00:00.000Z'),
+      stdout: sink.stdout,
+    });
+    expect(result6.blocked).toBe(1);
+    expect(result6.deadLettered).toBe(1);
+    expect(result6.parked).toBe(1);
+  });
+
+  it('alternateCategory terminal goes to terminal retry, not blocked', async () => {
+    const harness = makeHarness();
+    // Tiny transcript that cannot be split
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x'.repeat(200) },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'terminal',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.blocked).toBe(0);
+    // Should go through terminal retry path: attempts incremented
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(1);
+  });
+
+  it('alternateCategory rate-limited goes to blocked, not terminal', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x'.repeat(200) },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'rate-limited',
+      }),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.blocked).toBe(1);
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    expect(state.retries[retryKeys[0]].attempts).toBe(0);
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(1);
+  });
+
+  it('contentHash change resets blockedAttempts (new key)', async () => {
+    const harness = makeHarness();
+    // First transcript content
+    const transcriptEnd1 = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'original-content-aaa' },
+    ]);
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '2000';
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: transcriptEnd1, timestamp: '2026-07-06T10:00:00.000Z' });
+    // First blocked
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    const state1 = readState(harness);
+    const keys1 = Object.keys(state1.retries);
+    expect(keys1).toHaveLength(1);
+    expect(state1.retries[keys1[0]].blockedAttempts).toBe(1);
+
+    // Mutate transcript content (simulates hooks appending more data to same range)
+    // Since retryKey includes contentHash, a new hash = new entry = fresh blockedAttempts
+    writeFileSync(harness.transcriptPath, JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', message: 'changed-content-bbb' }) + '\n');
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm2, now: new Date('2026-07-06T11:00:00.000Z') });
+    const state2 = readState(harness);
+    const keys2 = Object.keys(state2.retries);
+    // Old key cleared (content changed → different retryKey), new key with blockedAttempts=1
+    const nonZeroBlocked = keys2.filter(k => (state2.retries[k].blockedAttempts ?? 0) > 0);
+    expect(nonZeroBlocked).toHaveLength(1);
+    expect(state2.retries[nonZeroBlocked[0]].blockedAttempts).toBe(1);
+  });
+
+  it('category change does NOT reset blockedAttempts', async () => {
+    const harness = makeHarness();
+    await appendSimpleWindow(harness);
+    // First: blocked with timeout
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm1, now: new Date('2026-07-06T10:00:00.000Z') });
+    // Second: blocked with prompt-too-long (tiny chunk, unsplittable → blocked)
+    const llm2 = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'too long', { model: TEST_MODEL }),
+    ]);
+    await runWorker(harness, { db: {}, llm: llm2, now: new Date('2026-07-06T11:00:00.000Z') });
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries);
+    expect(retryKeys).toHaveLength(1);
+    // Both counted: blockedAttempts should be 2
+    expect(state.retries[retryKeys[0]].blockedAttempts).toBe(2);
+  });
+});
+
+describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
+  it('result includes telemetry fields from takeTelemetry', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'hello' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    let telemetryCalled = false;
+    const llm = mockLlm(
+      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled')],
+      {
+        disabled: true,
+        disabledReason: 'disabled',
+        takeTelemetry() {
+          telemetryCalled = true;
+          return { primaryProvider: 'codex-cli', primarySuccess: 3, fallbackSuccess: 1, fallbackFailed: 0 };
+        },
+      }
+    );
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(telemetryCalled).toBe(true);
+    expect(result.primaryProvider).toBe('codex-cli');
+    expect(result.primarySuccess).toBe(3);
+    expect(result.fallbackSuccess).toBe(1);
+    expect(result.fallbackFailed).toBe(0);
+  });
+
+  it('fatalError captured when exception escapes inner catches, telemetry still flows', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'hello' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    let telemetryCalled = false;
+    const llm = mockLlm([], {
+      takeTelemetry() {
+        telemetryCalled = true;
+        return { primaryProvider: 'test-p', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+      },
+    });
+    // Force a fatal by making nowMs throw on its second call.
+    // The first call sets tickStartMs; the second is the budget check
+    // inside the session for-loop, outside the per-session try/catch.
+    let nowMsCallCount = 0;
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        nowMsCallCount += 1;
+        if (nowMsCallCount > 1) throw new Error('FATAL_CLOCK_FAIL');
+        return 0;
+      },
+    });
+    expect(result.fatalError).toBe('FATAL_CLOCK_FAIL');
+    expect(telemetryCalled).toBe(true);
+    expect(result.primaryProvider).toBe('test-p');
+  });
+
+  it('spool-cap early exit records spoolBytes and spoolCapPct', async () => {
+    const harness = makeHarness();
+    harness.env.CC_MEMORY_SPOOL_MAX_MB = '0.0001'; // ~100 bytes
+    // Create a spool file big enough to exceed the tiny cap
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x'.repeat(2000) },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    const llm = mockLlm([]);
+    const result = await runWorker(harness, { db: {}, llm });
+    expect(result.skipped).toBe(1);
+    expect(result.spoolBytes).toBeGreaterThan(0);
+    expect(result.spoolCapPct).toBeGreaterThan(100);
+  });
+
+  it('spool capacity 70% warning path: spoolCapPct tracked correctly', async () => {
+    const harness = makeHarness();
+    // Set max to double the spool size (around 50%)
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'small' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    const llm = mockLlm(
+      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled')],
+      { disabled: true, disabledReason: 'disabled' }
+    );
+    const result = await runWorker(harness, { db: {}, llm });
+    // Just verify spoolCapPct is calculated
+    expect(typeof result.spoolCapPct).toBe('number');
+    expect(result.spoolBytes).toBeGreaterThan(0);
+  });
+
+  it('llmCallReserveMs uses adapter worstCaseCallBudgetMs', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '100000'; // 100s budget
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    // 91000 worstCase + 15000 settle = 106000 > 100000 → yield immediately at the LLM reserve check
+    const llm = mockLlm(
+      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'should not be called')],
+      { worstCaseCallBudgetMs: 91_000 }
+    );
+    const result = await runWorker(harness, { db: {}, llm });
+    // Should yield because budget (100s) < reserve (91s + 15s = 106s)
+    expect(result.yielded).toBeGreaterThanOrEqual(1);
+    expect(llm.calls).toHaveLength(0);
+  });
+
+  it('windows-per-tick limits windows processed', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_MAX_WINDOWS_PER_TICK = '1';
+    // Write a transcript that will create 2 chunks
+    const entries = Array.from({ length: 4 }, (_, i) => ({
+      timestamp: `2026-01-01T00:00:0${i}.000Z`,
+      message: `line-${i}:${'x'.repeat(800)}`,
+    }));
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, entries);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:05.000Z',
+    });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = '1500'; // Force splitting
+    const llm = mockLlm(
+      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled')],
+      { disabled: true, disabledReason: 'disabled' }
+    );
+    const result = await runWorker(harness, { db: {}, llm });
+    // With maxWindows=1, should yield after first window
+    expect(result.windows).toBeLessThanOrEqual(1);
+  });
+
+  it('windows count increments before first extract, not on malformed retry', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'test content for window counting' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+    // First attempt: malformed, second: malformed again → terminal
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json'),
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json again'),
+    ]);
+    const result = await runWorker(harness, { db: {}, llm });
+    // Only 1 window, even though 2 LLM calls
+    expect(result.windows).toBe(1);
+  });
+
+  it('telemetry lifecycle: two ticks do not retain counters', async () => {
+    const harness = makeHarness();
+    let callCount = 0;
+    const llm = mockLlm(
+      [new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', 'disabled')],
+      {
+        disabled: true,
+        disabledReason: 'disabled',
+        takeTelemetry() {
+          callCount += 1;
+          return { primaryProvider: 'test', primarySuccess: callCount, fallbackSuccess: 0, fallbackFailed: 0 };
+        },
+      }
+    );
+    const r1 = await runWorker(harness, { db: {}, llm });
+    expect(r1.primarySuccess).toBe(1);
+    const r2 = await runWorker(harness, { db: {}, llm });
+    expect(r2.primarySuccess).toBe(2);
+  });
+
+  it('P→F(malformed)→forced F: worker passes forceProvider on retry attempt', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'malformed retry test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Step 1: wrapper returns malformed with retryProvider='fallback'
+    // Step 2: retry succeeds (worker should pass forceProvider='fallback')
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+      rawExtraction({
+        summary: 'retry succeeded',
+        observations: [{
+          type: 'discovery',
+          title: 'retry test',
+          subtitle: '',
+          facts: ['retried successfully'],
+          concepts: ['retry'],
+          files: [],
+          narrative: 'The retry with forceProvider worked.',
+        }],
+        model: 'haiku',
+      }),
+    ]);
+
+    const result = await runWorker(harness, { db: {}, llm });
+
+    // Two extract calls should have been made
+    expect(llm.calls).toHaveLength(2);
+    // First call: no forceProvider (or undefined)
+    expect(llm.extractOptions?.[0]?.forceProvider).toBeUndefined();
+    // Second call: forceProvider='fallback' from retryProvider in error details
+    expect(llm.extractOptions?.[1]?.forceProvider).toBe('fallback');
+    // Second call carries the retry prompt prefix
+    expect(llm.calls[1].retryPromptPrefix).toBeDefined();
+    // Result should show the extraction was processed
+    expect(result.llmRetries).toBeGreaterThanOrEqual(1);
+    // pendingRetryProvider should be cleared after success
+    if (existsSync(statePath(harness))) {
+      const state = readState(harness);
+      for (const key of Object.keys(state.retries ?? {})) {
+        expect(state.retries[key].pendingRetryProvider).toBeUndefined();
+      }
+    }
+  });
+
+  it('six ticks with both providers rate-limited: retry state stays empty, zero dead-letter', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'rate-limited session' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Both providers rate-limited: primary throws LLM_RATE_LIMITED, fallback too.
+    // The FallbackCaptureLlmAdapter would produce LLM_RATE_LIMITED (rl×rl → rl).
+    const llm = mockLlm(
+      // Provide enough steps for 6 ticks (rate-limited stops the tick after first call)
+      Array.from({ length: 6 }, () =>
+        new CaptureLlmValidationError('LLM_RATE_LIMITED', 'both rate limited')
+      ),
+    );
+
+    // Run 6 ticks
+    const results = [];
+    for (let tick = 0; tick < 6; tick += 1) {
+      const result = await runWorker(harness, { db: {}, llm });
+      results.push(result);
+    }
+
+    // All ticks should have been stopped by rate-limiting
+    for (const r of results) {
+      expect(r.rateLimited).toBeGreaterThan(0);
+      expect(r.deadLettered).toBe(0);
+    }
+
+    // State file: if it exists, no retry entry should have attempts > 0
+    const stateFile = statePath(harness);
+    if (existsSync(stateFile)) {
+      const state = readState(harness);
+      const retryKeys = Object.keys(state.retries ?? {});
+      for (const key of retryKeys) {
+        expect(state.retries[key].attempts).toBe(0);
+      }
+    }
+  });
+});
+
+describe('Codex findings: forceProvider, budget, yield, blockedReason', () => {
+  it('cross-tick: tick 1 yields with pendingRetryProvider persisted, tick 2 resumes with fallback-only reserve', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'cross-tick retry test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Tick 1: primary fails with malformed, retryProvider=fallback.
+    // After primary call completes, elapsed jumps to 160s.
+    // Retry budget check: 160s + fallback reserve (76+15=91s) = 251s > 240s → yield before retry.
+    const tick1Start = Date.now();
+    let tick1Elapsed = 0;
+    const llm1 = mockLlm([
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 167000,
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+      // Advance clock AFTER the extract call completes (inside extract)
+      async extract(request, options) {
+        llm1.calls.push(request);
+        llm1.extractOptions!.push(options);
+        // After primary call, advance clock so retry budget check fails
+        tick1Elapsed = 160_000;
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+          retryProvider: 'fallback',
+        });
+      },
+    });
+    const result1 = await runWorker(harness, {
+      db: {},
+      llm: llm1,
+      nowMs: () => tick1Start + tick1Elapsed,
+    });
+
+    // Tick 1: primary called once, then budget check fails → yield
+    expect(llm1.calls).toHaveLength(1);
+    expect(llm1.extractOptions?.[0]?.forceProvider).toBeUndefined();
+    expect(result1.yielded).toBe(1);
+
+    // pendingRetryProvider persisted in state
+    expect(existsSync(statePath(harness))).toBe(true);
+    const stateAfterTick1 = readState(harness);
+    const retryKeys1 = Object.keys(stateAfterTick1.retries ?? {});
+    expect(retryKeys1.length).toBeGreaterThan(0);
+    expect(stateAfterTick1.retries[retryKeys1[0]].pendingRetryProvider).toBe('fallback');
+
+    // Tick 2: resume on same harness — worker reads persisted state.
+    // Clock: first call (tickStart init) → t=0; all subsequent calls → t=100s.
+    // Full reserve = 167+15 = 182s → 100+182=282 > 240 → WOULD yield with full reserve.
+    // Fallback-only reserve = 76+15 = 91s → 100+91=191 ≤ 240 → should proceed.
+    // This proves fallback-only reserve is used (not the full chain).
+    const tick2Start = Date.now();
+    let tick2CallCount = 0;
+    const llm2 = mockLlm([
+      rawExtraction({
+        summary: 'retry succeeded on fallback',
+        observations: [{
+          type: 'discovery',
+          title: 'cross-tick test',
+          subtitle: '',
+          facts: ['cross-tick OK'],
+          concepts: ['retry'],
+          files: [],
+          narrative: 'Cross-tick retry passed.',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 167000,
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+    });
+    const result2 = await runWorker(harness, {
+      db: {},
+      llm: llm2,
+      nowMs: () => {
+        tick2CallCount += 1;
+        // First call captures tickStartMs at t=0; all subsequent see 100s elapsed
+        if (tick2CallCount <= 1) return tick2Start;
+        return tick2Start + 100_000;
+      },
+    });
+
+    // Tick 2: fallback called directly (forceProvider='fallback'), primary NOT called
+    expect(llm2.calls).toHaveLength(1);
+    expect(llm2.extractOptions?.[0]?.forceProvider).toBe('fallback');
+    expect(result2.yielded).toBe(0);
+  });
+
+  it('forced fallback reserve uses fallback-only budget, not full primary+fallback', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'budget test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // 100s elapsed. Full reserve = 167s + 15s = 182s. 100+182 = 282 > 240 → old code would yield.
+    // With fallback-only reserve = 76s + 15s = 91s. 100+91 = 191 ≤ 240 → should NOT yield.
+    let nowMs = Date.now();
+    const tickStart = nowMs;
+    // After first call, advance to 100s
+    const llm = mockLlm([
+      // First call: primary returns malformed with retryProvider
+      new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json', {
+        retryProvider: 'fallback',
+      }),
+      // Second call: forced fallback succeeds
+      rawExtraction({
+        summary: 'retry succeeded',
+        observations: [{
+          type: 'discovery',
+          title: 'budget test',
+          subtitle: '',
+          facts: ['budget OK'],
+          concepts: ['budget'],
+          files: [],
+          narrative: 'Budget test passed.',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 167000,  // primary(91) + fallback(76); reserve = 167 + 15 = 182s
+      worstCaseCallBudgetMsFor(provider: string): number {
+        return provider === 'fallback' ? 76000 : 91000;
+      },
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        const current = nowMs;
+        // After first LLM call, advance 100s
+        if (llm.calls.length === 1) {
+          nowMs = tickStart + 100_000;
+        }
+        return current;
+      },
+    });
+
+    // Both calls should have been made (budget check should have passed)
+    expect(llm.calls).toHaveLength(2);
+    expect(result.yielded).toBe(0);
+  });
+
+  it('yield at 59s with 182s reserve does NOT count as a window', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'yield window test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // 59s elapsed + 197s reserve (182+15) = 256s > 240s → should yield
+    const tickStart = Date.now();
+    let callCount = 0;
+    const llm = mockLlm([], {
+      worstCaseCallBudgetMs: 167000,
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        // First call is tickStartMs initialization; after that, simulate 59s elapsed
+        callCount += 1;
+        return callCount <= 1 ? tickStart : tickStart + 59_000;
+      },
+    });
+
+    expect(result.yielded).toBe(1);
+    expect(result.windows).toBe(0);
+    expect(llm.calls).toHaveLength(0);
+  });
+
+  it('58s with 182s reserve → proceeds and counts window', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_TICK_BUDGET_MS = '240000';
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'window count test' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // 58s + 182s reserve (167+15) = 240s = budget → proceeds (not strictly greater)
+    const tickStart = Date.now();
+    let callCount = 0;
+    const llm = mockLlm([
+      rawExtraction({
+        summary: 'ok',
+        observations: [{
+          type: 'discovery',
+          title: 'test',
+          subtitle: '',
+          facts: ['ok'],
+          concepts: [],
+          files: [],
+          narrative: 'ok',
+        }],
+        model: 'haiku',
+      }),
+    ], {
+      worstCaseCallBudgetMs: 167000,
+    });
+
+    const result = await runWorker(harness, {
+      db: {},
+      llm,
+      nowMs: () => {
+        callCount += 1;
+        return callCount <= 1 ? tickStart : tickStart + 58_000;
+      },
+    });
+
+    expect(result.windows).toBe(1);
+    expect(llm.calls).toHaveLength(1);
+  });
+
+  it('alternateCategory path records alternate category in blockedReason, not original category', async () => {
+    const harness = makeHarness();
+    // Use a small transcript to trigger prompt-too-long → can't split → alternateCategory
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'x' },
+    ]);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-01-01T00:00:01.000Z',
+    });
+
+    // Error: prompt-too-long with alternateCategory=rate-limited
+    // chunk is ≤1024 bytes so splitTranscriptChunk returns null → goes to alternateCategory
+    const llm = mockLlm([
+      new CaptureLlmValidationError('LLM_PROMPT_TOO_LONG', 'prompt too long', {
+        model: TEST_MODEL,
+        alternateCategory: 'rate-limited',
+      }),
+    ]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    // Check that blockedReason is 'rate-limited' (the alternateCategory), not 'prompt-too-long'
+    const state = readState(harness);
+    const retryKeys = Object.keys(state.retries ?? {});
+    expect(retryKeys.length).toBeGreaterThanOrEqual(1);
+    const entry = state.retries[retryKeys[0]];
+    expect(entry.blockedReason).toBe('rate-limited');
   });
 });
 

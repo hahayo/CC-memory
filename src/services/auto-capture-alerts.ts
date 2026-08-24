@@ -22,11 +22,21 @@ export interface AutoCaptureAssessment {
   failedCount: number
   rateLimitedCount: number
   malformedCount: number
+  blockedCount: number
   transcriptMissingCount: number
   parkedCount: number
   yieldedCount: number
   heldCount: number
   embeddingFailedCount: number
+  primaryProvider: string
+  primarySuccessCount: number
+  fallbackSuccessCount: number
+  fallbackFailedCount: number
+  fatalCount: number
+  spoolBytes: number
+  spoolCapPct: number
+  windowsCount: number
+  warning: string | null
   summaryLine: string | null
   problemLine: string | null
   nonSummaryLines: string[]
@@ -44,6 +54,12 @@ export interface AutoCaptureAlertState {
   lastExitCode: number | null
   lastDeadLetterCount: number | null
   recoveryFailureCount?: number
+  /** Consecutive ticks with fallback-success > 0 (streak for escalation) */
+  fallbackSuccessStreak?: number
+  /** Spool capacity warning band already alerted (e.g. '70-89') — dedup same band */
+  spoolCapWarningBand?: string | null
+  /** ISO timestamp of last fallback-streak warning sent — dedup via renotify interval */
+  fallbackWarningLastSentAt?: string | null
 }
 
 export interface AutoCaptureAlertTarget {
@@ -143,8 +159,46 @@ function parseHeldCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'held')
 }
 
+function parseBlockedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'blocked')
+}
+
 function parseEmbeddingFailedCount(summaryLine: string | null): number {
   return parseSummaryField(summaryLine, 'embedding-failed')
+}
+
+function parsePrimarySuccessCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'primary-success')
+}
+
+function parseFallbackSuccessCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fallback-success')
+}
+
+function parseFallbackFailedCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fallback-failed')
+}
+
+function parseFatalCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'fatal')
+}
+
+function parseSpoolBytes(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'spool-bytes')
+}
+
+function parseSpoolCapPct(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'spool-cap-pct')
+}
+
+function parseWindowsCount(summaryLine: string | null): number {
+  return parseSummaryField(summaryLine, 'windows')
+}
+
+function parsePrimaryProvider(summaryLine: string | null): string {
+  if (!summaryLine) return ''
+  const match = summaryLine.match(/(?:^|\s)primary-provider=(\S+)/)
+  return match ? match[1] : ''
 }
 
 function truncateProblemLine(line: string): string {
@@ -165,7 +219,27 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const parkedCount = parseParkedCount(summaryLine)
   const yieldedCount = parseYieldedCount(summaryLine)
   const heldCount = parseHeldCount(summaryLine)
+  const blockedCount = parseBlockedCount(summaryLine)
   const embeddingFailedCount = parseEmbeddingFailedCount(summaryLine)
+  const primaryProvider = parsePrimaryProvider(summaryLine)
+  const primarySuccessCount = parsePrimarySuccessCount(summaryLine)
+  const fallbackSuccessCount = parseFallbackSuccessCount(summaryLine)
+  const fallbackFailedCount = parseFallbackFailedCount(summaryLine)
+  const fatalCount = parseFatalCount(summaryLine)
+  const spoolBytes = parseSpoolBytes(summaryLine)
+  const spoolCapPct = parseSpoolCapPct(summaryLine)
+  const windowsCount = parseWindowsCount(summaryLine)
+
+  // Warnings: independently evaluate fallback-success and spool capacity 70-89%
+  const warnings: string[] = []
+  if (fallbackSuccessCount > 0) {
+    warnings.push(`fallback-success=${fallbackSuccessCount} (codex may be logged out, falling back to haiku)`)
+  }
+  if (spoolCapPct >= 70 && spoolCapPct < 90) {
+    warnings.push(`spool-cap-pct=${spoolCapPct} (warning: approaching capacity)`)
+  }
+  const warning: string | null = warnings.length > 0 ? warnings.join('; ') : null
+
   const ok =
     result.exitCode === 0 &&
     nonSummaryLines.length === 0 &&
@@ -173,8 +247,12 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount === 0 &&
     malformedCount === 0 &&
     rateLimitedCount === 0 &&
+    blockedCount === 0 &&
     parkedCount === 0 &&
-    embeddingFailedCount === 0
+    embeddingFailedCount === 0 &&
+    fallbackFailedCount === 0 &&
+    fatalCount === 0 &&
+    spoolCapPct < 90
 
   // Synthesize a problemLine when counts indicate issues but no explicit stdout problem line
   let problemLine: string | null = null
@@ -183,8 +261,16 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = truncateProblemLine(nonSummaryLines[0])
     } else if (stderrLines.length > 0) {
       problemLine = truncateProblemLine(stderrLines[0])
+    } else if (fatalCount > 0) {
+      problemLine = `fatal=${fatalCount}`
+    } else if (spoolCapPct >= 90) {
+      problemLine = `spool-cap-pct=${spoolCapPct} (critical)`
+    } else if (fallbackFailedCount > 0) {
+      problemLine = `fallback-failed=${fallbackFailedCount}`
     } else if (rateLimitedCount > 0) {
       problemLine = `rate-limited=${rateLimitedCount}`
+    } else if (blockedCount > 0) {
+      problemLine = `blocked=${blockedCount}`
     } else if (failedCount > 0) {
       problemLine = `failed=${failedCount}`
     } else if (malformedCount > 0) {
@@ -218,11 +304,21 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount,
     rateLimitedCount,
     malformedCount,
+    blockedCount,
     transcriptMissingCount,
     parkedCount,
     yieldedCount,
     heldCount,
     embeddingFailedCount,
+    primaryProvider,
+    primarySuccessCount,
+    fallbackSuccessCount,
+    fallbackFailedCount,
+    fatalCount,
+    spoolBytes,
+    spoolCapPct,
+    windowsCount,
+    warning,
     summaryLine,
     problemLine,
     nonSummaryLines,
@@ -346,6 +442,116 @@ export function formatAutoCaptureRecoveryMessage(input: {
   return lines.join('\n')
 }
 
+export const FALLBACK_SUCCESS_STREAK_THRESHOLD = 3
+
+export interface AutoCaptureWarningDecision {
+  send: boolean
+  reasons: Array<'fallback-streak' | 'spool-cap-new-band'>
+  /** @deprecated Use reasons[0] ?? 'none' — kept for backward compat */
+  reason: 'fallback-streak' | 'spool-cap-new-band' | 'none'
+  message: string | null
+  /** State to persist BEFORE delivery attempt (streak incremented, but dedup timestamps unchanged) */
+  updatedState: AutoCaptureAlertState
+  /** State to persist AFTER confirmed delivery (dedup timestamps set). Same as updatedState when send=false. */
+  deliveredState: AutoCaptureAlertState
+}
+
+/**
+ * Decide whether to send a Telegram warning based on assessment.
+ * Both conditions are evaluated independently:
+ * - fallback-success > 0: increment streak; send when streak >= 3 consecutive ticks (dedup via renotify)
+ * - spool capacity 70-89%: send once per band (dedup via spoolCapWarningBand)
+ * Both reset their respective state when the condition clears.
+ */
+export function decideWarningAlert(
+  previousState: AutoCaptureAlertState,
+  assessment: AutoCaptureAssessment,
+  host: string,
+  now: Date,
+  renotifyMs = DEFAULT_RENOTIFY_MS
+): AutoCaptureWarningDecision {
+  const updatedState = { ...previousState }
+  const messages: string[] = []
+  const reasons: Array<'fallback-streak' | 'spool-cap-new-band'> = []
+
+  // Track which dedup fields should be stamped only after confirmed delivery
+  let fallbackDeliveryTimestamp: string | null = null
+  let capacityDeliveryBand: string | null = null
+
+  // --- Fallback success streak (independent) ---
+  if (assessment.fallbackSuccessCount > 0) {
+    const prevStreak = previousState.fallbackSuccessStreak ?? 0
+    updatedState.fallbackSuccessStreak = prevStreak + 1
+    if (updatedState.fallbackSuccessStreak >= FALLBACK_SUCCESS_STREAK_THRESHOLD) {
+      // Dedup: only send if never sent, or renotify interval elapsed, or streak was reset and crossed again
+      const lastSentMs = previousState.fallbackWarningLastSentAt
+        ? Date.parse(previousState.fallbackWarningLastSentAt)
+        : Number.NaN
+      const shouldSend =
+        Number.isNaN(lastSentMs) || now.getTime() - lastSentMs >= renotifyMs
+      if (shouldSend) {
+        // Do NOT set fallbackWarningLastSentAt in updatedState — only in deliveredState
+        fallbackDeliveryTimestamp = toIsoString(now)
+        reasons.push('fallback-streak')
+        messages.push(
+          [
+            '⚠️ CC-memory auto-capture warning',
+            `host=${host}`,
+            `time=${toIsoString(now)}`,
+            `fallback-success streak=${updatedState.fallbackSuccessStreak}`,
+            'codex may be logged out, falling back to haiku',
+          ].join('\n')
+        )
+      }
+    }
+  } else {
+    // Clear streak when no fallback-success
+    updatedState.fallbackSuccessStreak = 0
+    updatedState.fallbackWarningLastSentAt = null
+  }
+
+  // --- Spool capacity warning (independent, one-shot per band) ---
+  if (assessment.spoolCapPct >= 70 && assessment.spoolCapPct < 90) {
+    const band = '70-89'
+    if (previousState.spoolCapWarningBand !== band) {
+      // Do NOT set spoolCapWarningBand in updatedState — only in deliveredState
+      capacityDeliveryBand = band
+      reasons.push('spool-cap-new-band')
+      messages.push(
+        [
+          '⚠️ CC-memory auto-capture warning',
+          `host=${host}`,
+          `time=${toIsoString(now)}`,
+          `spool-cap-pct=${assessment.spoolCapPct} (approaching capacity)`,
+        ].join('\n')
+      )
+    }
+  } else if (assessment.spoolCapPct < 70) {
+    // Clear spool cap band when below 70% (reset for next crossing)
+    updatedState.spoolCapWarningBand = null
+  }
+
+  const send = reasons.length > 0
+
+  // deliveredState: apply dedup timestamps that should only persist after confirmed send
+  const deliveredState = { ...updatedState }
+  if (fallbackDeliveryTimestamp) {
+    deliveredState.fallbackWarningLastSentAt = fallbackDeliveryTimestamp
+  }
+  if (capacityDeliveryBand) {
+    deliveredState.spoolCapWarningBand = capacityDeliveryBand
+  }
+
+  return {
+    send,
+    reasons,
+    reason: reasons[0] ?? 'none',
+    message: messages.length > 0 ? messages.join('\n---\n') : null,
+    updatedState,
+    deliveredState,
+  }
+}
+
 function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
   if (!input || typeof input !== 'object') return createEmptyAutoCaptureAlertState()
   const state = input as Partial<AutoCaptureAlertState>
@@ -361,6 +567,12 @@ function sanitizeAlertState(input: unknown): AutoCaptureAlertState {
       typeof state.lastDeadLetterCount === 'number' ? state.lastDeadLetterCount : null,
     recoveryFailureCount:
       typeof state.recoveryFailureCount === 'number' ? state.recoveryFailureCount : 0,
+    fallbackSuccessStreak:
+      typeof state.fallbackSuccessStreak === 'number' ? state.fallbackSuccessStreak : 0,
+    spoolCapWarningBand:
+      typeof state.spoolCapWarningBand === 'string' ? state.spoolCapWarningBand : null,
+    fallbackWarningLastSentAt:
+      typeof state.fallbackWarningLastSentAt === 'string' ? state.fallbackWarningLastSentAt : null,
   }
 }
 

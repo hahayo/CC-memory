@@ -7,6 +7,7 @@ import {
   assessAutoCaptureExecution,
   buildSuccessState,
   decideFailureAlert,
+  decideWarningAlert,
   formatAutoCaptureFailureMessage,
   formatAutoCaptureRecoveryMessage,
   loadAutoCaptureAlertState,
@@ -76,7 +77,7 @@ export interface AutoCaptureSupervisorOptions {
 
 export interface AutoCaptureSupervisorTickResult {
   exitCode: number
-  notification: 'none' | 'failure' | 'recovery'
+  notification: 'none' | 'failure' | 'recovery' | 'warning'
   alerted: boolean
   state: AutoCaptureAlertState
 }
@@ -311,6 +312,8 @@ async function buildWorkerEnv(
   nextEnv.DATABASE_URL = databaseUrl
   nextEnv.CC_MEMORY_SPOOL_DIR =
     nextEnv.CC_MEMORY_SPOOL_DIR ?? path.join(homedir(), '.cache', 'cc-memory', 'spool')
+  // 刻意的安全預設，勿改：unit 沒指定時退回便宜且已驗證的 provider，
+  // 避免漏設 env 的執行路徑直接打貴模型。provider 由 systemd unit 顯式指定。
   nextEnv.CC_CAPTURE_LLM = nextEnv.CC_CAPTURE_LLM ?? 'claude-cli'
   nextEnv.CC_CAPTURE_CLAUDE_MODEL = nextEnv.CC_CAPTURE_CLAUDE_MODEL ?? 'haiku'
   nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK = nextEnv.CC_CAPTURE_MAX_SESSIONS_PER_TICK ?? '1'
@@ -507,9 +510,33 @@ export async function runAutoCaptureSupervisorTick(
   if (assessment.ok) {
     const nextState = buildSuccessState(previousState, now)
 
+    // Process warnings (fallback-success streak, spool capacity) even on healthy ticks
+    const warningDecision = decideWarningAlert(previousState, assessment, hostname, now)
+    // Carry warning streak (incremented) into nextState; dedup timestamps only on confirmed delivery
+    nextState.fallbackSuccessStreak = warningDecision.updatedState.fallbackSuccessStreak
+    // Preserve pre-delivery state (no dedup stamps yet)
+    nextState.spoolCapWarningBand = warningDecision.updatedState.spoolCapWarningBand
+    nextState.fallbackWarningLastSentAt = warningDecision.updatedState.fallbackWarningLastSentAt
+    let warningSent = false
+    if (warningDecision.send && alertTarget && warningDecision.message) {
+      try {
+        await sendTelegram(alertTarget, warningDecision.message)
+        warningSent = true
+        // Only commit dedup timestamps after confirmed delivery
+        nextState.spoolCapWarningBand = warningDecision.deliveredState.spoolCapWarningBand
+        nextState.fallbackWarningLastSentAt = warningDecision.deliveredState.fallbackWarningLastSentAt
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error)
+        stderr.write(`[run-auto-capture-supervisor] warning alert failed: ${messageText}\n`)
+        // Keep pre-delivery state — next tick will re-attempt the warning
+      }
+    }
+
     if (!previousState.activeFingerprint) {
       await saveState(nextState)
-      return { exitCode: 0, notification: 'none', alerted: false, state: nextState }
+      // Return 'warning' notification when a warning was actually sent; recovery takes priority below
+      const notification = warningSent ? 'warning' as const : 'none' as const
+      return { exitCode: 0, notification, alerted: warningSent, state: nextState }
     }
 
     const message = formatAutoCaptureRecoveryMessage({
@@ -537,14 +564,19 @@ export async function runAutoCaptureSupervisorTick(
           `[run-auto-capture-supervisor] recovery alert failed 3 times consecutively, clearing failure state\n`
         )
         await saveState(nextState)
-        return { exitCode: 0, notification: 'recovery', alerted: false, state: nextState }
+        return { exitCode: 0, notification: 'recovery', alerted: warningSent, state: nextState }
       }
+      // Preserve warning dedup state even when recovery fails (Finding 2)
       const staleState: AutoCaptureAlertState = {
         ...previousState,
         recoveryFailureCount: prevCount + 1,
+        // Carry forward warning state from this tick
+        fallbackSuccessStreak: nextState.fallbackSuccessStreak,
+        spoolCapWarningBand: nextState.spoolCapWarningBand,
+        fallbackWarningLastSentAt: nextState.fallbackWarningLastSentAt,
       }
       await saveState(staleState)
-      return { exitCode: 2, notification: 'recovery', alerted: false, state: staleState }
+      return { exitCode: 2, notification: 'recovery', alerted: warningSent, state: staleState }
     }
   }
 

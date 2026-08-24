@@ -3,15 +3,27 @@
 // CC-memory v0.5 M2b capture LLM adapter + schema validation.
 
 import { spawn } from 'node:child_process';
-import { constants, accessSync } from 'node:fs';
+import { constants, accessSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { GoogleGenAI } from '@google/genai';
+import {
+  buildCodexSandboxCommand,
+  findCodexPackageRoot,
+  findCodexHome,
+} from './codex-sandbox.js';
 
 export const DEFAULT_CAPTURE_LLM_PROVIDER = 'claude-cli';
+export const CLAUDE_CLI_PROVIDER_ID = 'claude-cli';
+export const CODEX_CLI_CAPTURE_LLM_PROVIDER = 'codex-cli';
 export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
 export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
 export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
+export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_CODEX_CLI_TIMEOUT_MS = 90_000;
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_GEMINI_FLASH_TIMEOUT_MS = 90_000;
+export const KILL_GRACE_MS = 1_000;
 
 export type CaptureObservationType =
   | 'decision'
@@ -131,12 +143,27 @@ export interface CaptureLlmRawResponse {
   text: string;
 }
 
+export interface CaptureLlmExtractOptions {
+  forceProvider?: string;
+}
+
+export interface CaptureTelemetrySnapshot {
+  primaryProvider: string;
+  primarySuccess: number;
+  fallbackSuccess: number;
+  fallbackFailed: number;
+}
+
 export interface CaptureLlmAdapter {
   readonly model: string;
   readonly provider?: string;
   readonly disabled?: boolean;
   readonly disabledReason?: string;
-  extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse>;
+  readonly worstCaseCallBudgetMs: number;
+  /** Optional: return the worst-case budget for a specific provider role (e.g. 'fallback'). */
+  worstCaseCallBudgetMsFor?(provider: string): number;
+  extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse>;
+  takeTelemetry(): CaptureTelemetrySnapshot;
 }
 
 export interface ClaudeCliRunRequest {
@@ -158,11 +185,57 @@ export interface ClaudeCliRunResult {
 
 export type ClaudeCliRunner = (request: ClaudeCliRunRequest) => Promise<ClaudeCliRunResult>;
 
+export interface CodexCliRunRequest {
+  command: string;
+  args: string[];
+  stdin: string;
+  timeoutMs: number;
+  /** Spawn env — must contain ONLY the sandbox-specified keys (PATH). */
+  env: Record<string, string>;
+  /** Host path where codex writes the result JSON (caller reads it). */
+  outputFile: string;
+}
+
+export interface CodexCliRunResult {
+  stdout: string;
+  stderr?: string;
+  exitCode: number | null;
+  signal?: string | null;
+  timedOut?: boolean;
+}
+
+export type CodexCliRunner = (request: CodexCliRunRequest) => Promise<CodexCliRunResult>;
+
+export interface CodexSandboxCommandLike {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cleanup(): Promise<void>;
+  schemaFile: string;
+  outputFile: string;
+}
+
+export interface CodexSandboxOptionsLike {
+  codexPackageRoot: string;
+  hostCodexHome: string;
+  hostOutputDir: string;
+  hostCwd: string;
+  model: string;
+  timeoutMs: number;
+  stagingRoot: string;
+}
+
+export type CodexSandboxBuilder = (opts: CodexSandboxOptionsLike) => CodexSandboxCommandLike;
+
 export interface CreateCaptureLlmAdapterOptions {
   env?: Record<string, string | undefined>;
   stdout?: { write(chunk: string): unknown };
   runClaudeCli?: ClaudeCliRunner;
   findClaudeCli?: (env: Record<string, string | undefined>) => string;
+  runCodexCli?: CodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: CodexSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
   emitDisabledWarning?: boolean;
 }
 
@@ -173,9 +246,95 @@ export type CaptureLlmErrorCode =
   | 'CLAUDE_CLI_OUTPUT_INVALID'
   | 'CLAUDE_CLI_RATE_LIMITED'
   | 'CLAUDE_CLI_TIMEOUT'
+  | 'CODEX_CLI_EXIT_NONZERO'
+  | 'LLM_RATE_LIMITED'
+  | 'LLM_PROMPT_TOO_LONG'
+  | 'LLM_TIMEOUT'
   | 'LLM_MALFORMED_JSON'
   | 'LLM_SCHEMA_INVALID'
   | 'LLM_EXTRACT_FAILED';
+
+export type FailureCategory =
+  | 'malformed'
+  | 'schema-invalid'
+  | 'prompt-too-long'
+  | 'timeout'
+  | 'rate-limited'
+  | 'disabled'
+  | 'exit-nonzero'
+  | 'terminal';
+
+export type WorkerAction =
+  | 'retry-malformed'
+  | 'split'
+  | 'rate-limited'
+  | 'disabled'
+  | 'blocked'
+  | 'terminal';
+
+export function toFailureCategory(error: unknown): FailureCategory {
+  if (!(error instanceof CaptureLlmValidationError)) return 'terminal';
+  const code = error.code;
+  const message = error.message;
+  const rawOutput = typeof error.details.rawOutput === 'string' ? error.details.rawOutput : '';
+  switch (code) {
+    case 'LLM_MALFORMED_JSON':
+      return 'malformed';
+    case 'LLM_SCHEMA_INVALID':
+      return 'schema-invalid';
+    case 'LLM_PROMPT_TOO_LONG':
+      return 'prompt-too-long';
+    case 'LLM_TIMEOUT':
+    case 'CLAUDE_CLI_TIMEOUT':
+      return 'timeout';
+    case 'LLM_RATE_LIMITED':
+    case 'CLAUDE_CLI_RATE_LIMITED':
+      return 'rate-limited';
+    case 'CAPTURE_LLM_DISABLED':
+      return 'disabled';
+    case 'CODEX_CLI_EXIT_NONZERO':
+      return 'exit-nonzero';
+    case 'CLAUDE_CLI_EXIT_NONZERO': {
+      const combined = `${message}\n${rawOutput}`.toLowerCase();
+      if (combined.includes('prompt is too long') || combined.includes('prompt_too_long')) {
+        return 'prompt-too-long';
+      }
+      return 'exit-nonzero';
+    }
+    case 'CLAUDE_CLI_OUTPUT_INVALID':
+    case 'UNSUPPORTED_CAPTURE_LLM':
+    case 'LLM_EXTRACT_FAILED':
+      return 'terminal';
+    default:
+      return 'terminal';
+  }
+}
+
+export function toWorkerAction(
+  category: FailureCategory,
+  details?: { timeoutSubtype?: string }
+): WorkerAction {
+  switch (category) {
+    case 'malformed':
+      return 'retry-malformed';
+    case 'schema-invalid':
+      return 'terminal';
+    case 'prompt-too-long':
+      return 'split';
+    case 'timeout': {
+      const subtype = details?.timeoutSubtype ?? 'service-or-network';
+      return subtype === 'size-or-deadline' ? 'split' : 'blocked';
+    }
+    case 'rate-limited':
+      return 'rate-limited';
+    case 'disabled':
+      return 'disabled';
+    case 'exit-nonzero':
+      return 'terminal';
+    case 'terminal':
+      return 'terminal';
+  }
+}
 
 export class CaptureLlmValidationError extends Error {
   constructor(
@@ -325,23 +484,30 @@ export function estimateDiscoveryTokens(text: string): number {
 class DisabledCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly disabled = true;
   readonly disabledReason: string;
+  readonly worstCaseCallBudgetMs = 0;
 
   constructor(readonly model: string, reason: string, readonly provider?: string) {
     this.disabledReason = reason;
   }
 
-  async extract(): Promise<CaptureLlmRawResponse> {
+  async extract(_request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError('CAPTURE_LLM_DISABLED', this.disabledReason, {
       model: this.model,
       provider: this.provider,
     });
   }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider ?? 'disabled', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
 }
 
 class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly worstCaseCallBudgetMs = 0;
+
   constructor(readonly model: string, readonly provider: string) {}
 
-  async extract(): Promise<CaptureLlmRawResponse> {
+  async extract(_request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     throw new CaptureLlmValidationError(
       'UNSUPPORTED_CAPTURE_LLM',
       `Unsupported capture LLM provider: ${this.provider}`,
@@ -350,6 +516,10 @@ class UnsupportedCaptureLlmAdapter implements CaptureLlmAdapter {
         provider: this.provider,
       }
     );
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
   }
 }
 
@@ -472,7 +642,21 @@ function parseClaudeCliRateLimit(stdout: string, model: string): Record<string, 
 export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<ClaudeCliRunResult> {
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env, ...(input.env ?? {}) };
+    // Strip secrets that the claude-cli child process does not need
     delete childEnv.GEMINI_API_KEY;
+    delete childEnv.DATABASE_URL;
+    delete childEnv.DATABASE_URL_PERSONAL;
+    delete childEnv.TODOIST_API_TOKEN;
+    delete childEnv.CC_MEMORY_ALERT_BOT_TOKEN;
+    delete childEnv.CC_MEMORY_ALERT_CHAT_ID;
+    delete childEnv.AWS_ACCESS_KEY_ID;
+    delete childEnv.AWS_SECRET_ACCESS_KEY;
+    // Strip all PG* variables (PGPASSWORD, PGHOST, etc.)
+    for (const key of Object.keys(childEnv)) {
+      if (key.startsWith('PG')) {
+        delete childEnv[key];
+      }
+    }
     const child = spawn(input.command, input.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv,
@@ -527,16 +711,23 @@ export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<Clau
 }
 
 class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
-  readonly provider = DEFAULT_CAPTURE_LLM_PROVIDER;
+  readonly provider = CLAUDE_CLI_PROVIDER_ID;
+  readonly worstCaseCallBudgetMs: number;
 
   constructor(
     readonly model: string,
     private readonly command: string,
     private readonly timeoutMs: number,
     private readonly runClaudeCli: ClaudeCliRunner
-  ) {}
+  ) {
+    this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
+  }
 
-  async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
     let result: ClaudeCliRunResult;
     try {
       result = await this.runClaudeCli({
@@ -587,23 +778,41 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
 
     if (result.timedOut) {
       throw new CaptureLlmValidationError(
-        'CLAUDE_CLI_TIMEOUT',
+        'LLM_TIMEOUT',
         `claude-cli timed out after ${this.timeoutMs}ms`,
         {
           model: this.model,
           provider: this.provider,
           timeoutMs: this.timeoutMs,
+          legacyCode: 'CLAUDE_CLI_TIMEOUT',
         }
       );
     }
 
     if (result.exitCode !== 0) {
-      const rateLimitDetails = parseClaudeCliRateLimit(result.stdout || result.stderr || '', this.model);
+      const combinedOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+      const rateLimitDetails = parseClaudeCliRateLimit(combinedOutput, this.model);
       if (rateLimitDetails) {
         throw new CaptureLlmValidationError(
-          'CLAUDE_CLI_RATE_LIMITED',
+          'LLM_RATE_LIMITED',
           'claude-cli rate limited',
-          rateLimitDetails
+          { ...rateLimitDetails, legacyCode: 'CLAUDE_CLI_RATE_LIMITED' }
+        );
+      }
+
+      const promptCombined = `claude-cli exited with code ${result.exitCode ?? 'null'}\n${combinedOutput}`.toLowerCase();
+      if (promptCombined.includes('prompt is too long') || promptCombined.includes('prompt_too_long')) {
+        throw new CaptureLlmValidationError(
+          'LLM_PROMPT_TOO_LONG',
+          `claude-cli exited with code ${result.exitCode ?? 'null'}`,
+          {
+            model: this.model,
+            provider: this.provider,
+            exitCode: result.exitCode,
+            signal: result.signal ?? null,
+            legacyCode: 'CLAUDE_CLI_EXIT_NONZERO',
+            ...optionalRawOutput(combinedOutput),
+          }
         );
       }
 
@@ -615,7 +824,7 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
           provider: this.provider,
           exitCode: result.exitCode,
           signal: result.signal ?? null,
-          ...optionalRawOutput(result.stdout || result.stderr || ''),
+          ...optionalRawOutput(combinedOutput),
         }
       );
     }
@@ -639,23 +848,350 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 }
 
-class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
-  readonly provider = GEMINI_FLASH_CAPTURE_LLM_PROVIDER;
-  private readonly ai: GoogleGenAI;
+// ---------------------------------------------------------------------------
+// Codex CLI subprocess runner + adapter
+// ---------------------------------------------------------------------------
 
-  constructor(readonly model: string, apiKey: string) {
-    this.ai = new GoogleGenAI({ apiKey });
+/**
+ * Default codex package root finder — delegates to findCodexPackageRoot()
+ * from codex-sandbox.ts.
+ */
+function defaultFindCodexCli(): string | null {
+  return findCodexPackageRoot();
+}
+
+/**
+ * Spawn a sandboxed codex exec subprocess.
+ *
+ * Contract:
+ *   - `input.env` is passed as-is to `spawn()` — no merging with `process.env`.
+ *     This prevents /proc/1/environ from leaking host secrets.
+ *   - Timeout: SIGTERM → 1 s grace → SIGKILL (mirrors runClaudeCliSubprocess).
+ *   - Result is read from `input.outputFile` by the caller after exit.
+ */
+export function runCodexCliSubprocess(input: CodexCliRunRequest): Promise<CodexCliRunResult> {
+  return new Promise((resolve, reject) => {
+    // Contract (b): only pass cmd.env — never merge process.env.
+    const child = spawn(input.command, input.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: input.env,
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+
+    const finish = (result: CodexCliRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      resolve(result);
+    };
+
+    // Contract (c): adapter enforces timeout with SIGTERM → 1s → SIGKILL.
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, KILL_GRACE_MS);
+    }, input.timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      reject(error);
+    });
+    child.on('close', (exitCode, signal) => {
+      finish({
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        timedOut,
+      });
+    });
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(input.stdin);
+  });
+}
+
+/**
+ * Detect model-unavailable messages in codex stderr/stdout.
+ * Phase 0 finding: sandbox + clean env → "The 'gpt-5.6-luna' model requires
+ * a newer version of Codex" or "unknown model" or "unknown variant".
+ */
+function isCodexModelUnavailable(combined: string): boolean {
+  const lower = combined.toLowerCase();
+  return lower.includes('requires a newer version') ||
+    lower.includes('unknown model') ||
+    lower.includes('unknown variant');
+}
+
+/**
+ * Detect rate-limit / quota messages in codex output.
+ * Codex reports quota exhaustion as a text message or a structured error.
+ */
+function isCodexRateLimited(combined: string): boolean {
+  const lower = combined.toLowerCase();
+  return lower.includes('rate limit') ||
+    lower.includes('rate_limit') ||
+    lower.includes('quota') ||
+    lower.includes('too many requests') ||
+    /\b429\b/.test(lower);
+}
+
+class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider = CODEX_CLI_CAPTURE_LLM_PROVIDER;
+  readonly worstCaseCallBudgetMs: number;
+
+  constructor(
+    readonly model: string,
+    private readonly codexPackageRoot: string,
+    private readonly timeoutMs: number,
+    private readonly runCodexCli: CodexCliRunner,
+    private readonly buildSandboxFn: CodexSandboxBuilder,
+    private readonly spoolDir: string
+  ) {
+    this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
   }
 
-  async extract(request: CaptureLlmRequest): Promise<CaptureLlmRawResponse> {
-    const response = await this.ai.models.generateContent({
-      model: this.model,
-      contents: buildCapturePrompt(request, { includeOpeningInstructions: true }),
-    });
-    return {
-      model: this.model,
-      text: response.text ?? '',
-    };
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    // Contract (d): hostOutputDir and hostCwd created by adapter, deleted in finally.
+    const hostOutputDir = mkdtempSync(join(tmpdir(), 'ccm-codex-out-'));
+    const hostCwd = mkdtempSync(join(tmpdir(), 'ccm-codex-cwd-'));
+
+    // cmd may be undefined if buildSandboxFn throws (e.g. missing bwrap or auth.json).
+    let cmd: CodexSandboxCommandLike | undefined;
+
+    try {
+      // Contract (e): explicit stagingRoot derived from CC_MEMORY_SPOOL_DIR (or default spool),
+      // walking up one level then into codex-sandbox/. This ensures the sandbox staging
+      // area is co-located with the spool directory rather than using the sandbox's default.
+      const stagingRoot = join(this.spoolDir, '..', 'codex-sandbox');
+
+      try {
+        cmd = this.buildSandboxFn({
+          codexPackageRoot: this.codexPackageRoot,
+          hostCodexHome: findCodexHome(),
+          hostOutputDir,
+          hostCwd,
+          model: this.model,
+          timeoutMs: this.timeoutMs,
+          stagingRoot,
+        });
+      } catch (error) {
+        // Sandbox build failure (missing bwrap, missing auth.json, etc.) →
+        // CAPTURE_LLM_DISABLED so FallbackCaptureLlmAdapter can try haiku.
+        throw new CaptureLlmValidationError(
+          'CAPTURE_LLM_DISABLED',
+          `codex sandbox unavailable: ${errorMessage(error)}`,
+          { model: this.model, provider: this.provider, cause: errorMessage(error) }
+        );
+      }
+
+      // Write the output schema so codex knows what shape to produce.
+      writeFileSync(cmd.schemaFile, JSON.stringify(CAPTURE_EXTRACTION_JSON_SCHEMA));
+
+      let result: CodexCliRunResult;
+      try {
+        result = await this.runCodexCli({
+          command: cmd.command,
+          args: cmd.args,
+          stdin: buildCapturePrompt(request, { includeOpeningInstructions: true }),
+          timeoutMs: this.timeoutMs,
+          env: cmd.env,
+          outputFile: cmd.outputFile,
+        });
+      } catch (error) {
+        if (isErrnoCode(error, 'ENOENT')) {
+          throw new CaptureLlmValidationError(
+            'CAPTURE_LLM_DISABLED',
+            'codex CLI (bwrap) not found; ensure bubblewrap is installed',
+            { model: this.model, provider: this.provider }
+          );
+        }
+        throw new CaptureLlmValidationError('LLM_EXTRACT_FAILED', 'codex-cli subprocess failed', {
+          model: this.model,
+          provider: this.provider,
+          cause: errorMessage(error),
+        });
+      }
+
+      // Contract (c): timeout → LLM_TIMEOUT with default subtype service-or-network.
+      if (result.timedOut) {
+        throw new CaptureLlmValidationError(
+          'LLM_TIMEOUT',
+          `codex-cli timed out after ${this.timeoutMs}ms`,
+          {
+            model: this.model,
+            provider: this.provider,
+            timeoutMs: this.timeoutMs,
+            timeoutSubtype: 'service-or-network',
+          }
+        );
+      }
+
+      if (result.exitCode !== 0) {
+        // Check both stdout AND stderr combined (Phase 1 fix: no masking bug).
+        const combined = `${result.stdout}\n${result.stderr ?? ''}`;
+
+        // Model unavailable → CAPTURE_LLM_DISABLED (not silent degradation).
+        if (isCodexModelUnavailable(combined)) {
+          throw new CaptureLlmValidationError(
+            'CAPTURE_LLM_DISABLED',
+            `codex model unavailable: ${this.model}`,
+            {
+              model: this.model,
+              provider: this.provider,
+              ...optionalRawOutput(combined.trim()),
+            }
+          );
+        }
+
+        // Rate limit / quota → LLM_RATE_LIMITED.
+        if (isCodexRateLimited(combined)) {
+          throw new CaptureLlmValidationError(
+            'LLM_RATE_LIMITED',
+            'codex-cli rate limited',
+            {
+              model: this.model,
+              provider: this.provider,
+              ...optionalRawOutput(combined.trim()),
+            }
+          );
+        }
+
+        // Generic nonzero exit.
+        throw new CaptureLlmValidationError(
+          'CODEX_CLI_EXIT_NONZERO',
+          `codex-cli exited with code ${result.exitCode ?? 'null'}`,
+          {
+            model: this.model,
+            provider: this.provider,
+            exitCode: result.exitCode,
+            signal: result.signal ?? null,
+            ...optionalRawOutput(combined.trim()),
+          }
+        );
+      }
+
+      // Read result from the output file (codex writes to -o <file>).
+      let outputText: string;
+      try {
+        outputText = readFileSync(cmd.outputFile, 'utf-8');
+      } catch (error) {
+        throw new CaptureLlmValidationError(
+          'LLM_MALFORMED_JSON',
+          'codex-cli output file missing or unreadable',
+          {
+            model: this.model,
+            provider: this.provider,
+            cause: errorMessage(error),
+          }
+        );
+      }
+
+      // Validate the extraction JSON.
+      let text: string;
+      try {
+        text = jsonObjectCandidate(outputText);
+        parseCaptureLlmExtraction({ model: this.model, text });
+      } catch (error) {
+        if (error instanceof CaptureLlmValidationError) {
+          throw ensureValidationErrorHasModel(error, this.model, this.provider, {
+            rawOutput: outputText,
+          });
+        }
+        throw error;
+      }
+
+      return { model: this.model, text };
+    } finally {
+      // Contract (d): cleanup all three: hostOutputDir, hostCwd, and sandbox disposable dir.
+      if (cmd) await cmd.cleanup();
+      try { rmSync(hostOutputDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      try { rmSync(hostCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+}
+
+/** Injection seam for testing without a real Gemini API key. */
+export type GeminiGenerateContent = (
+  request: { model: string; contents: string; config?: { abortSignal?: AbortSignal } }
+) => Promise<{ text?: string | null }>;
+
+class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider = GEMINI_FLASH_CAPTURE_LLM_PROVIDER;
+  readonly worstCaseCallBudgetMs: number;
+  private readonly generateFn: GeminiGenerateContent;
+  private readonly timeoutMs: number;
+
+  constructor(
+    readonly model: string,
+    apiKey: string,
+    timeoutMs: number,
+    generateContent?: GeminiGenerateContent
+  ) {
+    this.timeoutMs = timeoutMs;
+    this.worstCaseCallBudgetMs = timeoutMs;
+    if (generateContent) {
+      this.generateFn = generateContent;
+    } else {
+      const ai = new GoogleGenAI({ apiKey });
+      this.generateFn = (req) => ai.models.generateContent(req);
+    }
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+  }
+
+  async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.generateFn({
+        model: this.model,
+        contents: buildCapturePrompt(request, { includeOpeningInstructions: true }),
+        config: {
+          abortSignal: controller.signal,
+        },
+      });
+      return {
+        model: this.model,
+        text: response.text ?? '',
+      };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new CaptureLlmValidationError(
+          'LLM_TIMEOUT',
+          `gemini-flash timed out after ${this.timeoutMs}ms`,
+          {
+            model: this.model,
+            provider: this.provider,
+            timeoutMs: this.timeoutMs,
+          }
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -698,11 +1234,223 @@ function buildCapturePrompt(
     .join('\n');
 }
 
+/** Fallback trigger categories — primary errors that warrant trying the fallback provider. */
+const FALLBACK_TRIGGER_CATEGORIES: ReadonlySet<FailureCategory> = new Set([
+  'rate-limited',
+  'disabled',
+  'timeout',
+  'exit-nonzero',
+  'terminal',
+]);
+
+export class FallbackCaptureLlmAdapter implements CaptureLlmAdapter {
+  readonly provider: string | undefined;
+  readonly model: string;
+  readonly worstCaseCallBudgetMs: number;
+
+  private _primarySuccess = 0;
+  private _fallbackSuccess = 0;
+  private _fallbackFailed = 0;
+
+  constructor(
+    private readonly primary: CaptureLlmAdapter,
+    private readonly fallback: CaptureLlmAdapter
+  ) {
+    this.provider = primary.provider;
+    this.model = primary.model;
+    this.worstCaseCallBudgetMs = primary.worstCaseCallBudgetMs + fallback.worstCaseCallBudgetMs;
+  }
+
+  get disabled(): boolean {
+    return (this.primary.disabled === true) && (this.fallback.disabled === true);
+  }
+
+  get disabledReason(): string | undefined {
+    if (!this.disabled) return undefined;
+    const reasons = [this.primary.disabledReason, this.fallback.disabledReason]
+      .filter((r): r is string => typeof r === 'string');
+    return reasons.join('; ');
+  }
+
+  worstCaseCallBudgetMsFor(provider: string): number {
+    if (provider === 'fallback' || provider === (this.fallback.provider ?? '')) {
+      return this.fallback.worstCaseCallBudgetMs;
+    }
+    return this.primary.worstCaseCallBudgetMs;
+  }
+
+  takeTelemetry(): CaptureTelemetrySnapshot {
+    const snapshot: CaptureTelemetrySnapshot = {
+      primaryProvider: this.primary.provider ?? 'unknown',
+      primarySuccess: this._primarySuccess,
+      fallbackSuccess: this._fallbackSuccess,
+      fallbackFailed: this._fallbackFailed,
+    };
+    this._primarySuccess = 0;
+    this._fallbackSuccess = 0;
+    this._fallbackFailed = 0;
+    return snapshot;
+  }
+
+  async extract(request: CaptureLlmRequest, options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
+    // forceProvider: route directly to the named adapter.
+    // Accepts the role string 'fallback' (from retryProvider) or a provider id.
+    if (options?.forceProvider) {
+      const fp = options.forceProvider;
+      const target = (fp === 'fallback' || fp === (this.fallback.provider ?? ''))
+        ? this.fallback
+        : this.primary;
+      try {
+        const response = await target.extract(request);
+        if (target === this.fallback) {
+          this._fallbackSuccess += 1;
+        } else {
+          this._primarySuccess += 1;
+        }
+        return response;
+      } catch (error) {
+        // Mark retry as exhausted so worker does not retry again with forceProvider
+        if (error instanceof CaptureLlmValidationError) {
+          error.details.retryExhausted = true;
+          error.details.retryProvider = fp;
+        }
+        if (target === this.fallback) {
+          this._fallbackFailed += 1;
+        }
+        throw error;
+      }
+    }
+
+    // Step 1: try primary
+    let primaryError: CaptureLlmValidationError | undefined;
+    let primaryCategory: FailureCategory | undefined;
+    try {
+      const response = await this.primary.extract(request);
+      this._primarySuccess += 1;
+      return response;
+    } catch (error) {
+      if (!(error instanceof CaptureLlmValidationError)) throw error;
+      primaryError = error;
+      primaryCategory = toFailureCategory(error);
+    }
+
+    // Should we try fallback?
+    if (!primaryCategory || !FALLBACK_TRIGGER_CATEGORIES.has(primaryCategory)) {
+      // Don't fallback for malformed, schema-invalid, prompt-too-long
+      throw primaryError!;
+    }
+
+    // Step 2: try fallback
+    try {
+      const response = await this.fallback.extract(request);
+      this._fallbackSuccess += 1;
+      return response;
+    } catch (fallbackError) {
+      this._fallbackFailed += 1;
+      if (!(fallbackError instanceof CaptureLlmValidationError)) throw fallbackError;
+      const fallbackCategory = toFailureCategory(fallbackError);
+
+      // Determine final category per D4 second-step table
+      const finalCategory = resolveFallbackCategory(primaryCategory, fallbackCategory);
+      const finalError = buildFallbackError(
+        finalCategory,
+        primaryError!,
+        fallbackError,
+        primaryCategory
+      );
+      throw finalError;
+    }
+  }
+}
+
+function resolveFallbackCategory(
+  primaryCategory: FailureCategory,
+  fallbackCategory: FailureCategory
+): FailureCategory {
+  // Fallback malformed → malformed (with retryProvider)
+  if (fallbackCategory === 'malformed') return 'malformed';
+  // Fallback schema-invalid → schema-invalid
+  if (fallbackCategory === 'schema-invalid') return 'schema-invalid';
+  // Fallback prompt-too-long → prompt-too-long (with alternateCategory = primary's category)
+  if (fallbackCategory === 'prompt-too-long') return 'prompt-too-long';
+  // Fallback rate-limited → rate-limited (any primary)
+  if (fallbackCategory === 'rate-limited') return 'rate-limited';
+  // Double timeout → blocked (timeout category with service-or-network subtype)
+  if (fallbackCategory === 'timeout' && primaryCategory === 'timeout') return 'timeout';
+  // Single fallback timeout → timeout
+  if (fallbackCategory === 'timeout') return 'timeout';
+  // Fallback disabled: depends on primary
+  if (fallbackCategory === 'disabled') {
+    if (primaryCategory === 'rate-limited') return 'rate-limited';
+    if (primaryCategory === 'timeout') return 'timeout';
+    if (primaryCategory === 'disabled') return 'disabled';
+    return 'terminal';
+  }
+  // Fallback exit-nonzero or terminal: depends on primary
+  if (primaryCategory === 'rate-limited') return 'rate-limited';
+  if (primaryCategory === 'timeout') return 'terminal';
+  return 'terminal';
+}
+
+function buildFallbackError(
+  finalCategory: FailureCategory,
+  primaryError: CaptureLlmValidationError,
+  fallbackError: CaptureLlmValidationError,
+  primaryCategory: FailureCategory
+): CaptureLlmValidationError {
+  // Map category back to an error code
+  const code = categoryToErrorCode(finalCategory, fallbackError);
+  const details: Record<string, unknown> = {
+    ...fallbackError.details,
+    primaryCategory,
+    primaryCode: primaryError.code,
+    primaryMessage: primaryError.message,
+    fallbackCategory: toFailureCategory(fallbackError),
+    fallbackCode: fallbackError.code,
+    fallbackMessage: fallbackError.message,
+  };
+
+  // malformed from fallback → retryProvider
+  if (finalCategory === 'malformed') {
+    details.retryProvider = 'fallback';
+  }
+  // prompt-too-long from fallback → alternateCategory from primary
+  if (finalCategory === 'prompt-too-long') {
+    details.alternateCategory = primaryCategory;
+  }
+  // Double timeout → service-or-network subtype to trigger blocked
+  if (finalCategory === 'timeout' && primaryCategory === 'timeout') {
+    details.timeoutSubtype = 'service-or-network';
+  }
+
+  return new CaptureLlmValidationError(code, fallbackError.message, details);
+}
+
+function categoryToErrorCode(
+  category: FailureCategory,
+  fallbackError: CaptureLlmValidationError
+): CaptureLlmErrorCode {
+  switch (category) {
+    case 'malformed': return 'LLM_MALFORMED_JSON';
+    case 'schema-invalid': return 'LLM_SCHEMA_INVALID';
+    case 'prompt-too-long': return 'LLM_PROMPT_TOO_LONG';
+    case 'timeout': return 'LLM_TIMEOUT';
+    case 'rate-limited': return 'LLM_RATE_LIMITED';
+    case 'disabled': return 'CAPTURE_LLM_DISABLED';
+    case 'exit-nonzero': return fallbackError.code;
+    case 'terminal': return 'LLM_EXTRACT_FAILED';
+  }
+}
+
 export function isCaptureLlmDisabled(adapter: CaptureLlmAdapter): boolean {
   return adapter.disabled === true;
 }
 
-export function createCaptureLlmAdapter(
+/**
+ * Create a single adapter without reading fallback env — used by the wrapper
+ * factory to avoid recursive fallback creation.
+ */
+function createSingleAdapter(
   options: CreateCaptureLlmAdapterOptions = {}
 ): CaptureLlmAdapter {
   const env = options.env ?? process.env;
@@ -735,9 +1483,32 @@ export function createCaptureLlmAdapter(
     );
   }
 
+  if (provider === CODEX_CLI_CAPTURE_LLM_PROVIDER) {
+    const model = env.CC_CAPTURE_CODEX_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL;
+    const timeoutMs = parsePositiveIntegerEnv(
+      env.CC_CAPTURE_CODEX_TIMEOUT_MS,
+      DEFAULT_CODEX_CLI_TIMEOUT_MS
+    );
+    const codexPackageRoot = (options.findCodexCli ?? defaultFindCodexCli)();
+    if (!codexPackageRoot) {
+      const reason = 'codex CLI (@openai/codex) not found; install globally and ensure the native binary is present';
+      if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+      return new DisabledCaptureLlmAdapter(model, reason, provider);
+    }
+
+    const spoolDir = env.CC_MEMORY_SPOOL_DIR?.trim() ||
+      join(process.env.HOME ?? '/tmp', '.cache', 'cc-memory', 'spool');
+    return new CodexCliCaptureLlmAdapter(
+      model,
+      codexPackageRoot,
+      timeoutMs,
+      options.runCodexCli ?? runCodexCliSubprocess,
+      options.buildSandbox ?? buildCodexSandboxCommand,
+      spoolDir
+    );
+  }
+
   if (provider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER) {
-    // unsupported provider 無 model 概念——model 欄位標 unknown，避免 dead-letter
-    // metadata 把 provider 名誤報成 model 名
     return new UnsupportedCaptureLlmAdapter('unknown', provider);
   }
 
@@ -749,5 +1520,49 @@ export function createCaptureLlmAdapter(
     return new DisabledCaptureLlmAdapter(model, reason, provider);
   }
 
-  return new GeminiFlashCaptureLlmAdapter(model, apiKey);
+  const geminiTimeoutMs = parsePositiveIntegerEnv(
+    env.CC_CAPTURE_GEMINI_TIMEOUT_MS,
+    DEFAULT_GEMINI_FLASH_TIMEOUT_MS
+  );
+  return new GeminiFlashCaptureLlmAdapter(model, apiKey, geminiTimeoutMs, options.generateContent);
+}
+
+export function createCaptureLlmAdapter(
+  options: CreateCaptureLlmAdapterOptions = {}
+): CaptureLlmAdapter {
+  const env = options.env ?? process.env;
+  const primary = createSingleAdapter(options);
+
+  const fallbackProvider = env.CC_CAPTURE_LLM_FALLBACK?.trim();
+  if (!fallbackProvider) {
+    // No fallback configured — maintain today's behaviour exactly
+    if (!Number.isFinite(primary.worstCaseCallBudgetMs) && !primary.disabled) {
+      throw new Error(
+        `Adapter ${primary.provider ?? 'unknown'} has non-finite worstCaseCallBudgetMs — cannot compute tick budget`
+      );
+    }
+    return primary;
+  }
+
+  // Validate known fallback provider
+  if (
+    fallbackProvider !== DEFAULT_CAPTURE_LLM_PROVIDER &&
+    fallbackProvider !== GEMINI_FLASH_CAPTURE_LLM_PROVIDER
+  ) {
+    throw new Error(
+      `Unknown fallback capture LLM provider: ${fallbackProvider} (CC_CAPTURE_LLM_FALLBACK)`
+    );
+  }
+
+  // Build fallback adapter using its own provider env
+  const fallbackEnv = { ...env, CC_CAPTURE_LLM: fallbackProvider };
+  const fallback = createSingleAdapter({ ...options, env: fallbackEnv, emitDisabledWarning: false });
+
+  const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+  if (!Number.isFinite(wrapper.worstCaseCallBudgetMs) && !wrapper.disabled) {
+    throw new Error(
+      `Fallback adapter has non-finite worstCaseCallBudgetMs — cannot compute tick budget`
+    );
+  }
+  return wrapper;
 }

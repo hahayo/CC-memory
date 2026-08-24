@@ -15,7 +15,7 @@
 ## 長期目標：取代 claude-mem（v0.5 SDD active）
 
 - **目前載體**：`docs/auto-capture-v0.5/{spec,plan,task}.md`。v0.4 Phase C 舊設計只供溯源，不再是實作依據。
-- **明文出處**：v0.5 SDD 的 Go/No-Go 品質閘（quality gate，品質關卡）三硬指標：10 組 benchmark query（基準查詢，固定 5 + 真實 5）中 ≥7 組 Top-5 交集 ≥3、10 組平均人工 first-relevant rank ≤ claude-mem 平均 rank、錯抓率 <10%，AND 全達才停用。`docs/spec.md` 的 Goal 8 是舊 v0.4 口徑，已在 Phase C 章節加 SUPERSEDED marker。
+- **明文出處**：v0.5 SDD 的 Go/No-Go 已改為 canary（小規模試跑）+ 觀察窗 + 使用者核准長跑制（2026-08-23 拍板）；benchmark 降為 advisory（參考用），不再是啟用前置硬閘門。七項清單見 `memory-ops-cutover.md` §9。`docs/spec.md` 的 Goal 8 是舊 v0.4 口徑，已在 Phase C 章節加 SUPERSEDED marker。
 - **2026-07-05 盤點結論**：CC-memory 的儲存/檢索核心（pgvector 語義 + hybrid 搜尋、跨裝置 PostgreSQL、治理）已強於 claude-mem；差距集中 4 項——① 全自動 capture 管線（hook + 背景 worker，難度 L）② session-start 自動注入 + token 經濟學（M）③ 細粒度 observation（觀察紀錄）模型（M）④ 3 層 token 節約檢索含 timeline（M）。v0.5 已把 ③/④ 納入主線。
 - **授權紅線**：claude-mem 為 AGPL-3.0，只抄架構思路（hook 佈局、佇列語義、taxonomy、3 層檢索），不搬任何原始碼。
 
@@ -30,6 +30,7 @@
 | `INDEX.md`（本檔） | track 導覽 |
 | `decisions/{README,INDEX,_draft/,DEC-*.md}` | Git（版本控制）決策卡：跨 Claude Code／Codex 共用的決策 SSOT（單一真相來源），涵蓋規範、索引、候選草稿與正式決策 |
 | `auto-capture-v0.5/{spec,plan,task}.md` | Track 1 v0.5 auto-capture SDD（Spec-Driven Development，規格驅動開發）三件套；取代 v0.4 Phase C 休眠設計 |
+| `auto-capture-v0.5/plans/2026-08-23-codex-primary-haiku-fallback.md` | codex-cli 主力 + claude-cli fallback 切換計畫（Phase 1-8；含沙箱驗收、canary、觀察窗）（Active） |
 | `auto-capture-v0.5/memory-ops-cutover.md` | Claude Code／Codex hook-driven auto-capture＋reminder/Todoist systemd timers 維運遷移手冊（Active） |
 | `auto-capture-v0.5/benchmark-fixtures.md` | benchmark（基準測試）查詢 fixture（固定資料）集（Active） |
 | `auto-capture-v0.5/m4-settings-draft.md` | Claude Code／Codex SessionStart settings 落地紀錄（Active；2026-07-17 applied，Codex trust 待人工完成） |

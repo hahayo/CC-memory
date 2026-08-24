@@ -38,7 +38,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 |---|---|---|
 | 設計地基 | `session_summaries` 單表 | `observations` + `project_memories(type='session')` rollup（彙總） |
 | 採集入口 | Stop hook 同步 Claude CLI subprocess（子程序） | PostToolUse 只 append（附加）本地 spool（緩衝暫存區）；Stop append sentinel 後 quick-kick systemd worker；SessionStart quick-kick backlog |
-| LLM（大型語言模型） | Claude CLI，吃 subscription（訂閱） | 遠端 Gemini Flash，`CC_CAPTURE_LLM` 可切，無 key 靜默停用（**2026-07-07 使用者拍板改回 claude-cli 預設**：成本前提反轉——訂閱已付、Gemini 需另付 API 費；worker cron 內短暫 subprocess 無 v0.4 hook 同步問題。見 Constraints 紅線 3） |
+| LLM（大型語言模型） | Claude CLI，吃 subscription（訂閱） | 遠端 Gemini Flash，`CC_CAPTURE_LLM` 可切，無 key 靜默停用（**2026-07-07 使用者拍板改回 claude-cli 預設**：成本前提反轉——訂閱已付、Gemini 需另付 API 費；worker cron 內短暫 subprocess 無 v0.4 hook 同步問題。見 Constraints 紅線 3）**後記 2026-08-23**：正式 unit 改 codex-cli（主力；`CC_CAPTURE_LLM=codex-cli`）+ claude-cli fallback（`CC_CAPTURE_LLM_FALLBACK=claude-cli`）；gemini-flash 仍可切。見紅線 3 後記。 |
 | 注入 | 固定 N+M 筆全文 | Recent Activity（近期活動）輕索引，每列標 `discovery_tokens` |
 | 檢索 | `cc_memory_search` 單層回全文 | search 輕索引 → timeline（時間軸）→ batch get observations（批次取觀察紀錄） |
 | 成本/RAM | 可能有本機常駐 daemon（守護程序）誘惑 | 明確禁止常駐 daemon；hook 不走網路、不 spawn LLM |
@@ -50,7 +50,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | `session_summaries` 是 auto-capture 主表 | 新增 `observations` 主表；session rollup 寫進既有 `project_memories(type='session')` | 細粒度 observation 是 PostToolUse worker 與 3 層 retrieval 的地基 | `docs/superpowers/specs/2026-04-22-auto-capture-design.md` §Data Model、§Non-goals；`docs/plan.md` §Data Model；`docs/task.md` M1 | M1 schema 改寫；M3 search 結果單位改 rollup；M4 注入改 rollup index；benchmark 對比單位重定 |
 | `observations` 是 Stage 2 non-goal | v0.5 M1 必做 `observations` | 四大 gap 中 #3/#4 直接缺地基 | 舊 design §Non-goals/Future Roadmap；`docs/INDEX.md` 長期目標 | v0.4 舊 SDD 標 superseded；v0.5 不再稱 Stage 2 |
 | Stop hook 同步跑 capture-runner + Claude CLI | PostToolUse 僅 O(1) local append；Stop append sentinel 後 fail-open quick-kick；SessionStart quick-kick backlog；systemd worker 批次抽取 | RAM 紅線與 RTT（來回延遲）風險；不能讓 tool use（工具呼叫）或 session 結束等待遠端 DB/LLM | 舊 design §Capture Pipeline；`docs/plan.md` §Phase C 新增 services；舊 plan M2；正式 decision card | M2 拆 hook 與 worker；新增 spool 可靠性 Gate；Claude Code/Codex 共用語意 |
-| Claude CLI subprocess 摘要 | Gemini Flash 預設，`CC_CAPTURE_LLM` 可切；缺 key 靜默停用（**後記 2026-07-07**：預設改回 `claude-cli`——使用者拍板不為 Gemini 另付 API 費；當年否定 Claude CLI 的 RAM/延遲顧慮針對 hook 同步 spawn，v0.5 的 cron worker 批次架構已消解；gemini-flash 降為可切選項） | 本機不跑重型子程序；成本與 RAM 可控；對齊批量任務用便宜模型規則 | 舊 design §Claude CLI 呼叫；`docs/plan.md` env `CC_MEMORY_CLAUDE_MODEL` | env 全改；品質閘要記模型名；LLM 驗證失敗進 dead-letter（死信） |
+| Claude CLI subprocess 摘要 | Gemini Flash 預設，`CC_CAPTURE_LLM` 可切；缺 key 靜默停用（**後記 2026-07-07**：預設改回 `claude-cli`——使用者拍板不為 Gemini 另付 API 費；當年否定 Claude CLI 的 RAM/延遲顧慮針對 hook 同步 spawn，v0.5 的 cron worker 批次架構已消解；gemini-flash 降為可切選項）**後記 2026-08-23**：正式 unit 主力改 codex-cli（Claude/Codex 共用對話歷史 + 分散配額）；claude-cli/haiku 降為自動 fallback（退回）；預設程式碼值仍 `claude-cli`，unit 以 `CC_CAPTURE_LLM=codex-cli` 覆蓋。 | 本機不跑重型子程序；成本與 RAM 可控；對齊批量任務用便宜模型規則 | 舊 design §Claude CLI 呼叫；`docs/plan.md` env `CC_MEMORY_CLAUDE_MODEL` | env 全改；品質閘要記模型名；LLM 驗證失敗進 dead-letter（死信） |
 | 固定 N summary + M manual 全文注入 | Recent Activity 輕索引 + `discovery_tokens` | token 經濟學：先低成本看索引，再按需展開 | 舊 design §SessionStart Re-inject；`docs/task.md` M4 | M4 增 token budget（預算）硬上限、截斷測試、污染防線 |
 | `cc_memory_search` 跨表加權後回全文 | `cc_memory_search` 回輕索引，不破 `SearchResultEnvelope`（搜尋結果信封）；新增 `cc_memory_timeline`、`cc_memory_get_observations` | 3 層 retrieval 才能同時省 token 與保細節 | 舊 design §Retrieval；`src/services/types.ts`；`src/services/feedback.ts` | M3 新工具；`search_feedback` 寫入形狀相容性 Gate |
 | 同一 session 一筆 active canonical summary | 保留 per-session canonical（每 session 單一標準列）語義；rollup 改寫 `project_memories(type='session')`，`idempotency_key=capture:v05:<project>:<session>`，後續 harvest 走 upsert update | 避免同 session 多個 harvest window 稀釋注入索引、search top-K 與品質閘對比單位 | 舊 design §Data Model partial unique；舊 plan M2 capture-runner；`docs/spec.md` Phase C | M2b 更新 rollup metadata；M3/M4/M6 都以 canonical rollup 去重；observations 仍 append-only |
@@ -64,7 +64,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 2. **維持 CC-memory 既有優勢**：PostgreSQL + pgvector（向量擴充模組）+ Gemini embedding（向量嵌入）+ cross-device（跨裝置）同步，不退回本機 SQLite/Chroma。
 3. **把 RAM 成本壓到本機近零常駐**：不新增常駐 daemon，不新增本機 DB sidecar（旁掛服務）；RAM 量測摘要中的 claude-mem 常駐成本是停用後的回收目標。
 4. **提供 token 經濟學**：SessionStart 注入與 search 都先給輕索引與 `discovery_tokens`，讓 agent 按需付費展開。
-5. **用資料判斷 Go/No-Go**：併用 2 週、至少 30 筆 auto rollup/observation 後，以 10 組 benchmark query（基準查詢）量化三項硬指標，AND 全達才停用 claude-mem。
+5. **用資料判斷 Go/No-Go**：benchmark 降為 advisory（參考用），不再是啟用前置硬閘門（2026-08-23 拍板）；上線走 canary + 觀察窗 + 使用者核准長跑。七項 Go/No-Go 清單見 `memory-ops-cutover.md` §9。
 6. **所有 schema 變更 additive（增量）且雙側一致**：project/personal/test 三側欄位一致；per-DB CHECK constraint 只放各側不變量。
 
 ## User Stories
@@ -106,7 +106,7 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 **作為** 開新 session 的使用者，我希望 Claude 看到最近活動清單與讀取成本，**以便** 它能自行決定是否展開細節。
 
 驗收條件：
-- `CC_MEMORY_INJECT_RECENT=off` 預設關閉；併用期只 capture，不注入。
+- `CC_MEMORY_INJECT_RECENT=off` 預設關閉；~~併用期只 capture，不注入~~（2026-08-23 後記：併用期／筆數門檻降為 advisory，上線改依 `memory-ops-cutover.md` §9 canary 制。）
 - 開啟後只注入 rollup 索引列，每列含 `discovery_tokens` 與 drill-down ids（下鑽識別）。
 - rollup 的 `discovery_tokens` 寫入時存於 `metadata.capture.discovery_tokens`；注入器只讀，不即時計算。
 - 注入內容不寫 `search_feedback`，也不被 capture worker 反向摘要。
@@ -145,7 +145,9 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 驗收條件：
 - 品質閘對手是 claude-mem 10.5.2 的 observation + 3 層 retrieval 行為。
 - 結果對比單位定義為 rollup；observation 是 drill-down。
-- 10 組 query（固定 5 + 真實 5）中，至少 7 組的 Top-5 交集 ≥3；10 組平均 first-relevant rank ≤ claude-mem；錯抓率 <10%，三項 AND 全達才 Go。
+- ~~10 組 query（固定 5 + 真實 5）中，至少 7 組的 Top-5 交集 ≥3；10 組平均 first-relevant rank ≤ claude-mem；錯抓率 <10%，三項 AND 全達才 Go。~~
+
+> 2026-08-23 後記：benchmark 已降為 advisory（參考用），不再是啟用前置硬閘門。上線改走 canary + 觀察窗 + 使用者核准長跑制。見 `memory-ops-cutover.md` §9。
 
 ## Non-goals
 
@@ -167,7 +169,9 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 | Retrieval | search 輕索引 + timeline + batch get | 不破既有 envelope |
 | Injection | SessionStart Recent Activity 索引 | flag 預設 off |
 | Refine | delete only | write guard 必做 |
-| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | 併用 2 週 |
+| Benchmark | 對 claude-mem 10.5.2 觀察級行為 | ~~併用 2 週~~（2026-08-23 降 advisory（參考用），政策見 `memory-ops-cutover.md` §9） |
+
+> 2026-08-23 後記：正式 unit 組態已改為 `CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（退回），`CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol`；`gemini-flash` 仍可透過 env 切換。詳見 `memory-ops-cutover.md` §2.5。
 
 > 2026-07-16 註：先前 hermes cron／systemd user timer 路線已由 hook-driven systemd oneshot 正式取代（見 `memory-ops-cutover.md`）；「跑完即退」的非常駐要求不變。
 
@@ -181,6 +185,8 @@ v0.4 Phase C 於 2026-04-22 到 2026-04-23 完成規劃，但未實作。2026-07
 
 2. **hook 不走網路、不等待 worker**：PostToolUse 只 append thin JSONL；Stop append sentinel 後以 `systemctl --no-block` quick-kick；SessionStart 同樣 quick-kick backlog。hook 內不 INSERT 遠端 DB、不 spawn LLM。
 3. **observation 抽取用便宜模型**（2026-07-07 使用者拍板改版）：預設 `claude-cli`（`claude -p` 子程序吃 Claude Code 訂閱額度，模型 `CC_CAPTURE_CLAUDE_MODEL` 預設 `haiku`；只在 systemd worker 內短暫存在、跑完即退，不違反紅線 1/2）；`CC_CAPTURE_LLM` 可切 `gemini-flash`（遠端 API，需 `GEMINI_API_KEY`）。provider 不可用（CLI 不存在／key 缺）時靜默停用並告警。**hook 內不 spawn LLM 的紅線不變**。
+
+   **後記 2026-08-23（紅線 3 修訂）**：2026-07-07 決策前提「claude-cli 成本最低」因以下原因不再完全適用——codex-cli 與 Claude Code 共用對話歷史（context（上下文））且各自使用獨立配額（quota（使用量限制）），比 claude-cli 更不佔用 Claude Code 訂閱額度。正式 unit 因此改為 **`CC_CAPTURE_LLM=codex-cli`（主力）+ `CC_CAPTURE_LLM_FALLBACK=claude-cli`（自動退回）**；bwrap（bubblewrap 沙箱）+ execpolicy（執行策略）兩層防護確保 codex-cli 子程序在純文字模式（pure text mode）運行、無工具呼叫。2026-07-07 拍板的「訂閱已付優先」精神保留：fallback 仍使 claude-cli/haiku，gemini-flash 仍為可切選項。程式碼預設值（`DEFAULT_CAPTURE_LLM_PROVIDER`）維持 `claude-cli` 不變，unit 以環境變數覆蓋。
 
 ### 資料與部署
 
@@ -332,14 +338,16 @@ worker 對 LLM output 採 all-or-nothing（全有或全無）策略：
 
 ### claude-mem Go/No-Go
 
-併用條件：至少 14 天，且累積 ≥30 筆 CC-memory auto rollup/observation。併用期 CC-memory 只 capture，注入 flag 保持 off。
+> 2026-08-23 後記：下方舊三硬指標已降為 advisory（參考用），不再是啟用前置硬閘門。正式 Go/No-Go 七項清單見 `memory-ops-cutover.md` §9，上線走 canary + 觀察窗 + 使用者核准長跑制。
 
-三項硬指標 AND：
-- 10 組 benchmark query（固定 5 + 從 `search_feedback` 抽樣真實 5）中，至少 7 組的 CC-memory rollup Top-5 與 claude-mem Top-5 交集 ≥3。
-- 10 組 query 的人工 first-relevant rank 平均值 ≤ claude-mem 平均值。
-- 錯抓率 <10%。
+~~併用條件：至少 14 天，且累積 ≥30 筆 CC-memory auto rollup/observation。併用期 CC-memory 只 capture，注入 flag 保持 off。~~
 
-Go：停用 claude-mem plugin、下線 worker/chroma，回收 RAM 量測摘要列出的本機常駐成本，claude-mem SQLite 留檔備查。
+~~三項硬指標 AND：~~
+- ~~10 組 benchmark query（固定 5 + 從 `search_feedback` 抽樣真實 5）中，至少 7 組的 CC-memory rollup Top-5 與 claude-mem Top-5 交集 ≥3。~~
+- ~~10 組 query 的人工 first-relevant rank 平均值 ≤ claude-mem 平均值。~~
+- ~~錯抓率 <10%。~~
+
+~~Go：停用 claude-mem plugin、下線 worker/chroma，回收 RAM 量測摘要列出的本機常駐成本，claude-mem SQLite 留檔備查。~~
 
 No-Go：保留 claude-mem，回 Phase 2 補強 query/taxonomy/worker。
 

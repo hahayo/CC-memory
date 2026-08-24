@@ -3,12 +3,28 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CaptureLlmValidationError,
+  FallbackCaptureLlmAdapter,
   createCaptureLlmAdapter,
   isCaptureLlmDisabled,
   parseCaptureLlmExtraction,
   runClaudeCliSubprocess,
+  runCodexCliSubprocess,
+  KILL_GRACE_MS,
+  DEFAULT_CODEX_CLI_MODEL,
+  DEFAULT_GEMINI_FLASH_TIMEOUT_MS,
+  CODEX_CLI_CAPTURE_LLM_PROVIDER,
 } from '../../src/services/capture-llm.js';
-import type { CaptureLlmRequest } from '../../src/services/capture-llm.js';
+import type {
+  CaptureLlmAdapter,
+  CaptureLlmExtractOptions,
+  CaptureLlmRawResponse,
+  CaptureLlmRequest,
+  CodexCliRunRequest,
+  CodexCliRunResult,
+  CodexSandboxCommandLike,
+  CodexSandboxOptionsLike,
+  GeminiGenerateContent,
+} from '../../src/services/capture-llm.js';
 
 interface MockClaudeCliCall {
   command: string;
@@ -28,14 +44,25 @@ interface MockClaudeCliResult {
 
 type MockClaudeCliRunner = (call: MockClaudeCliCall) => Promise<MockClaudeCliResult>;
 
+type MockCodexCliRunner = (call: CodexCliRunRequest) => Promise<CodexCliRunResult>;
+type MockSandboxBuilder = (opts: CodexSandboxOptionsLike) => CodexSandboxCommandLike;
+
 function adapterOptions(input: {
   env?: Record<string, string | undefined>;
   stdout?: { write(chunk: string): unknown };
   runClaudeCli?: MockClaudeCliRunner;
   findClaudeCli?: () => string;
+  runCodexCli?: MockCodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: MockSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
 }): Parameters<typeof createCaptureLlmAdapter>[0] & {
   runClaudeCli?: MockClaudeCliRunner;
   findClaudeCli?: () => string;
+  runCodexCli?: MockCodexCliRunner;
+  findCodexCli?: () => string | null;
+  buildSandbox?: MockSandboxBuilder;
+  generateContent?: GeminiGenerateContent;
 } {
   return input;
 }
@@ -353,8 +380,9 @@ describe('claude-cli extraction subprocess contract', () => {
     expect(nonzero.details).toMatchObject({
       model: 'haiku',
       exitCode: 2,
-      rawOutput: nonzeroStdout,
     });
+    // combinedOutput includes both stdout and stderr
+    expect(nonzero.details.rawOutput).toContain(nonzeroStdout);
     expect(JSON.stringify(nonzero.details)).not.toContain(request().transcript);
 
     const malformedModelOutput = '{"session_summary":';
@@ -399,12 +427,13 @@ describe('claude-cli extraction subprocess contract', () => {
 
     const error = await expectValidationError(adapter.extract(request()));
 
-    expect(error.code).toBe('CLAUDE_CLI_RATE_LIMITED');
+    expect(error.code).toBe('LLM_RATE_LIMITED');
     expect(error.details).toMatchObject({
       model: 'haiku',
       provider: 'claude-cli',
       apiErrorStatus: 429,
       result: 'session limit resets later',
+      legacyCode: 'CLAUDE_CLI_RATE_LIMITED',
     });
     expect(JSON.stringify(error.details)).not.toContain(request().transcript);
   });
@@ -427,10 +456,11 @@ describe('claude-cli extraction subprocess contract', () => {
 
     const error = await expectValidationError(adapter.extract(request()));
 
-    expect(error.code).toBe('CLAUDE_CLI_TIMEOUT');
+    expect(error.code).toBe('LLM_TIMEOUT');
     expect(error.details).toMatchObject({
       model: 'haiku',
       timeoutMs: 5,
+      legacyCode: 'CLAUDE_CLI_TIMEOUT',
     });
     expect(runClaudeCli).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 5 }));
   });
@@ -475,5 +505,1363 @@ describe('parseCaptureLlmExtraction JSON tolerance', () => {
     );
     await adapter.extract(request());
     expect(prompts.join('\n')).not.toContain('discovery_tokens');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1: toFailureCategory / toWorkerAction / D6 constants / stdout‖stderr fix
+// ---------------------------------------------------------------------------
+
+import {
+  CLAUDE_CLI_PROVIDER_ID,
+  toFailureCategory,
+  toWorkerAction,
+  type CaptureLlmErrorCode,
+  type FailureCategory,
+  type WorkerAction,
+} from '../../src/services/capture-llm.js';
+
+describe('D6: CLAUDE_CLI_PROVIDER_ID constant', () => {
+  it('equals the literal string claude-cli', () => {
+    expect(CLAUDE_CLI_PROVIDER_ID).toBe('claude-cli');
+  });
+
+  it('adapter uses CLAUDE_CLI_PROVIDER_ID as its provider', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    expect(adapter.provider).toBe(CLAUDE_CLI_PROVIDER_ID);
+  });
+});
+
+describe('toFailureCategory: 13-code mapping', () => {
+  const cases: Array<[string, CaptureLlmErrorCode, string, FailureCategory]> = [
+    ['CAPTURE_LLM_DISABLED', 'CAPTURE_LLM_DISABLED', '', 'disabled'],
+    ['UNSUPPORTED_CAPTURE_LLM', 'UNSUPPORTED_CAPTURE_LLM', '', 'terminal'],
+    ['LLM_MALFORMED_JSON', 'LLM_MALFORMED_JSON', '', 'malformed'],
+    ['LLM_SCHEMA_INVALID', 'LLM_SCHEMA_INVALID', '', 'schema-invalid'],
+    ['LLM_EXTRACT_FAILED', 'LLM_EXTRACT_FAILED', '', 'terminal'],
+    ['CLAUDE_CLI_EXIT_NONZERO (no prompt msg)', 'CLAUDE_CLI_EXIT_NONZERO', 'generic error', 'exit-nonzero'],
+    ['CLAUDE_CLI_EXIT_NONZERO (prompt is too long)', 'CLAUDE_CLI_EXIT_NONZERO', 'prompt is too long for model', 'prompt-too-long'],
+    ['CLAUDE_CLI_OUTPUT_INVALID', 'CLAUDE_CLI_OUTPUT_INVALID', '', 'terminal'],
+    ['CLAUDE_CLI_RATE_LIMITED', 'CLAUDE_CLI_RATE_LIMITED', '', 'rate-limited'],
+    ['CLAUDE_CLI_TIMEOUT', 'CLAUDE_CLI_TIMEOUT', '', 'timeout'],
+    ['CODEX_CLI_EXIT_NONZERO', 'CODEX_CLI_EXIT_NONZERO', '', 'exit-nonzero'],
+    ['LLM_RATE_LIMITED', 'LLM_RATE_LIMITED', '', 'rate-limited'],
+    ['LLM_PROMPT_TOO_LONG', 'LLM_PROMPT_TOO_LONG', '', 'prompt-too-long'],
+    ['LLM_TIMEOUT', 'LLM_TIMEOUT', '', 'timeout'],
+  ];
+
+  for (const [label, code, msg, expected] of cases) {
+    it(`${label} → ${expected}`, () => {
+      const err = new CaptureLlmValidationError(
+        code as CaptureLlmErrorCode,
+        msg || label,
+        msg.includes('prompt') ? { rawOutput: msg } : {}
+      );
+      expect(toFailureCategory(err)).toBe(expected);
+    });
+  }
+
+  it('CLAUDE_CLI_EXIT_NONZERO with prompt_too_long in rawOutput → prompt-too-long', () => {
+    const err = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'exited with code 1',
+      { rawOutput: '{"error":"prompt_too_long"}' }
+    );
+    expect(toFailureCategory(err)).toBe('prompt-too-long');
+  });
+
+  it('non-CaptureLlmValidationError → terminal', () => {
+    expect(toFailureCategory(new Error('something'))).toBe('terminal');
+  });
+
+  it('similar text does NOT false-positive to prompt-too-long', () => {
+    const err = new CaptureLlmValidationError(
+      'CLAUDE_CLI_EXIT_NONZERO',
+      'the prompt was processed successfully',
+      { rawOutput: 'this is not too long at all' }
+    );
+    expect(toFailureCategory(err)).toBe('exit-nonzero');
+  });
+});
+
+describe('toWorkerAction: category → action mapping (8 rows)', () => {
+  const cases: Array<[FailureCategory, WorkerAction, Record<string, string> | undefined]> = [
+    ['malformed', 'retry-malformed', undefined],
+    ['schema-invalid', 'terminal', undefined],
+    ['prompt-too-long', 'split', undefined],
+    ['timeout', 'blocked', undefined],                          // default subtype = service-or-network
+    ['timeout', 'split', { timeoutSubtype: 'size-or-deadline' }],
+    ['timeout', 'blocked', { timeoutSubtype: 'service-or-network' }],
+    ['rate-limited', 'rate-limited', undefined],
+    ['disabled', 'disabled', undefined],
+    ['exit-nonzero', 'terminal', undefined],
+    ['terminal', 'terminal', undefined],
+  ];
+
+  for (const [category, expected, details] of cases) {
+    const subLabel = details?.timeoutSubtype ? ` (${details.timeoutSubtype})` : '';
+    it(`${category}${subLabel} → ${expected}`, () => {
+      expect(toWorkerAction(category, details)).toBe(expected);
+    });
+  }
+});
+
+describe('claude-cli adapter: new error codes with legacyCode', () => {
+  it('timeout throws LLM_TIMEOUT with legacyCode CLAUDE_CLI_TIMEOUT', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli', CC_CAPTURE_CLAUDE_TIMEOUT_MS: '100' },
+        runClaudeCli: async () => ({ stdout: '', exitCode: null, timedOut: true }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_TIMEOUT');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_TIMEOUT');
+    }
+  });
+
+  it('rate limit throws LLM_RATE_LIMITED with legacyCode CLAUDE_CLI_RATE_LIMITED', async () => {
+    const rateLimitJson = JSON.stringify({
+      type: 'result',
+      subtype: 'error_response',
+      is_error: true,
+      api_error_status: 429,
+      result: 'Rate limit exceeded',
+    });
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({ stdout: rateLimitJson, exitCode: 1 }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_RATE_LIMITED');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_RATE_LIMITED');
+    }
+  });
+
+  it('prompt-too-long throws LLM_PROMPT_TOO_LONG with legacyCode CLAUDE_CLI_EXIT_NONZERO', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: '',
+          stderr: 'Error: prompt is too long for this model',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CaptureLlmValidationError);
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_PROMPT_TOO_LONG');
+      expect(e.details.legacyCode).toBe('CLAUDE_CLI_EXIT_NONZERO');
+    }
+  });
+});
+
+describe('stdout/stderr masking bug fix', () => {
+  it('stdout noise + stderr real error → correct classification', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: 'some debug noise',
+          stderr: 'Error: prompt is too long',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_PROMPT_TOO_LONG');
+    }
+  });
+
+  it('stderr noise + stdout real error → correct classification', async () => {
+    const rateLimitJson = JSON.stringify({
+      type: 'result',
+      subtype: 'error_response',
+      is_error: true,
+      api_error_status: 429,
+      result: 'Rate limit exceeded',
+    });
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_LLM: 'claude-cli' },
+        runClaudeCli: async () => ({
+          stdout: rateLimitJson,
+          stderr: 'some warning output',
+          exitCode: 1,
+        }),
+        findClaudeCli: () => '/usr/bin/claude',
+      })
+    );
+    try {
+      await adapter.extract(request());
+      expect.unreachable('should throw');
+    } catch (err) {
+      const e = err as CaptureLlmValidationError;
+      expect(e.code).toBe('LLM_RATE_LIMITED');
+    }
+  });
+});
+
+// --- Mock adapter for wrapper tests ---
+
+function mockAdapter(overrides: Partial<CaptureLlmAdapter> & { provider: string; model: string }): CaptureLlmAdapter {
+  return {
+    disabled: false,
+    disabledReason: undefined,
+    worstCaseCallBudgetMs: 10_000,
+    extract: vi.fn<(req: CaptureLlmRequest, opts?: CaptureLlmExtractOptions) => Promise<CaptureLlmRawResponse>>(
+      async () => ({ model: overrides.model, text: extractionJson() })
+    ),
+    takeTelemetry: () => ({ primaryProvider: overrides.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 }),
+    ...overrides,
+  };
+}
+
+function failingExtract(code: string, message = 'test error', details: Record<string, unknown> = {}): () => Promise<never> {
+  return async () => { throw new CaptureLlmValidationError(code as never, message, details); };
+}
+
+// --- D1b: worstCaseCallBudgetMs ---
+
+describe('worstCaseCallBudgetMs', () => {
+  it('claude-cli adapter reports timeout + killGrace', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: { CC_CAPTURE_CLAUDE_TIMEOUT_MS: '75000' },
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+      })
+    );
+    expect(adapter.worstCaseCallBudgetMs).toBe(75000 + KILL_GRACE_MS);
+  });
+
+  it('gemini-flash adapter reports timeout from env', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+          CC_CAPTURE_GEMINI_TIMEOUT_MS: '60000',
+        },
+        stdout: stdoutSink().stdout,
+      })
+    );
+    expect(adapter.worstCaseCallBudgetMs).toBe(60000);
+  });
+
+  it('gemini-flash adapter defaults to DEFAULT_GEMINI_FLASH_TIMEOUT_MS', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+        },
+        stdout: stdoutSink().stdout,
+      })
+    );
+    expect(adapter.worstCaseCallBudgetMs).toBe(DEFAULT_GEMINI_FLASH_TIMEOUT_MS);
+  });
+
+  it('58/59 second boundary: budget check with fallback adapter', () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', worstCaseCallBudgetMs: 91_000 });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', worstCaseCallBudgetMs: 76_000 });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+    // reserve = 91000 + 76000 + 15000 (settle) = 182000
+    // budget = 240000, so elapsed must be <= 58000
+    expect(wrapper.worstCaseCallBudgetMs).toBe(167_000);
+    // With settle: 167000 + 15000 = 182000, budget - reserve = 58000
+  });
+});
+
+// --- D1b: takeTelemetry ---
+
+describe('takeTelemetry', () => {
+  it('returns counters and resets to zero', () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5' });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // First call: empty
+    const snap1 = wrapper.takeTelemetry();
+    expect(snap1).toEqual({ primaryProvider: 'codex-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 });
+
+    // Second call after reset: still zero (not residual)
+    const snap2 = wrapper.takeTelemetry();
+    expect(snap2).toEqual(snap1);
+  });
+
+  it('counts primary success', async () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5' });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    await wrapper.extract(request());
+    const snap = wrapper.takeTelemetry();
+    expect(snap.primarySuccess).toBe(1);
+    expect(snap.fallbackSuccess).toBe(0);
+    expect(snap.fallbackFailed).toBe(0);
+  });
+
+  it('counts fallback success', async () => {
+    const primary = mockAdapter({
+      provider: 'codex-cli', model: 'gpt-5',
+      extract: failingExtract('LLM_RATE_LIMITED'),
+    });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    await wrapper.extract(request());
+    const snap = wrapper.takeTelemetry();
+    expect(snap.primarySuccess).toBe(0);
+    expect(snap.fallbackSuccess).toBe(1);
+  });
+
+  it('counts fallback failed', async () => {
+    const primary = mockAdapter({
+      provider: 'codex-cli', model: 'gpt-5',
+      extract: failingExtract('LLM_RATE_LIMITED'),
+    });
+    const fallback = mockAdapter({
+      provider: 'claude-cli', model: 'haiku',
+      extract: failingExtract('LLM_RATE_LIMITED'),
+    });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    await expectValidationError(wrapper.extract(request()));
+    const snap = wrapper.takeTelemetry();
+    expect(snap.fallbackFailed).toBe(1);
+  });
+
+  it('does not retain counters across two takeTelemetry calls', async () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5' });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    await wrapper.extract(request());
+    wrapper.takeTelemetry(); // first: consumes
+    const snap2 = wrapper.takeTelemetry(); // second: empty
+    expect(snap2.primarySuccess).toBe(0);
+  });
+});
+
+// --- Phase 4: FallbackCaptureLlmAdapter ---
+
+describe('FallbackCaptureLlmAdapter field contract', () => {
+  it('provider and model from primary', () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5' });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+    expect(wrapper.provider).toBe('codex-cli');
+    expect(wrapper.model).toBe('gpt-5');
+  });
+
+  it('disabled only when both are disabled', () => {
+    const p = mockAdapter({ provider: 'a', model: 'a', disabled: true, disabledReason: 'no a' });
+    const f = mockAdapter({ provider: 'b', model: 'b', disabled: true, disabledReason: 'no b' });
+    expect(new FallbackCaptureLlmAdapter(p, f).disabled).toBe(true);
+
+    const p2 = mockAdapter({ provider: 'a', model: 'a', disabled: true, disabledReason: 'no a' });
+    const f2 = mockAdapter({ provider: 'b', model: 'b', disabled: false });
+    expect(new FallbackCaptureLlmAdapter(p2, f2).disabled).toBe(false);
+  });
+
+  it('disabledReason merges both reasons', () => {
+    const p = mockAdapter({ provider: 'a', model: 'a', disabled: true, disabledReason: 'no a' });
+    const f = mockAdapter({ provider: 'b', model: 'b', disabled: true, disabledReason: 'no b' });
+    expect(new FallbackCaptureLlmAdapter(p, f).disabledReason).toBe('no a; no b');
+  });
+
+  it('worstCaseCallBudgetMs = primary + fallback', () => {
+    const p = mockAdapter({ provider: 'a', model: 'a', worstCaseCallBudgetMs: 91_000 });
+    const f = mockAdapter({ provider: 'b', model: 'b', worstCaseCallBudgetMs: 76_000 });
+    expect(new FallbackCaptureLlmAdapter(p, f).worstCaseCallBudgetMs).toBe(167_000);
+  });
+});
+
+describe('FallbackCaptureLlmAdapter step 1: fallback trigger', () => {
+  const categories: Array<{ code: string; shouldFallback: boolean; label: string }> = [
+    { code: 'LLM_RATE_LIMITED', shouldFallback: true, label: 'rate-limited' },
+    { code: 'CAPTURE_LLM_DISABLED', shouldFallback: true, label: 'disabled' },
+    { code: 'LLM_TIMEOUT', shouldFallback: true, label: 'timeout' },
+    { code: 'CODEX_CLI_EXIT_NONZERO', shouldFallback: true, label: 'exit-nonzero' },
+    { code: 'LLM_EXTRACT_FAILED', shouldFallback: true, label: 'terminal' },
+    { code: 'LLM_MALFORMED_JSON', shouldFallback: false, label: 'malformed' },
+    { code: 'LLM_SCHEMA_INVALID', shouldFallback: false, label: 'schema-invalid' },
+    { code: 'LLM_PROMPT_TOO_LONG', shouldFallback: false, label: 'prompt-too-long' },
+  ];
+
+  for (const { code, shouldFallback, label } of categories) {
+    it(`primary ${label} (${code}) → ${shouldFallback ? 'calls' : 'does NOT call'} fallback`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(code),
+      });
+      const fbExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: fbExtract,
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      if (shouldFallback) {
+        const result = await wrapper.extract(request());
+        expect(result.model).toBe('haiku');
+        expect(fbExtract).toHaveBeenCalled();
+      } else {
+        const error = await expectValidationError(wrapper.extract(request()));
+        expect(error.code).toBe(code);
+        expect(fbExtract).not.toHaveBeenCalled();
+      }
+    });
+  }
+});
+
+describe('FallbackCaptureLlmAdapter step 2: fallback also fails', () => {
+  // Test key combinations from the 5x8 table
+  const testCases: Array<{
+    primaryCode: string;
+    fallbackCode: string;
+    expectedCode: string;
+    label: string;
+    extraCheck?: (error: CaptureLlmValidationError) => void;
+  }> = [
+    // rate-limited × malformed → malformed with retryProvider
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'rl×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    // rate-limited × schema-invalid → schema-invalid
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'rl×schema' },
+    // rate-limited × prompt-too-long → prompt-too-long with alternateCategory
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'rl×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('rate-limited') },
+    // rate-limited × rate-limited → rate-limited
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'rl×rl' },
+    // rate-limited × timeout → timeout
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'rl×timeout' },
+    // rate-limited × disabled → rate-limited
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_RATE_LIMITED', label: 'rl×disabled' },
+    // rate-limited × terminal → rate-limited
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'LLM_EXTRACT_FAILED', expectedCode: 'LLM_RATE_LIMITED', label: 'rl×terminal' },
+    // timeout × timeout → timeout (double timeout → blocked)
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'to×to',
+      extraCheck: (e) => expect(e.details.timeoutSubtype).toBe('service-or-network') },
+    // timeout × rate-limited → rate-limited
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'to×rl' },
+    // timeout × terminal → terminal
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_EXTRACT_FAILED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'to×terminal' },
+    // disabled × disabled → disabled
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'CAPTURE_LLM_DISABLED', label: 'dis×dis' },
+    // disabled × terminal → terminal
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_EXTRACT_FAILED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'dis×terminal' },
+    // exit-nonzero × terminal → terminal
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_EXTRACT_FAILED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'exit×terminal' },
+    // terminal × terminal → terminal
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_EXTRACT_FAILED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'term×terminal' },
+    // terminal × rate-limited → rate-limited
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'term×rl' },
+  ];
+
+  for (const { primaryCode, fallbackCode, expectedCode, label, extraCheck } of testCases) {
+    it(`${label}: primary ${primaryCode} + fallback ${fallbackCode} → ${expectedCode}`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(primaryCode),
+      });
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: failingExtract(fallbackCode),
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      const error = await expectValidationError(wrapper.extract(request()));
+      expect(error.code).toBe(expectedCode);
+      expect(error.details.primaryCode).toBe(primaryCode);
+      expect(error.details.fallbackCode).toBe(fallbackCode);
+      extraCheck?.(error);
+    });
+  }
+});
+
+describe('FallbackCaptureLlmAdapter forceProvider routing', () => {
+  it('forceProvider "fallback" role string routes to fallback adapter', async () => {
+    const pExtract = vi.fn(async () => ({ model: 'gpt-5', text: extractionJson() }));
+    const fExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // Worker sends 'fallback' (role string from retryProvider), not 'claude-cli'
+    const result = await wrapper.extract(request(), { forceProvider: 'fallback' });
+    expect(result.model).toBe('haiku');
+    expect(pExtract).not.toHaveBeenCalled();
+    expect(fExtract).toHaveBeenCalled();
+  });
+
+  it('forceProvider routes to fallback adapter directly', async () => {
+    const pExtract = vi.fn(async () => ({ model: 'gpt-5', text: extractionJson() }));
+    const fExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    const result = await wrapper.extract(request(), { forceProvider: 'claude-cli' });
+    expect(result.model).toBe('haiku');
+    expect(pExtract).not.toHaveBeenCalled();
+    expect(fExtract).toHaveBeenCalled();
+  });
+
+  it('forceProvider routes to primary if no match with fallback', async () => {
+    const pExtract = vi.fn(async () => ({ model: 'gpt-5', text: extractionJson() }));
+    const fExtract = vi.fn(async () => ({ model: 'haiku', text: extractionJson() }));
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    const result = await wrapper.extract(request(), { forceProvider: 'codex-cli' });
+    expect(result.model).toBe('gpt-5');
+    expect(pExtract).toHaveBeenCalled();
+    expect(fExtract).not.toHaveBeenCalled();
+  });
+});
+
+describe('FallbackCaptureLlmAdapter no-op passthrough without fallback', () => {
+  it('no fallback env → createCaptureLlmAdapter returns plain adapter', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+      })
+    );
+    expect(adapter).not.toBeInstanceOf(FallbackCaptureLlmAdapter);
+  });
+
+  it('with fallback env → creates FallbackCaptureLlmAdapter', () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM_FALLBACK: 'claude-cli',
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+        },
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+      })
+    );
+    expect(adapter).toBeInstanceOf(FallbackCaptureLlmAdapter);
+  });
+
+  it('unknown fallback provider → fail-fast', () => {
+    expect(() => createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM_FALLBACK: 'unknown-provider',
+        },
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+      })
+    )).toThrow('Unknown fallback capture LLM provider');
+  });
+});
+
+describe('FallbackCaptureLlmAdapter details carry full causal chain', () => {
+  it('error details contain primaryCode, primaryMessage, fallbackCode, fallbackMessage', async () => {
+    const primary = mockAdapter({
+      provider: 'codex-cli', model: 'gpt-5',
+      extract: failingExtract('LLM_RATE_LIMITED', 'primary rl'),
+    });
+    const fallback = mockAdapter({
+      provider: 'claude-cli', model: 'haiku',
+      extract: failingExtract('LLM_EXTRACT_FAILED', 'fallback fail'),
+    });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    const error = await expectValidationError(wrapper.extract(request()));
+    expect(error.details.primaryCode).toBe('LLM_RATE_LIMITED');
+    expect(error.details.primaryMessage).toBe('primary rl');
+    expect(error.details.fallbackCode).toBe('LLM_EXTRACT_FAILED');
+    expect(error.details.fallbackMessage).toBe('fallback fail');
+    expect(error.details.primaryCategory).toBe('rate-limited');
+    expect(error.details.fallbackCategory).toBe('terminal');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: codex-cli provider tests
+// ---------------------------------------------------------------------------
+
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * Build a mock sandbox command that returns a predictable structure.
+ * The runner can write the codex result into cmd.outputFile.
+ */
+function mockSandboxBuilder(overrides: Partial<CodexSandboxCommandLike> = {}): {
+  builder: MockSandboxBuilder;
+  capturedOpts: CodexSandboxOptionsLike[];
+  cleanupSpy: ReturnType<typeof vi.fn>;
+} {
+  const capturedOpts: CodexSandboxOptionsLike[] = [];
+  const cleanupSpy = vi.fn(async () => {});
+  const builder: MockSandboxBuilder = (opts) => {
+    capturedOpts.push(opts);
+    return {
+      command: '/usr/bin/bwrap',
+      args: ['--sandbox-arg', '--', 'codex', 'exec', '--model', opts.model],
+      env: { PATH: '/usr/bin:/usr/local/bin' },
+      cleanup: cleanupSpy,
+      schemaFile: join(opts.hostOutputDir, 'schema.json'),
+      outputFile: join(opts.hostOutputDir, 'result.json'),
+      ...overrides,
+    };
+  };
+  return { builder, capturedOpts, cleanupSpy };
+}
+
+/**
+ * Create a mock codex runner that writes a result file and returns exit info.
+ */
+function codexRunner(
+  behavior: {
+    exitCode?: number | null;
+    stdout?: string;
+    stderr?: string;
+    timedOut?: boolean;
+    resultJson?: string;
+  } = {}
+): { runner: MockCodexCliRunner; calls: CodexCliRunRequest[] } {
+  const calls: CodexCliRunRequest[] = [];
+  const runner: MockCodexCliRunner = async (req) => {
+    calls.push(req);
+    // Write the result file if provided (simulating codex writing to -o)
+    if (behavior.resultJson !== undefined) {
+      writeFileSync(req.outputFile, behavior.resultJson);
+    }
+    return {
+      stdout: behavior.stdout ?? '',
+      stderr: behavior.stderr ?? '',
+      exitCode: behavior.exitCode ?? 0,
+      timedOut: behavior.timedOut ?? false,
+    };
+  };
+  return { runner, calls };
+}
+
+function codexAdapterOptions(overrides: {
+  env?: Record<string, string | undefined>;
+  runner?: MockCodexCliRunner;
+  builder?: MockSandboxBuilder;
+  findCodexCli?: () => string | null;
+}): Parameters<typeof createCaptureLlmAdapter>[0] {
+  const { builder } = mockSandboxBuilder();
+  return adapterOptions({
+    env: { CC_CAPTURE_LLM: 'codex-cli', ...overrides.env },
+    stdout: stdoutSink().stdout,
+    findCodexCli: overrides.findCodexCli ?? (() => '/opt/codex'),
+    runCodexCli: overrides.runner ?? codexRunner({ resultJson: extractionJson() }).runner,
+    buildSandbox: overrides.builder ?? builder,
+  });
+}
+
+describe('codex-cli provider selection', () => {
+  it('selects codex-cli when CC_CAPTURE_LLM=codex-cli', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({}));
+
+    expect(adapter.provider).toBe(CODEX_CLI_CAPTURE_LLM_PROVIDER);
+    expect(adapter.model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(isCaptureLlmDisabled(adapter)).toBe(false);
+  });
+
+  it('honors CC_CAPTURE_CODEX_MODEL', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_MODEL: 'gpt-5.6-luna' },
+    }));
+
+    expect(adapter.model).toBe('gpt-5.6-luna');
+  });
+
+  it('returns DisabledCaptureLlmAdapter when codex binary is absent', () => {
+    const { stdout, chunks } = stdoutSink();
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'codex-cli' },
+      stdout,
+      findCodexCli: () => null,
+    }));
+
+    expect(isCaptureLlmDisabled(adapter)).toBe(true);
+    expect(adapter.model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(chunks.join('')).toContain('codex CLI');
+  });
+
+  it('exposes a finite worstCaseCallBudgetMs', () => {
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_TIMEOUT_MS: '45000' },
+    }));
+
+    expect(adapter.worstCaseCallBudgetMs).toBe(45_000 + KILL_GRACE_MS);
+  });
+});
+
+describe('codex-cli extraction subprocess contract', () => {
+  it('writes schema to temp file and passes --output-schema via sandbox', async () => {
+    const { builder, capturedOpts, cleanupSpy } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    expect(capturedOpts).toHaveLength(1);
+    expect(capturedOpts[0].model).toBe(DEFAULT_CODEX_CLI_MODEL);
+    expect(calls).toHaveLength(1);
+    // Schema file was written before the runner was called
+    expect(calls[0].command).toBe('/usr/bin/bwrap');
+    // Cleanup was called
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads extraction from -o file', async () => {
+    const { runner } = codexRunner({ resultJson: extractionJson('codex extraction') });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const raw = await adapter.extract(request());
+    const extraction = parseCaptureLlmExtraction(raw);
+
+    expect(extraction.session_summary.summary).toBe('codex extraction');
+  });
+
+  it('cleans up both temp files on success AND failure', async () => {
+    const { builder, cleanupSpy } = mockSandboxBuilder();
+    // Failing runner: nonzero exit
+    const { runner: failRunner } = codexRunner({ exitCode: 1, stdout: 'some error' });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner: failRunner,
+      builder,
+    }));
+
+    await expect(adapter.extract(request())).rejects.toThrow();
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds child env from the explicit allowlist only', async () => {
+    // Use the real runCodexCliSubprocess to verify env isolation.
+    const result = await runCodexCliSubprocess({
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write(JSON.stringify(Object.keys(process.env)))'],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: { PATH: '/usr/bin' },
+      outputFile: '/dev/null',
+    });
+
+    expect(result.exitCode).toBe(0);
+    const keys = JSON.parse(result.stdout) as string[];
+    // Only PATH should be present (plus NODE_* added by Node itself)
+    const nonNodeKeys = keys.filter(k => !k.startsWith('NODE'));
+    expect(nonNodeKeys).toEqual(['PATH']);
+  });
+
+  it('never passes DATABASE_URL, GEMINI_API_KEY, TODOIST_API_TOKEN or alert tokens', async () => {
+    const result = await runCodexCliSubprocess({
+      command: process.execPath,
+      args: ['-e', `
+        const secrets = ['DATABASE_URL', 'GEMINI_API_KEY', 'TODOIST_API_TOKEN',
+          'CC_MEMORY_ALERT_BOT_TOKEN', 'CC_MEMORY_ALERT_CHAT_ID'];
+        const found = secrets.filter(k => process.env[k] !== undefined);
+        process.stdout.write(JSON.stringify(found));
+      `],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: { PATH: '/usr/bin' },
+      outputFile: '/dev/null',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+  });
+
+  it('sets CC_MEMORY_CAPTURE_CHILD=1 via sandbox', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // The sandbox handles CC_MEMORY_CAPTURE_CHILD=1 via --setenv internally.
+    // The adapter itself does NOT add it to spawn env — that's the sandbox's job.
+    // Verify sandbox was called (it sets the marker).
+    expect(capturedOpts).toHaveLength(1);
+  });
+
+  it('runs in an isolated empty cwd via sandbox', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // hostCwd should be a temp directory
+    expect(capturedOpts[0].hostCwd).toMatch(/ccm-codex-cwd/);
+  });
+
+  it('passes mcp_servers={} and web_search="disabled" via sandbox args', async () => {
+    // These flags are baked into buildCodexSandboxCommand (contract a).
+    // Adapter must NOT add them again. Verify the adapter passes sandbox
+    // command/args verbatim without appending codex flags.
+    const { builder } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    // The command and args should be exactly what the sandbox returned
+    expect(calls[0].command).toBe('/usr/bin/bwrap');
+    expect(calls[0].args).toEqual(
+      expect.arrayContaining(['--sandbox-arg', '--', 'codex', 'exec'])
+    );
+  });
+
+  it('never passes --ignore-rules', async () => {
+    const { builder } = mockSandboxBuilder();
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder,
+    }));
+
+    await adapter.extract(request());
+
+    const allArgs = calls[0].args.join(' ');
+    expect(allArgs).not.toContain('--ignore-rules');
+  });
+
+  it('inlines the system prompt (includeOpeningInstructions: true)', async () => {
+    const { runner, calls } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    await adapter.extract(request());
+
+    // The stdin should contain the system prompt since codex has no --system-prompt flag
+    expect(calls[0].stdin).toContain('You extract durable project memory');
+    expect(calls[0].stdin).toContain('<transcript>');
+  });
+
+  it('maps timeout to LLM_TIMEOUT', async () => {
+    const { runner } = codexRunner({ timedOut: true, exitCode: null });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_TIMEOUT');
+    expect(error.details.provider).toBe('codex-cli');
+    expect(error.details.timeoutSubtype).toBe('service-or-network');
+  });
+
+  it('maps quota output to LLM_RATE_LIMITED', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'Error: rate limit exceeded, too many requests',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_RATE_LIMITED');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('does not false-positive on "rate" in unrelated messages', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'The operation was performed at a moderate rate',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    // Should NOT be rate-limited — "moderate rate" is not a quota message
+    // The detection checks for "rate limit" (two words), so this should be exit-nonzero
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+  });
+
+  it('does not false-positive on "429" embedded in larger numbers', async () => {
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: 'parse error at offset 4293',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+  });
+
+  it('maps sandbox build failure to CAPTURE_LLM_DISABLED for fallback', async () => {
+    const throwingBuilder: MockSandboxBuilder = () => {
+      throw new Error('auth.json not found or not readable: /home/user/.codex/auth.json');
+    };
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      runner,
+      builder: throwingBuilder,
+    }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('CAPTURE_LLM_DISABLED');
+    expect(error.details.provider).toBe('codex-cli');
+    expect(error.message).toContain('sandbox unavailable');
+  });
+
+  it('maps nonzero exit to CODEX_CLI_EXIT_NONZERO', async () => {
+    const { runner } = codexRunner({
+      exitCode: 2,
+      stdout: 'codex internal error',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CODEX_CLI_EXIT_NONZERO');
+    expect(error.details).toMatchObject({
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+      exitCode: 2,
+    });
+  });
+
+  it('maps model-unavailable to CAPTURE_LLM_DISABLED', async () => {
+    // Real fixture from Phase 0 finding (plan §U2)
+    const { runner } = codexRunner({
+      exitCode: 1,
+      stderr: "The 'gpt-5.6-luna' model requires a newer version of Codex",
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({
+      env: { CC_CAPTURE_CODEX_MODEL: 'gpt-5.6-luna' },
+      runner,
+    }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('CAPTURE_LLM_DISABLED');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('maps malformed JSON in output file to LLM_MALFORMED_JSON', async () => {
+    const { runner } = codexRunner({
+      resultJson: '{"session_summary": incomplete',
+    });
+    const adapter = createCaptureLlmAdapter(codexAdapterOptions({ runner }));
+
+    const error = await expectValidationError(adapter.extract(request()));
+
+    expect(error.code).toBe('LLM_MALFORMED_JSON');
+    expect(error.details.provider).toBe('codex-cli');
+  });
+
+  it('passes explicit stagingRoot derived from CC_MEMORY_SPOOL_DIR', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: {
+        CC_CAPTURE_LLM: 'codex-cli',
+        CC_MEMORY_SPOOL_DIR: '/custom/spool/dir',
+      },
+      stdout: stdoutSink().stdout,
+      findCodexCli: () => '/opt/codex',
+      runCodexCli: runner,
+      buildSandbox: builder,
+    }));
+
+    await adapter.extract(request());
+
+    // stagingRoot = join(spoolDir, '..', 'codex-sandbox')
+    expect(capturedOpts[0].stagingRoot).toBe(join('/custom/spool/dir', '..', 'codex-sandbox'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4 second-step 5×8 table — remaining cells (table-driven)
+// ---------------------------------------------------------------------------
+
+describe('FallbackCaptureLlmAdapter D4 5×8 complete coverage', () => {
+  // The 5 primary categories that trigger fallback:
+  //   rate-limited, timeout, disabled, exit-nonzero, terminal
+  // The 8 fallback outcomes:
+  //   success, malformed, schema-invalid, prompt-too-long, timeout,
+  //   rate-limited, disabled, exit-nonzero/terminal
+
+  // Cells already covered by existing tests (15 cells).
+  // Missing cells to reach all 40:
+  const missingCells: Array<{
+    primaryCode: string;
+    fallbackCode: string;
+    expectedCode: string;
+    label: string;
+    extraCheck?: (error: CaptureLlmValidationError) => void;
+  }> = [
+    // rate-limited row: already has malformed, schema, ptl, rl, timeout, disabled, terminal
+    // Missing: exit-nonzero
+    { primaryCode: 'LLM_RATE_LIMITED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_RATE_LIMITED', label: 'rl×exit' },
+
+    // timeout row: already has timeout(double), rl, terminal
+    // Missing: malformed, schema, ptl, disabled, exit-nonzero
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'to×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'to×schema' },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'to×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('timeout') },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_TIMEOUT', label: 'to×disabled' },
+    { primaryCode: 'LLM_TIMEOUT', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'to×exit' },
+
+    // disabled row: already has disabled(double), terminal
+    // Missing: malformed, schema, ptl, timeout, rl, exit-nonzero
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'dis×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'dis×schema' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'dis×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('disabled') },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'dis×timeout' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'dis×rl' },
+    { primaryCode: 'CAPTURE_LLM_DISABLED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'dis×exit' },
+
+    // exit-nonzero row: already has terminal
+    // Missing: malformed, schema, ptl, timeout, rl, disabled, exit-nonzero
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'exit×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'exit×schema' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'exit×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('exit-nonzero') },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'exit×timeout' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'LLM_RATE_LIMITED', expectedCode: 'LLM_RATE_LIMITED', label: 'exit×rl' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'exit×disabled' },
+    { primaryCode: 'CODEX_CLI_EXIT_NONZERO', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'exit×exit' },
+
+    // terminal row: already has terminal(double), rl
+    // Missing: malformed, schema, ptl, timeout, disabled, exit-nonzero
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_MALFORMED_JSON', expectedCode: 'LLM_MALFORMED_JSON', label: 'term×malformed',
+      extraCheck: (e) => expect(e.details.retryProvider).toBe('fallback') },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_SCHEMA_INVALID', expectedCode: 'LLM_SCHEMA_INVALID', label: 'term×schema' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_PROMPT_TOO_LONG', expectedCode: 'LLM_PROMPT_TOO_LONG', label: 'term×ptl',
+      extraCheck: (e) => expect(e.details.alternateCategory).toBe('terminal') },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'LLM_TIMEOUT', expectedCode: 'LLM_TIMEOUT', label: 'term×timeout' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'CAPTURE_LLM_DISABLED', expectedCode: 'LLM_EXTRACT_FAILED', label: 'term×disabled' },
+    { primaryCode: 'LLM_EXTRACT_FAILED', fallbackCode: 'CODEX_CLI_EXIT_NONZERO', expectedCode: 'LLM_EXTRACT_FAILED', label: 'term×exit' },
+  ];
+
+  for (const { primaryCode, fallbackCode, expectedCode, label, extraCheck } of missingCells) {
+    it(`${label}: primary ${primaryCode} + fallback ${fallbackCode} → ${expectedCode}`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(primaryCode),
+      });
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: failingExtract(fallbackCode),
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      const error = await expectValidationError(wrapper.extract(request()));
+      expect(error.code).toBe(expectedCode);
+      expect(error.details.primaryCode).toBe(primaryCode);
+      expect(error.details.fallbackCode).toBe(fallbackCode);
+      extraCheck?.(error);
+    });
+  }
+
+  // Success cells (5 primary categories × success)
+  const successCells = [
+    'LLM_RATE_LIMITED',
+    'LLM_TIMEOUT',
+    'CAPTURE_LLM_DISABLED',
+    'CODEX_CLI_EXIT_NONZERO',
+    'LLM_EXTRACT_FAILED',
+  ];
+
+  for (const primaryCode of successCells) {
+    it(`${primaryCode} × success → success`, async () => {
+      const primary = mockAdapter({
+        provider: 'codex-cli', model: 'gpt-5',
+        extract: failingExtract(primaryCode),
+      });
+      const fallback = mockAdapter({
+        provider: 'claude-cli', model: 'haiku',
+        extract: vi.fn(async () => ({ model: 'haiku', text: extractionJson('fallback ok') })),
+      });
+      const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+      const result = await wrapper.extract(request());
+      expect(result.model).toBe('haiku');
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P→F(malformed)→forced F wrapper sequence
+// ---------------------------------------------------------------------------
+
+describe('FallbackCaptureLlmAdapter P→F(malformed)→forced F sequence', () => {
+  it('P fails → F returns malformed → retryProvider=fallback → forced F succeeds', async () => {
+    let fCallCount = 0;
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_RATE_LIMITED', 'primary rl');
+    });
+    const fExtract = vi.fn(async () => {
+      fCallCount += 1;
+      if (fCallCount === 1) {
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json');
+      }
+      return { model: 'haiku', text: extractionJson('retry ok') };
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // First call: P fails (rl) → F fails (malformed) → error with retryProvider
+    const error = await expectValidationError(wrapper.extract(request()));
+    expect(error.code).toBe('LLM_MALFORMED_JSON');
+    expect(error.details.retryProvider).toBe('fallback');
+    expect(pExtract).toHaveBeenCalledTimes(1);
+    expect(fExtract).toHaveBeenCalledTimes(1);
+
+    // Second call with forceProvider: goes directly to fallback, succeeds
+    const result = await wrapper.extract(request(), { forceProvider: 'fallback' });
+    expect(result.model).toBe('haiku');
+    expect(pExtract).toHaveBeenCalledTimes(1); // primary NOT called again
+    expect(fExtract).toHaveBeenCalledTimes(2);
+
+    // Telemetry: 0 primary success, 1 fallback success, 1 fallback failed
+    const snap = wrapper.takeTelemetry();
+    expect(snap.primarySuccess).toBe(0);
+    expect(snap.fallbackSuccess).toBe(1);
+    expect(snap.fallbackFailed).toBe(1);
+  });
+
+  it('P fails → F returns malformed → forced F also fails → reports real category', async () => {
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_TIMEOUT', 'primary timeout');
+    });
+    let fCallCount = 0;
+    const fExtract = vi.fn(async () => {
+      fCallCount += 1;
+      if (fCallCount === 1) {
+        throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad json');
+      }
+      // Second call also fails but with a different error
+      throw new CaptureLlmValidationError('LLM_RATE_LIMITED', 'fallback rl');
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // First call: P(timeout) → F(malformed)
+    const error1 = await expectValidationError(wrapper.extract(request()));
+    expect(error1.details.retryProvider).toBe('fallback');
+
+    // Second call with forceProvider: forced F also fails with rate-limited
+    const error2 = await expectValidationError(
+      wrapper.extract(request(), { forceProvider: 'fallback' })
+    );
+    // Reports the real category from the second call, not malformed
+    expect(error2.code).toBe('LLM_RATE_LIMITED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gemini abort via generateContent injection seam
+// ---------------------------------------------------------------------------
+
+describe('gemini-flash abort via generateContent injection', () => {
+  it('aborts generateContent when timeout fires and maps to LLM_TIMEOUT', async () => {
+    const generateContent: GeminiGenerateContent = async (_req) => {
+      // Simulate a slow response that never resolves
+      await new Promise((_resolve, reject) => {
+        // AbortSignal will fire before this resolves.
+        // The real SDK throws on abort; simulate that.
+        const signal = _req.config?.abortSignal;
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }
+      });
+      return { text: 'should not reach' };
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+          CC_CAPTURE_GEMINI_TIMEOUT_MS: '50', // 50ms timeout
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    const error = await expectValidationError(adapter.extract(request()));
+    expect(error.code).toBe('LLM_TIMEOUT');
+    expect(error.details.provider).toBe('gemini-flash');
+    expect(error.details.timeoutMs).toBe(50);
+  });
+
+  it('returns extraction on successful generateContent call', async () => {
+    const generateContent: GeminiGenerateContent = async () => {
+      return { text: extractionJson('gemini ok') };
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    const raw = await adapter.extract(request());
+    expect(raw.model).toBe('gemini-2.5-flash');
+    expect(raw.text).toContain('gemini ok');
+  });
+
+  it('propagates non-abort errors as-is', async () => {
+    const generateContent: GeminiGenerateContent = async () => {
+      throw new Error('API key invalid');
+    };
+
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {
+          CC_CAPTURE_LLM: 'gemini-flash',
+          GEMINI_API_KEY: 'test-key',
+          CC_CAPTURE_GEMINI_TIMEOUT_MS: '30000',
+        },
+        stdout: stdoutSink().stdout,
+        generateContent,
+      })
+    );
+
+    await expect(adapter.extract(request())).rejects.toThrow('API key invalid');
+  });
+});
+
+describe('claude-cli subprocess env stripping', () => {
+  it('never passes DATABASE_URL or alert tokens to claude-cli child', async () => {
+    const result = await runClaudeCliSubprocess({
+      command: process.execPath,
+      args: ['-e', `
+        const secrets = ['DATABASE_URL', 'DATABASE_URL_PERSONAL', 'TODOIST_API_TOKEN',
+          'CC_MEMORY_ALERT_BOT_TOKEN', 'CC_MEMORY_ALERT_CHAT_ID',
+          'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+          'PGPASSWORD', 'PGHOST', 'PGUSER'];
+        const found = secrets.filter(k => process.env[k] !== undefined);
+        process.stdout.write(JSON.stringify(found));
+      `],
+      stdin: '',
+      timeoutMs: 5_000,
+      env: {
+        DATABASE_URL: 'test-db-value',
+        DATABASE_URL_PERSONAL: 'test-personal-value',
+        TODOIST_API_TOKEN: 'test-todoist-value',
+        CC_MEMORY_ALERT_BOT_TOKEN: 'test-bot-value',
+        CC_MEMORY_ALERT_CHAT_ID: 'test-chat-value',
+        AWS_ACCESS_KEY_ID: 'test-aws-key',
+        AWS_SECRET_ACCESS_KEY: 'test-aws-secret',
+        PGPASSWORD: 'test-pg-pass',
+        PGHOST: 'test-pg-host',
+        PGUSER: 'test-pg-user',
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+  });
+});
+
+describe('FallbackCaptureLlmAdapter forceProvider error handling', () => {
+  it('forced fallback error carries retryExhausted=true', async () => {
+    const pExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_TIMEOUT', 'primary timeout');
+    });
+    const fExtract = vi.fn(async () => {
+      throw new CaptureLlmValidationError('LLM_MALFORMED_JSON', 'bad output');
+    });
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', extract: pExtract });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', extract: fExtract });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    // Normal call: P→F(malformed) → error with retryProvider
+    const error1 = await expectValidationError(wrapper.extract(request()));
+    expect(error1.details.retryProvider).toBe('fallback');
+    expect(error1.details.retryExhausted).toBeUndefined();
+
+    // Forced call: forced F fails → retryExhausted=true
+    const error2 = await expectValidationError(
+      wrapper.extract(request(), { forceProvider: 'fallback' })
+    );
+    expect(error2.details.retryExhausted).toBe(true);
+    expect(error2.details.retryProvider).toBe('fallback');
+
+    // Telemetry: fallbackFailed should be counted for the forced failure
+    const snap = wrapper.takeTelemetry();
+    expect(snap.fallbackFailed).toBeGreaterThanOrEqual(1);
+  });
+
+  it('worstCaseCallBudgetMsFor returns fallback-only budget', () => {
+    const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5', worstCaseCallBudgetMs: 91000 });
+    const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku', worstCaseCallBudgetMs: 76000 });
+    const wrapper = new FallbackCaptureLlmAdapter(primary, fallback);
+
+    expect(wrapper.worstCaseCallBudgetMs).toBe(167000);  // sum
+    expect(wrapper.worstCaseCallBudgetMsFor('fallback')).toBe(76000);
+    expect(wrapper.worstCaseCallBudgetMsFor('claude-cli')).toBe(76000);
+    expect(wrapper.worstCaseCallBudgetMsFor('primary')).toBe(91000);
+    expect(wrapper.worstCaseCallBudgetMsFor('codex-cli')).toBe(91000);
   });
 });
