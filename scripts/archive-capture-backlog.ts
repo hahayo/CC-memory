@@ -945,7 +945,11 @@ export function copyLiveCapacityCheck(
   }
 
   const totalSourceBytes = spoolBytes + transcriptBytes;
-  const requiredBytes = totalSourceBytes * 2 + 1024 * 1024 * 1024; // ×2 + 1 GB
+  // ×2 + 1 GB. The ×2 covers the peak of either phase: during the snapshot the
+  // staging tree holds the spool copy + transcripts + spool.tar.gz; the
+  // uncompressed spool copy is then dropped, so the later verification's
+  // extraction of spool.tar.gz reuses that headroom rather than adding to it.
+  const requiredBytes = totalSourceBytes * 2 + 1024 * 1024 * 1024;
 
   const doStatfs = options.statfsFn ?? ((p: string) => {
     const s = statfsSync(p);
@@ -1004,8 +1008,11 @@ export function executeCopyLiveSnapshot(input: {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([source, maxBoundary]) => snapshotTranscriptPrefix(source, maxBoundary, stagingDir));
 
-  // Create spool archive
+  // Create spool archive, then drop the uncompressed staging copy: the archive
+  // tree must contain exactly the manifest allowlist so that the shared upload
+  // verifier accepts it (a leftover `spool/` tree fails the allowlist check).
   const spoolArchive = createStrictSpoolArchive(copiedSpoolDir, stagingDir);
+  rmSync(copiedSpoolDir, { recursive: true, force: true });
 
   const manifest: CopyLiveArchiveManifest = {
     version: 1,
@@ -1038,46 +1045,212 @@ export function executeCopyLiveSnapshot(input: {
   return manifest;
 }
 
-export function verifyCopyLiveArchive(archiveDir: string): { ok: boolean; reason?: string } {
-  const manifestPath = path.join(archiveDir, 'manifest.json');
-  if (!existsSync(manifestPath)) return { ok: false, reason: 'manifest.json not found' };
-
-  const manifestSource = readFileSync(manifestPath, 'utf8');
-  const expectedHash = sha256Buffer(manifestSource);
-  const hashFilePath = path.join(archiveDir, 'manifest.sha256');
-  if (!existsSync(hashFilePath)) return { ok: false, reason: 'manifest.sha256 not found' };
-
-  const hashLine = readFileSync(hashFilePath, 'utf8').trim();
-  if (!hashLine.startsWith(expectedHash)) {
-    return { ok: false, reason: 'manifest hash mismatch' };
+function expectedCopyLiveArchiveEntries(manifest: CopyLiveArchiveManifest): string[] {
+  if (manifest.spoolArchive.relpath !== 'spool.tar.gz') {
+    throw new Error('spool archive relpath must be spool.tar.gz');
   }
+  const expected = new Set([
+    'manifest.json',
+    'manifest.sha256',
+    'spool.tar.gz',
+    'transcripts/',
+  ]);
+  for (const transcript of manifest.transcripts) {
+    if (transcript.status !== 'snapshotted') continue;
+    const relative = transcript.snapshotRelpath ?? '';
+    if (!/^transcripts\/[0-9a-f]{64}\.jsonl$/.test(relative)) {
+      throw new Error('transcript snapshot relpath is invalid');
+    }
+    expected.add(relative);
+  }
+  return [...expected].sort();
+}
 
-  let manifest: CopyLiveArchiveManifest;
+function copyLiveManifestSpoolFiles(
+  manifest: CopyLiveArchiveManifest,
+): { relpath: string; bytes: number; sha256: string }[] {
+  return manifest.spoolFiles
+    .map((file) => {
+      const relative = file.relpath.split(path.sep).join('/');
+      const normalized = path.posix.normalize(relative);
+      if (
+        !relative ||
+        relative !== normalized ||
+        path.posix.isAbsolute(relative) ||
+        normalized === '..' ||
+        normalized.startsWith('../') ||
+        /\p{Cc}/u.test(relative)
+      ) {
+        throw new Error('spool manifest contains an unsafe relpath');
+      }
+      return { relpath: relative, bytes: file.approvedBytes, sha256: file.sha256 };
+    })
+    .sort((left, right) => (left.relpath < right.relpath ? -1 : left.relpath > right.relpath ? 1 : 0));
+}
+
+export function verifyCopyLiveArchive(
+  archiveDir: string,
+  options: { tempRoot?: string } = {},
+): { ok: boolean; reason?: string } {
   try {
-    manifest = JSON.parse(manifestSource) as CopyLiveArchiveManifest;
-  } catch {
-    return { ok: false, reason: 'manifest.json is not valid JSON' };
-  }
+    const manifestPath = path.join(archiveDir, 'manifest.json');
+    if (!existsSync(manifestPath)) return { ok: false, reason: 'manifest.json not found' };
 
-  // Verify spool archive exists and matches
-  const archivePath = path.join(archiveDir, manifest.spoolArchive.relpath);
-  if (!existsSync(archivePath)) return { ok: false, reason: 'spool archive missing' };
-  if (sha256File(archivePath) !== manifest.spoolArchive.sha256) {
-    return { ok: false, reason: 'spool archive hash mismatch' };
-  }
+    const manifestSource = readFileSync(manifestPath, 'utf8');
+    const expectedHash = sha256Buffer(manifestSource);
+    const hashFilePath = path.join(archiveDir, 'manifest.sha256');
+    if (!existsSync(hashFilePath)) return { ok: false, reason: 'manifest.sha256 not found' };
 
-  // Verify transcripts
-  for (const t of manifest.transcripts) {
-    if (t.status === 'snapshotted' && t.snapshotRelpath) {
-      const tPath = path.join(archiveDir, t.snapshotRelpath);
-      if (!existsSync(tPath)) return { ok: false, reason: `transcript snapshot missing: ${t.snapshotRelpath}` };
-      if (sha256File(tPath) !== t.sha256) {
-        return { ok: false, reason: `transcript hash mismatch: ${t.snapshotRelpath}` };
+    const hashLine = readFileSync(hashFilePath, 'utf8').trim();
+    if (!hashLine.startsWith(expectedHash)) {
+      return { ok: false, reason: 'manifest hash mismatch' };
+    }
+
+    let manifest: CopyLiveArchiveManifest;
+    try {
+      manifest = JSON.parse(manifestSource) as CopyLiveArchiveManifest;
+    } catch {
+      return { ok: false, reason: 'manifest.json is not valid JSON' };
+    }
+    if (manifest.version !== 1 || manifest.mode !== 'copy-live') {
+      return { ok: false, reason: 'manifest is not a version 1 copy-live manifest' };
+    }
+
+    // The archive tree must contain exactly the manifest allowlist — the
+    // uncompressed staging copy is removed after spool.tar.gz is created, so a
+    // leftover `spool/` tree here means the snapshot did not finish cleanly.
+    const actualArchiveEntries = archiveTreeEntries(archiveDir);
+    const allowedArchiveEntries = expectedCopyLiveArchiveEntries(manifest);
+    if (JSON.stringify(actualArchiveEntries) !== JSON.stringify(allowedArchiveEntries)) {
+      return { ok: false, reason: 'unexpected archive entry outside the manifest allowlist' };
+    }
+
+    const spoolArchive = path.join(archiveDir, manifest.spoolArchive.relpath);
+    if (
+      statSync(spoolArchive).size !== manifest.spoolArchive.bytes ||
+      sha256File(spoolArchive) !== manifest.spoolArchive.sha256
+    ) {
+      return { ok: false, reason: 'spool archive verification failed' };
+    }
+
+    const listed = spawnSync('tar', ['--quoting-style=literal', '-tzf', spoolArchive], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (listed.status !== 0) return { ok: false, reason: 'spool archive listing failed' };
+    const entries = listed.stdout.split(/\r?\n/).filter(Boolean);
+    const unsafeEntry = entries.find((entry) => {
+      const canonical = entry.endsWith('/') ? entry.slice(0, -1) : entry;
+      const normalized = path.posix.normalize(canonical);
+      return (
+        !canonical ||
+        /\p{Cc}/u.test(canonical) ||
+        path.posix.isAbsolute(canonical) ||
+        normalized !== canonical ||
+        normalized === '..' ||
+        normalized.startsWith('../')
+      );
+    });
+    if (unsafeEntry) return { ok: false, reason: 'spool archive contains an unsafe path' };
+    const verbose = spawnSync('tar', ['--quoting-style=literal', '-tvzf', spoolArchive], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (verbose.status !== 0) return { ok: false, reason: 'spool archive verbose listing failed' };
+    const verboseEntries = verbose.stdout.split(/\r?\n/).filter(Boolean);
+    if (
+      verboseEntries.length !== entries.length ||
+      verboseEntries.some((entry) => entry[0] !== 'd' && entry[0] !== '-')
+    ) {
+      return { ok: false, reason: 'unexpected spool archive entry type' };
+    }
+    if (new Set(entries).size !== entries.length) {
+      return { ok: false, reason: 'spool archive contains duplicate entries' };
+    }
+
+    // Directory entries must be checked from the tar listing: walkFiles() below
+    // only sees files, so an unlisted empty directory would otherwise slip
+    // through a file-only comparison. Mirrors the cutoff verifier.
+    const listedDirectories = entries.filter((_entry, index) => verboseEntries[index]![0] === 'd');
+    const listedFiles = entries.filter((_entry, index) => verboseEntries[index]![0] === '-');
+    const firstEntry = entries[0] ?? '';
+    const spoolRootName = firstEntry.endsWith('/') ? firstEntry.slice(0, -1) : '';
+    if (!spoolRootName || spoolRootName.includes('/') || /\p{Cc}/u.test(spoolRootName)) {
+      return { ok: false, reason: 'spool archive must start with one safe spool root' };
+    }
+    if (
+      !listedDirectories.includes(`${spoolRootName}/`) ||
+      listedDirectories.some((entry) => !entry.startsWith(`${spoolRootName}/`))
+    ) {
+      return { ok: false, reason: 'spool archive directories do not match the manifest allowlist' };
+    }
+    // Every listed directory must be an ancestor of at least one manifest file;
+    // anything else is an entry the manifest never accounted for.
+    const manifestRelpaths = new Set(
+      copyLiveManifestSpoolFiles(manifest).map((file) => `${spoolRootName}/${file.relpath}`),
+    );
+    const ancestorDirectories = new Set([`${spoolRootName}/`]);
+    for (const relpath of manifestRelpaths) {
+      const segments = relpath.split('/');
+      for (let index = 1; index < segments.length; index += 1) {
+        ancestorDirectories.add(`${segments.slice(0, index).join('/')}/`);
       }
     }
-  }
+    if (listedDirectories.some((entry) => !ancestorDirectories.has(entry))) {
+      return { ok: false, reason: 'spool archive contains a directory outside the manifest allowlist' };
+    }
+    if (
+      listedFiles.length !== manifestRelpaths.size ||
+      listedFiles.some((entry) => !manifestRelpaths.has(entry))
+    ) {
+      return { ok: false, reason: 'spool archive files do not match the manifest allowlist' };
+    }
 
-  return { ok: true };
+    const extractionParent = options.tempRoot ?? tmpdir();
+    const extractionRoot = mkdtempSync(path.join(extractionParent, 'cc-memory-copy-live-verify-'));
+    try {
+      const extracted = spawnSync('tar', ['-xzf', spoolArchive, '-C', extractionRoot], {
+        encoding: 'utf8',
+      });
+      if (extracted.status !== 0) return { ok: false, reason: 'spool archive extraction failed' };
+      const topLevel = readdirSync(extractionRoot, { withFileTypes: true });
+      if (topLevel.length !== 1 || !topLevel[0].isDirectory()) {
+        return { ok: false, reason: 'spool archive must contain exactly one spool root' };
+      }
+      const extractedRoot = path.join(extractionRoot, topLevel[0].name);
+      const archivedFiles = walkFiles(extractedRoot)
+        .map((file) => {
+          const content = readFileSync(file);
+          return {
+            relpath: path.relative(extractedRoot, file).split(path.sep).join('/'),
+            bytes: content.length,
+            sha256: sha256Buffer(content),
+          };
+        })
+        .sort((left, right) => (left.relpath < right.relpath ? -1 : left.relpath > right.relpath ? 1 : 0));
+      const manifestFiles = copyLiveManifestSpoolFiles(manifest);
+      if (JSON.stringify(archivedFiles) !== JSON.stringify(manifestFiles)) {
+        return { ok: false, reason: 'spool archive contents do not match the manifest' };
+      }
+    } finally {
+      rmSync(extractionRoot, { recursive: true, force: true });
+    }
+
+    for (const transcript of manifest.transcripts) {
+      if (transcript.status !== 'snapshotted') continue;
+      const snapshot = path.join(archiveDir, transcript.snapshotRelpath!);
+      if (
+        statSync(snapshot).size !== transcript.bytes ||
+        sha256File(snapshot) !== transcript.sha256
+      ) {
+        return { ok: false, reason: `transcript snapshot verification failed: ${transcript.sourcePathHash}` };
+      }
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function pruneCopyLiveArchives(archiveRoot: string, maxArchives: number): void {
@@ -1147,7 +1320,22 @@ async function executeCopyLive(options: ArchiveBacklogCliOptions): Promise<numbe
   mkdirSync(options.copyLiveArchiveRoot, { recursive: true, mode: 0o700 });
   renameSync(stagingDir, archiveDir);
 
-  const verification = verifyCopyLiveArchive(archiveDir);
+  // Extract into a scratch dir on the archive filesystem, not the default
+  // tmpdir(): the verifier untars the whole spool, which for a multi-GB backlog
+  // would blow out a small /tmp. The archive root was already capacity-checked.
+  // The global lock is released before this point, so two runs can overlap —
+  // hence a per-run directory that only its own invocation removes.
+  const verifyTempParent = path.join(options.copyLiveArchiveRoot, '.verify-tmp');
+  mkdirSync(verifyTempParent, { recursive: true, mode: 0o700 });
+  const verifyTempRoot = mkdtempSync(path.join(verifyTempParent, `run-${id}-`));
+  let verification: { ok: boolean; reason?: string };
+  try {
+    verification = verifyCopyLiveArchive(archiveDir, { tempRoot: verifyTempRoot });
+  } finally {
+    rmSync(verifyTempRoot, { recursive: true, force: true });
+    // Only succeeds once the last concurrent run has cleaned up its own dir.
+    try { rmdirSync(verifyTempParent); } catch { /* another run still active */ }
+  }
   if (!verification.ok) throw new Error(verification.reason ?? 'copy-live archive verification failed');
 
   pruneCopyLiveArchives(options.copyLiveArchiveRoot, options.copyLiveMaxArchives);

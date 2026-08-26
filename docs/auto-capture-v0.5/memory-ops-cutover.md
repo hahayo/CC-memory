@@ -275,6 +275,39 @@ auto-capture service 不 enable（設為開機常駐啟用），也不觀察五�
 
 ## 5. 封存歷史 capture backlog，再按需回放
 
+### 5.0 未處理 backlog 的 copy-live 異地備份（canary 前的硬性 gate）
+
+計畫 Phase 6 新增的「未處理 backlog 異地備份」走 **copy-live（唯讀快照）** 路徑，與下方 5.1 起的 epoch cutoff（世代切換）是兩條不同流程：copy-live **不改名 live spool、不切 epoch**，備份後仍從原 live backlog 繼續處理。canary marker 建立前必須完成本節兩步。
+
+先做 dry-run 盤點（不取鎖、不寫檔）：
+
+```bash
+cd ~/CC_project/CC-memory
+npm run archive:capture-backlog -- --copy-live
+```
+
+確認 `spoolFiles`／`spoolBytes` 合理後執行快照。它會取得與 worker 共用的全域 `flock`，先做容量預檢（公式：`(spool + 被引用 transcript 總量) × 2 + 1 GB` 餘裕），複製完成才釋放鎖，接著打包、驗證、依 `--copy-live-max-archives`（預設 2）保留最近數份：
+
+```bash
+npm run archive:capture-backlog -- --copy-live --execute
+```
+
+成功輸出含 `archiveDir` 與 `counts`。archive 目錄與 cutoff archive 採**同一組允許清單**：`manifest.json`、`manifest.sha256`、`spool.tar.gz`、`transcripts/`——打包後未壓縮的暫存 `spool/` 目錄會被刪除，因為上傳 CLI 的 allowlist 檢查不接受清單外的任何額外項目。`transcriptsUnrecoverable` 計入的是 spool 指向但原檔已不存在或已短於捕捉邊界的項目，屬既有已知現象，不中止流程。
+
+接著沿用同一支上傳 CLI 建立加密異地副本；`--archive-dir` 指向上一步的 `archiveDir` 即可：
+
+```bash
+install -d -m 0700 /dev/shm/cc-memory-backlog-upload
+CC_BACKLOG_UPLOAD_TMP_DIR=/dev/shm/cc-memory-backlog-upload \
+  npm run upload:capture-backlog -- \
+  --archive-dir <archiveDir> --json
+```
+
+上傳 CLI 依 manifest 自述的 `mode` 欄位選用驗證器：`mode: "copy-live"` 走 copy-live 驗證器（比對 `snapshotId`／`snapshotAt`），無 `mode` 欄位則視為 cutoff archive 走原驗證器（比對 `cutoffId`／`cutoffAt`）；`mode` 為其他值一律拒絕。提交到 R2 的 manifest 新增 `source_mode` 標明來源型態，`source_cutoff_id`／`source_cutoff_at` 兩個既有欄位名保留不變，copy-live 情況下承載的是 snapshot 的 id 與時間，因此既有讀取端不需改動。tmpfs 容量需求為 `archive 大小 × 3 + manifest 宣告的未壓縮 spool 大小 + 64 MB`——兩次驗證都會把 `spool.tar.gz` 解開到 tmpfs 逐檔比對，而 JSONL 壓縮率很高，只按 archive 大小估會在驗證中途 `ENOSPC`（磁碟空間不足）。容量檢查在任何驗證之前執行，不足即中止且不會產生半套上傳。以 2026-08-25 的實測為例：archive 4.6 GB、未壓縮 spool 約 125 MB，需求約 14.6 GB，`/dev/shm` 的 20 GB 足夠。
+
+---
+
+
 目前的歷史 backlog 不適合在 cutover 前全部 drain：大量 pathless terminal（缺路徑終止紀錄）本來就不可擷取，完整回放的 LLM 成本也遠高於正式啟用所需。主線是先把既有 spool 切成 historical epoch（歷史世代），新 hook 仍寫原本的 `~/.cache/cc-memory/spool` 路徑，但該路徑會原子切換為指向新 epoch 的 symlink（符號連結）。舊 epoch、其 spool archive（封存檔）、以及仍可讀的 transcript prefix（對話紀錄前綴）都保留，因此後續可以選擇性回放。
 
 先做預設 dry-run。它會讀取並雜湊 spool 內容以產生批准綁定的 fingerprint（指紋），但不讀 transcript、不連 DB、不拿鎖、不寫檔：

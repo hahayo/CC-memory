@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -7,6 +8,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -464,5 +467,191 @@ describe('copyLiveCapacityCheck transcript deduplication', () => {
     // Formula: (spoolBytes + transcriptBytes) * 2 + 1 GB
     const expectedRequired = (spoolBytes + transcriptSize) * 2 + 1024 * 1024 * 1024;
     expect(result.requiredBytes).toBe(expectedRequired);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// copy-live archive shape: the upload pipeline's allowlist contract
+// ---------------------------------------------------------------------------
+
+function makeSnapshot(): { root: string; stagingDir: string; spoolDir: string } {
+  const root = makeRoot();
+  const spoolDir = join(root, 'spool');
+  const stagingDir = join(root, 'staging');
+  mkdirSync(join(spoolDir, 'project1'), { recursive: true });
+  writeFileSync(join(spoolDir, 'project1', 'session1.jsonl'), '{"a":1}\n{"b":2}\n');
+  writeFileSync(
+    join(spoolDir, 'project1', 'session1.capture-state.json'),
+    '{"cursor":16,"spool":{"generation":1}}',
+  );
+  executeCopyLiveSnapshot({
+    spoolDir,
+    stagingDir,
+    snapshotId: '20260825T000000Z',
+    snapshotAt: '2026-08-25T00:00:00.000Z',
+  });
+  return { root, stagingDir, spoolDir };
+}
+
+describe('copy-live archive tree shape', () => {
+  it('contains exactly the manifest allowlist (no uncompressed spool/ tree)', () => {
+    const { stagingDir } = makeSnapshot();
+    expect(readdirSync(stagingDir).sort()).toEqual([
+      'manifest.json',
+      'manifest.sha256',
+      'spool.tar.gz',
+      'transcripts',
+    ]);
+  });
+
+  it('still packs every spool file into spool.tar.gz after the staging copy is dropped', () => {
+    const { stagingDir } = makeSnapshot();
+    const manifest = JSON.parse(readFileSync(join(stagingDir, 'manifest.json'), 'utf8'));
+    expect(manifest.counts.spoolFiles).toBe(2);
+    expect(verifyCopyLiveArchive(stagingDir).ok).toBe(true);
+  });
+});
+
+describe('verifyCopyLiveArchive strict checks', () => {
+  it('rejects an extra file outside the allowlist', () => {
+    const { stagingDir } = makeSnapshot();
+    writeFileSync(join(stagingDir, 'receipt.txt'), 'nope\n', { mode: 0o600 });
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unexpected archive entry outside the manifest allowlist');
+  });
+
+  it('rejects a leftover uncompressed spool/ tree', () => {
+    const { stagingDir } = makeSnapshot();
+    mkdirSync(join(stagingDir, 'spool'), { mode: 0o700 });
+    writeFileSync(join(stagingDir, 'spool', 'session.jsonl'), '{"a":1}\n', { mode: 0o600 });
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unexpected archive entry outside the manifest allowlist');
+  });
+
+  it('rejects a tampered spool.tar.gz whose contents no longer match the manifest', () => {
+    const { stagingDir } = makeSnapshot();
+    const manifestPath = join(stagingDir, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    // Flip one recorded hash so tar contents and manifest disagree while the
+    // manifest.sha256 side-file stays consistent with the manifest bytes.
+    manifest.spoolFiles[0].sha256 = 'f'.repeat(64);
+    const source = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, source, { mode: 0o600 });
+    writeFileSync(
+      join(stagingDir, 'manifest.sha256'),
+      `${createHash('sha256').update(source).digest('hex')}  manifest.json\n`,
+      { mode: 0o600 },
+    );
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('spool archive contents do not match the manifest');
+  });
+
+  it('rejects a manifest whose mode is not copy-live', () => {
+    const { stagingDir } = makeSnapshot();
+    const manifestPath = join(stagingDir, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifest.mode = 'cutoff';
+    const source = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, source, { mode: 0o600 });
+    writeFileSync(
+      join(stagingDir, 'manifest.sha256'),
+      `${createHash('sha256').update(source).digest('hex')}  manifest.json\n`,
+      { mode: 0o600 },
+    );
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('manifest is not a version 1 copy-live manifest');
+  });
+});
+
+describe('verifyCopyLiveArchive rejects unlisted tar entries', () => {
+  /** Repack spool.tar.gz after `mutate` edits the extracted tree, then refresh
+   *  the manifest hashes so only the tar contents differ from expectations. */
+  function repackWith(stagingDir: string, mutate: (spoolRoot: string) => void): void {
+    const rebuild = mkdtempSync(join(tmpdir(), 'cc-memory-repack-'));
+    roots.push(rebuild);
+    const tarPath = join(stagingDir, 'spool.tar.gz');
+    spawnSync('tar', ['-xzf', tarPath, '-C', rebuild]);
+    mutate(join(rebuild, 'spool'));
+    rmSync(tarPath);
+    spawnSync('tar', ['-C', rebuild, '-czf', tarPath, 'spool']);
+
+    const manifestPath = join(stagingDir, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifest.spoolArchive.bytes = statSync(tarPath).size;
+    manifest.spoolArchive.sha256 = createHash('sha256').update(readFileSync(tarPath)).digest('hex');
+    const source = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(manifestPath, source, { mode: 0o600 });
+    writeFileSync(
+      join(stagingDir, 'manifest.sha256'),
+      `${createHash('sha256').update(source).digest('hex')}  manifest.json\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  it('rejects an empty directory the manifest never listed', () => {
+    const { stagingDir } = makeSnapshot();
+    repackWith(stagingDir, (spoolRoot) => {
+      mkdirSync(join(spoolRoot, 'unlisted-empty-dir'), { recursive: true });
+    });
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('spool archive contains a directory outside the manifest allowlist');
+  });
+
+  it('rejects an extra file the manifest never listed', () => {
+    const { stagingDir } = makeSnapshot();
+    repackWith(stagingDir, (spoolRoot) => {
+      writeFileSync(join(spoolRoot, 'project1', 'stowaway.jsonl'), '{"x":1}\n');
+    });
+    const result = verifyCopyLiveArchive(stagingDir);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('spool archive files do not match the manifest allowlist');
+  });
+
+  it('still accepts the directories the manifest files actually live in', () => {
+    const { stagingDir } = makeSnapshot();
+    expect(verifyCopyLiveArchive(stagingDir).ok).toBe(true);
+  });
+});
+
+describe('copy-live verification workspace isolation', () => {
+  it('gives each run its own extraction parent and leaves a peer run alone', () => {
+    const root = makeRoot();
+    const archiveRoot = join(root, 'archives');
+    const verifyParent = join(archiveRoot, '.verify-tmp');
+    mkdirSync(verifyParent, { recursive: true, mode: 0o700 });
+
+    // Stand in for a concurrent run's active extraction directory.
+    const peerRun = join(verifyParent, 'run-20260825T000001Z-peer');
+    mkdirSync(peerRun, { recursive: true, mode: 0o700 });
+    writeFileSync(join(peerRun, 'in-progress.jsonl'), '{"a":1}\n');
+
+    const spoolDir = join(root, 'spool');
+    const stagingDir = join(root, 'staging');
+    mkdirSync(spoolDir, { recursive: true });
+    writeFileSync(join(spoolDir, 'session.jsonl'), '{"a":1}\n');
+    executeCopyLiveSnapshot({
+      spoolDir,
+      stagingDir,
+      snapshotId: '20260825T000002Z',
+      snapshotAt: '2026-08-25T00:00:02.000Z',
+    });
+
+    // Verify with our own per-run parent, exactly as executeCopyLive does.
+    const ownRun = mkdtempSync(join(verifyParent, 'run-20260825T000002Z-'));
+    try {
+      expect(verifyCopyLiveArchive(stagingDir, { tempRoot: ownRun }).ok).toBe(true);
+    } finally {
+      rmSync(ownRun, { recursive: true, force: true });
+    }
+
+    // The peer's workspace must survive our cleanup.
+    expect(existsSync(peerRun)).toBe(true);
+    expect(readFileSync(join(peerRun, 'in-progress.jsonl'), 'utf8')).toBe('{"a":1}\n');
+    expect(existsSync(ownRun)).toBe(false);
   });
 });

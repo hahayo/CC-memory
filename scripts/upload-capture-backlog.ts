@@ -21,30 +21,45 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parse as parseDotenv } from 'dotenv';
-import { verifyCaptureEpochArchive } from './archive-capture-backlog.js';
+import { verifyCaptureEpochArchive, verifyCopyLiveArchive } from './archive-capture-backlog.js';
 
 interface UploadOptions {
   archiveDir: string;
   json: boolean;
 }
 
-interface SourceArchiveManifest {
+/**
+ * Two archive shapes reach this uploader:
+ *   - `cutoff`    — produced by `archive-capture-backlog --execute` (epoch cutoff);
+ *                   identified by `cutoffId` / `cutoffAt`, no `mode` field.
+ *   - `copy-live` — produced by `archive-capture-backlog --copy-live --execute`
+ *                   (read-only snapshot); identified by `mode: 'copy-live'` and
+ *                   `snapshotId` / `snapshotAt`.
+ * Both are normalised to `SourceArchiveEvidence` below so downstream packaging,
+ * key derivation and the committed R2 manifest stay shape-independent.
+ */
+interface RawSourceArchiveManifest {
   version: number;
-  cutoffId: string;
-  cutoffAt: string;
-  counts: {
-    spoolFiles: number;
-    transcriptsReferenced: number;
-    transcriptsSnapshotted: number;
-    transcriptsUnrecoverable: number;
-  };
+  mode?: string;
+  cutoffId?: string;
+  cutoffAt?: string;
+  snapshotId?: string;
+  snapshotAt?: string;
+  counts: Record<string, number>;
 }
 
-interface SourceArchiveEvidence extends SourceArchiveManifest {
+type SourceArchiveMode = 'cutoff' | 'copy-live';
+
+interface SourceArchiveEvidence {
+  mode: SourceArchiveMode;
+  sourceId: string;
+  sourceAt: string;
+  counts: Record<string, number>;
   manifestSha256: string;
 }
 
-const CUTOFF_ID = /^\d{8}T\d{6}Z$/;
+const SOURCE_ID = /^\d{8}T\d{6}Z$/;
+const SOURCE_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function optionValue(args: string[], name: string): string | undefined {
   const inline = args.find((arg) => arg.startsWith(`${name}=`));
@@ -208,17 +223,44 @@ function assertPrivateRegularTree(root: string): void {
   visit(root);
 }
 
+/** Size the tree without ever following a symlink out of the archive. */
 function directoryBytes(root: string): number {
   let total = 0;
   const visit = (path: string): void => {
-    const info = statSync(path);
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) return;
     if (info.isDirectory()) {
       for (const entry of readdirSync(path)) visit(join(path, entry));
       return;
     }
-    total += info.size;
+    if (info.isFile()) total += info.size;
   };
   visit(root);
+  return total;
+}
+
+/**
+ * Bytes the archive's own manifest says the spool expands to once extracted.
+ * The verifiers untar spool.tar.gz into tmpDir, and a highly compressible spool
+ * can expand to many times the archive's on-disk size — so this has to be
+ * budgeted explicitly rather than folded into the ×3 archive multiplier.
+ * Returns 0 when the manifest cannot be read or declares no spool files; the
+ * verifier itself still fails closed on a malformed manifest.
+ */
+function declaredUncompressedSpoolBytes(archiveDir: string): number {
+  let manifest: { spoolFiles?: { bytes?: number; approvedBytes?: number }[] };
+  try {
+    manifest = JSON.parse(readFileSync(join(archiveDir, 'manifest.json'), 'utf8'));
+  } catch {
+    return 0;
+  }
+  if (!Array.isArray(manifest.spoolFiles)) return 0;
+  let total = 0;
+  for (const file of manifest.spoolFiles) {
+    // cutoff manifests record `bytes`; copy-live manifests record `approvedBytes`.
+    const size = typeof file.approvedBytes === 'number' ? file.approvedBytes : file.bytes;
+    if (typeof size === 'number' && Number.isFinite(size) && size > 0) total += size;
+  }
   return total;
 }
 
@@ -231,7 +273,11 @@ function assertTmpfsCapacity(tmpDir: string, archiveDir: string): void {
   if (result.status !== 0 || !Number.isSafeInteger(availableBytes) || availableBytes < 0) {
     throw new Error('could not determine tmpfs free bytes');
   }
-  const requiredBytes = directoryBytes(archiveDir) * 3 + 64 * 1024 * 1024;
+  // ×3 archive (package + verify unpack + ciphertext readback) + one extracted
+  // spool for the verifier's per-file comparison + 64 MiB headroom.
+  const requiredBytes = directoryBytes(archiveDir) * 3 +
+    declaredUncompressedSpoolBytes(archiveDir) +
+    64 * 1024 * 1024;
   if (availableBytes < requiredBytes) {
     throw new Error(`insufficient tmpfs capacity: available=${availableBytes} required=${requiredBytes}`);
   }
@@ -256,27 +302,60 @@ function assertNonOverlappingDirectories(archiveDir: string, tmpDir: string): vo
 
 function parseSourceManifest(archiveDir: string): SourceArchiveEvidence {
   const manifestSource = readFileSync(join(archiveDir, 'manifest.json'), 'utf8');
-  const manifest = JSON.parse(manifestSource) as SourceArchiveManifest;
-  if (manifest.version !== 1 || !CUTOFF_ID.test(manifest.cutoffId)) {
-    throw new Error('capture archive manifest has an invalid version or cutoffId');
+  const manifest = JSON.parse(manifestSource) as RawSourceArchiveManifest;
+  if (manifest.version !== 1) {
+    throw new Error('capture archive manifest has an invalid version');
+  }
+  const mode: SourceArchiveMode = manifest.mode === 'copy-live' ? 'copy-live' : 'cutoff';
+  if (manifest.mode !== undefined && manifest.mode !== 'copy-live') {
+    throw new Error(`capture archive manifest has an unsupported mode: ${manifest.mode}`);
+  }
+  const sourceId = mode === 'copy-live' ? manifest.snapshotId : manifest.cutoffId;
+  const sourceAt = mode === 'copy-live' ? manifest.snapshotAt : manifest.cutoffAt;
+  if (typeof sourceId !== 'string' || !SOURCE_ID.test(sourceId)) {
+    throw new Error(`capture archive manifest has an invalid ${mode === 'copy-live' ? 'snapshotId' : 'cutoffId'}`);
+  }
+  if (typeof sourceAt !== 'string' || !SOURCE_AT.test(sourceAt)) {
+    throw new Error(`capture archive manifest has an invalid ${mode === 'copy-live' ? 'snapshotAt' : 'cutoffAt'}`);
   }
   return {
-    ...manifest,
+    mode,
+    sourceId,
+    sourceAt,
+    counts: manifest.counts,
     manifestSha256: createHash('sha256').update(manifestSource).digest('hex'),
   };
 }
 
-function readSourceManifest(archiveDir: string, tempRoot: string): SourceArchiveEvidence {
+/** Pick the verifier matching the archive's own declared mode. */
+function verifySourceArchive(
+  archiveDir: string,
+  mode: SourceArchiveMode,
+  tempRoot: string,
+): { ok: boolean; reason?: string } {
+  return mode === 'copy-live'
+    ? verifyCopyLiveArchive(archiveDir, { tempRoot })
+    : verifyCaptureEpochArchive(archiveDir, { tempRoot });
+}
+
+function assertRealArchiveDirectory(archiveDir: string): void {
   const info = lstatSync(archiveDir);
   if (!info.isDirectory() || info.isSymbolicLink()) {
     throw new Error('capture archive must be a real directory');
   }
+}
+
+function readSourceManifest(archiveDir: string, tempRoot: string): SourceArchiveEvidence {
+  // Idempotent: execute() runs these before the capacity check, but this
+  // function is also reachable on its own.
+  assertRealArchiveDirectory(archiveDir);
   assertPrivateRegularTree(archiveDir);
-  const verification = verifyCaptureEpochArchive(archiveDir, { tempRoot });
+  const evidence = parseSourceManifest(archiveDir);
+  const verification = verifySourceArchive(archiveDir, evidence.mode, tempRoot);
   if (!verification.ok) {
     throw new Error(`capture archive verification failed: ${verification.reason ?? 'unknown'}`);
   }
-  return parseSourceManifest(archiveDir);
+  return evidence;
 }
 
 function verifyPackagedArchive(
@@ -323,11 +402,12 @@ function verifyPackagedArchive(
       throw new Error('packaged archive must contain exactly one archive root');
     }
     const packagedArchive = join(extractionRoot, topLevel[0].name);
-    const verification = verifyCaptureEpochArchive(packagedArchive, { tempRoot });
+    const evidence = parseSourceManifest(packagedArchive);
+    const verification = verifySourceArchive(packagedArchive, evidence.mode, tempRoot);
     if (!verification.ok) {
       throw new Error(`packaged archive verification failed: ${verification.reason ?? 'unknown'}`);
     }
-    return parseSourceManifest(packagedArchive);
+    return evidence;
   } finally {
     rmSync(extractionRoot, { recursive: true, force: true });
   }
@@ -409,7 +489,14 @@ function reexecUnderFlock(options: UploadOptions, tmpDir: string): number | null
 }
 
 function sweepOrphanRunDirectories(tmpDir: string): void {
-  const prefixes = ['cc-memory-backlog-', 'cc-memory-archive-verify-'];
+  // Every mkdtemp prefix that can land in tmpDir must be listed here, or an
+  // interrupted run leaves the whole uncompressed spool behind and eventually
+  // blocks all future uploads.
+  const prefixes = [
+    'cc-memory-backlog-',
+    'cc-memory-archive-verify-',
+    'cc-memory-copy-live-verify-',
+  ];
   for (const name of readdirSync(tmpDir)) {
     if (!prefixes.some((prefix) => name.startsWith(prefix))) continue;
     const candidate = join(tmpDir, name);
@@ -444,16 +531,29 @@ function execute(options: UploadOptions): number {
   if (!/^age1[0-9a-z]+$/.test(recipient)) {
     throw new Error('CC_MEMORY_AGE_RECIPIENT is not a valid age X25519 recipient');
   }
-  const source = readSourceManifest(options.archiveDir, tmpDir);
+  // Ordering matters in both directions:
+  //   1. assertPrivateRegularTree first — directoryBytes() below walks the tree
+  //      with statSync (which follows symlinks), so an unvalidated tree could
+  //      point the size accounting at something outside the archive.
+  //   2. assertTmpfsCapacity next — the verification in step 3 extracts
+  //      spool.tar.gz into tmpDir, so a highly-compressible spool would
+  //      otherwise pass the documented guidance and die with ENOSPC mid-verify.
+  //   3. full verification last, now that space is known to be sufficient.
+  // The declared spool size in the manifest is not yet authenticated at step 2;
+  // it is a lower bound used to reject obviously-too-small budgets early, and
+  // step 3 still fails closed on any manifest that understates the real tar.
+  assertRealArchiveDirectory(options.archiveDir);
+  assertPrivateRegularTree(options.archiveDir);
   assertTmpfsCapacity(tmpDir, options.archiveDir);
+  const source = readSourceManifest(options.archiveDir, tmpDir);
   const remoteEnv = rcloneEnv();
   const suffix = process.env.CC_BACKLOG_UPLOAD_RUN_SUFFIX?.trim() || randomBytes(8).toString('hex');
   if (!/^[0-9a-f]{16}$/.test(suffix)) {
     throw new Error('CC_BACKLOG_UPLOAD_RUN_SUFFIX must be 16 lowercase hex characters');
   }
-  const year = source.cutoffId.slice(0, 4);
-  const month = source.cutoffId.slice(4, 6);
-  const runId = `${source.cutoffId}-${suffix}`;
+  const year = source.sourceId.slice(0, 4);
+  const month = source.sourceId.slice(4, 6);
+  const runId = `${source.sourceId}-${suffix}`;
   const objectKey = `backups/v1/backlog/${year}/${month}/${runId}.tar.gz.age`;
   const bucket = required('CC_MEMORY_R2_BUCKET');
   const remoteCipher = `ccmr2:${bucket}/${objectKey}`;
@@ -507,8 +607,11 @@ function execute(options: UploadOptions): number {
       schema_version: 1,
       target: 'backlog',
       run_id: runId,
-      source_cutoff_id: packagedSource.cutoffId,
-      source_cutoff_at: packagedSource.cutoffAt,
+      source_mode: packagedSource.mode,
+      // Legacy key names retained so existing readers keep working; for a
+      // copy-live archive they carry the snapshot id/timestamp.
+      source_cutoff_id: packagedSource.sourceId,
+      source_cutoff_at: packagedSource.sourceAt,
       source_manifest_sha256: packagedSource.manifestSha256,
       completed_at: completed.stdout.trim(),
       object_key: objectKey,
