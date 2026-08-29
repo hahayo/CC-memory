@@ -128,6 +128,8 @@ production canary 與停用 claude-mem 前，除了 spool archive，project 與 
 
 兩份密文均從 R2 完整下載，依 manifest 核對密文與明文 bytes／SHA-256，使用本機新私鑰解密，並以隔離的 PostgreSQL 18.4、`--network none`、tmpfs 容器完成實際 restore。project 還原為 8 張 public tables、224 筆 memories、14,006 筆 observations；personal 還原為 8 張 public tables、47 筆 memories、0 筆 observations，scope 分布符合預期。一次性容器與 `/dev/shm` 明文均已清除。新私鑰保留於本機 `0600` regular file，並以 Bitwarden Secure Note（安全筆記）完成異地託管；CLI 讀回內容的 SHA-256 與本機私鑰一致，完成後已鎖定保管庫並刪除暫存 session 檔。DB 異地復原證據已完成；g1 仍須等待 §5 historical epoch 與 backlog archive 完成。
 
+2026-08-27 告警 hard gate 重驗：`npx tsx scripts/run-auto-capture-supervisor.ts --test-alert` 執行無錯誤，操作人確認 memory 專用 bot 實際收到 `CC-memory Telegram alert test`。`~/.ccm-memory-alert.env` 維持 `0600` 一般檔，正式 unit 內 `CC_MEMORY_REQUIRE_ALERTS=1`。三項告警前置全數通過。
+
 2026-08-27 Phase 7 前置判定（使用者拍板）：canary 前**不另做手動 dump／restore**，沿用 §1.4.1 每日自動備份與 freshness dead-man 的現行證據——當日 `cc-memory-backup-freshness.service` 連續 PASS，project `completed_at=2026-08-26T19:00:31Z`、personal `completed_at=2026-08-26T19:30:08Z`，兩側皆為「fresh committed manifest with full ciphertext readback」，age 皆在 26 小時門檻內；最近一次完整異地 restore 演練為 2026-08-17（見上文）。理由：canary 只跑單一 tick、單一 session，資料面風險遠低於既有每日備份所涵蓋的範圍。此判定只適用於本次 canary；Phase 8 觀察窗結束、核准長跑前仍依 §9 替換版第 1 條重新確認復原證據。
 
 ### 1.4.1 每日 DB 備份與 freshness dead-man
