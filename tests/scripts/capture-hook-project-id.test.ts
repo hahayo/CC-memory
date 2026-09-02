@@ -3,7 +3,7 @@
 // hooks/post-tool-use-capture.sh 與 hooks/stop-capture-sentinel.sh 的 project_id 解析契約。
 // 解析順序：CLAUDE.md marker（cwd 往上走到 repo root 為止，同 tryReadClaudeMdMarker）
 //   → git repo root basename → cwd basename → unknown。
-// 刻意不做 resolveProjectId 的 git-origin owner/repo 層（需 spawn git；既有 corpus 皆目錄名）。
+// 與 resolveProjectId 第 3–5 層一致（2026-09-02 起 server 第 4 層亦為 git 根目錄名，不再用 git origin）。
 // 非 ASCII（中文）目錄名保留原字寫進記錄行；spool 目錄名以 _uXXXX 編碼（不碰撞）。
 
 import { spawnSync } from 'node:child_process';

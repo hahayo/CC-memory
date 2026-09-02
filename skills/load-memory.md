@@ -14,7 +14,7 @@ description: 載入專案記憶並顯示摘要
 1. 明示的 `project_id` 參數
 2. 環境變數 `CC_MEMORY_PROJECT_ID`
 3. CLAUDE.md 中的 `<!-- cc-memory: project="xxx" -->` 標記
-4. git origin remote（`owner/repo` 格式，跨電腦一致）
+4. git 根目錄名（往上找到 `.git` 的那層目錄名；2026-09-02 起取代 git origin `owner/repo`，與 capture hooks 一致）
 5. basename(project_path)
 
 > v0.3 起 MCP server 的 `process.cwd()` 不可靠（是 server 啟動目錄），

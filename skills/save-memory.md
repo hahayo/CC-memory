@@ -57,7 +57,7 @@ cc_memory_save({
 
 > **重要 (v0.3)**：`project_path` 必須傳入當前工作目錄。MCP server 的 `process.cwd()`
 > 是 server process 啟動目錄而非 client 端，若不傳 server 無法讀 CLAUDE.md marker
-> 或解析 git origin。若明確已知 `project_id`，可改傳 `project_id` 參數跳過解析。
+> 或找 git 根目錄。若明確已知 `project_id`，可改傳 `project_id` 參數跳過解析。
 
 ## 步驟 4: 確認結果
 
