@@ -399,14 +399,20 @@ describe('capture worker failure contracts without DB', () => {
     await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-09-03T08:00:00+0800' });
     const llm = mockLlm([rawExtraction({ summary: 's', observations: [observation('o', 'n')] })]);
     const lines: string[] = [];
-    const db = { transaction: async () => { throw new Error('duplicate key value violates unique constraint "x"'); } };
+    const db = { transaction: async () => {
+      const err = new Error('Failed query: insert into "observations" … params: SECRET_OBSERVATION_TEXT_MUST_NOT_LOG\nduplicate key value violates unique constraint "x"');
+      (err as { code?: string }).code = '23505';
+      throw err;
+    } };
 
     const result = await runWorker(harness, { db, llm, stdout: { write: (c: string) => lines.push(c) } });
 
     expect(result).toMatchObject({ failed: 1, processed: 0 });
     const line = lines.find((l) => l.includes('db-write-failed'));
     expect(line).toContain(`session=${harness.sessionId}`);
-    expect(line).toContain('duplicate key value');
+    expect(line).toContain('code=23505');
+    expect(line).toContain('Failed query');
+    expect(line).not.toContain('SECRET_OBSERVATION_TEXT_MUST_NOT_LOG');
     expect(line).not.toContain('db write will fail');
   });
 

@@ -777,6 +777,22 @@ function parseSpoolRecords(buffer: Buffer): ParsedSpoolResult {
   return { records, malformedCount, lineOffsets };
 }
 
+/**
+ * DB 寫入錯誤的安全摘要：類別名＋（有的話）PG error code＋訊息首行去掉 `params:` 之後的內容、截 200 字。
+ * drizzle/postgres-js 的錯誤訊息會附完整 query 與參數（含 observation 文字），不能原樣進 journal。
+ */
+export function summarizeDbWriteError(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const withCode = error as { code?: unknown; cause?: { code?: unknown } };
+  const code = typeof withCode?.code === 'string' ? withCode.code
+    : typeof withCode?.cause?.code === 'string' ? withCode.cause.code : null;
+  const raw = error instanceof Error ? error.message : String(error);
+  const firstLine = raw.split('\n')[0] ?? '';
+  const beforeParams = firstLine.split(/params:/i)[0].trim();
+  const summary = beforeParams.slice(0, 200);
+  return `${name}${code ? ` code=${code}` : ''}: ${summary}`;
+}
+
 function firstString(records: SpoolRecord[], key: keyof SpoolRecord): string | null {
   for (const record of records) {
     const value = record[key];
@@ -2484,8 +2500,9 @@ export async function runCaptureWorkerOnce(
             clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
             await stateWriter(statePath, state);
           } catch (error) {
-            // 2026-09-03：原本靜默吞掉，journal 只看得到 failed=1 無法診斷；印錯誤訊息（不含 transcript 內容）
-            const message = error instanceof Error ? error.message : String(error);
+            // 2026-09-03：原本靜默吞掉，journal 只看得到 failed=1 無法診斷；只印錯誤類別／碼／首行摘要，
+            // 不印 query params（drizzle 的 "Failed query … params: …" 會夾帶 observation 內容）
+            const message = summarizeDbWriteError(error);
             stdout.write(
               `[cc-memory] auto-capture warning: db-write-failed session=${sessionId} project=${chunkWindow.projectId} source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} error=${message}\n`
             );
