@@ -33,6 +33,7 @@ import {
 } from '../utils/embedding.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
+import { resolveProjectId } from './projects.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -766,6 +767,102 @@ function firstString(records: SpoolRecord[], key: keyof SpoolRecord): string | n
     if (typeof value === 'string' && value.length > 0) return value;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// T1（2026-09-03）：舊 hook 時代 backlog 的 project_id 重新歸屬
+//
+// 2026-09-02 22:10（Asia/Taipei）之前的 hook 以 cwd basename 去非 ASCII 產 id，
+// 中文目錄全崩成 `__`／`___`／`_raw`…（memory-ops-cutover.md §4.1）。
+// 這批 spool 記錄行的 project_id 不可信；改從 transcript 內第一個 `cwd`
+// （Claude：頂層 `cwd`；Codex：`session_meta.payload.cwd`）經 resolveProjectId
+// （cwdIsExplicit=true，與 hook 同規則）推導。
+// 記錄行 timestamp >= cutoff → 新 hook 寫的，一律信記錄行、不開 transcript。
+// transcript 沒 cwd／讀不到／解析失敗 → 維持記錄行 project_id（fail-safe）。
+// 已知限制：舊時代 session 中途 cd 到別的 repo 仍歸第一個 cwd 的專案（接受）。
+// ---------------------------------------------------------------------------
+const BACKLOG_PROJECT_ID_CUTOFF_MS = Date.parse('2026-09-02T22:10:00+08:00');
+const TRANSCRIPT_CWD_SCAN_BYTES = 256 * 1024;
+
+function recordTimestampMs(record: SpoolRecord): number | null {
+  if (typeof record.timestamp !== 'string') return null;
+  const ms = Date.parse(record.timestamp);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function extractCwdFromTranscriptLine(line: string): string | null {
+  if (!line.includes('"cwd"')) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const top = (parsed as { cwd?: unknown }).cwd;
+  if (typeof top === 'string' && top.trim().length > 0) return top.trim();
+  const payload = (parsed as { payload?: unknown }).payload;
+  if (payload && typeof payload === 'object') {
+    const nested = (payload as { cwd?: unknown }).cwd;
+    if (typeof nested === 'string' && nested.trim().length > 0) return nested.trim();
+  }
+  return null;
+}
+
+/** 讀 transcript 開頭最多 maxBytes，回第一個 cwd；任何錯誤都回 null（不拋）。 */
+async function readFirstTranscriptCwd(path: string, maxBytes: number): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(path, 'r');
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    const text = buffer.subarray(0, bytesRead).toString('utf8');
+    const lines = text.split('\n');
+    // 讀滿 maxBytes 時最後一段可能是半行，不解析；未讀滿代表已到檔尾，整段都是完整行。
+    const completeCount = bytesRead >= maxBytes ? lines.length - 1 : lines.length;
+    for (let i = 0; i < completeCount; i += 1) {
+      const cwd = extractCwdFromTranscriptLine(lines[i]);
+      if (cwd) return cwd;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function resolveSessionProjectId(
+  records: SpoolRecord[],
+  spool: SpoolSession,
+  sessionId: string,
+  stdout: { write(chunk: string): unknown }
+): Promise<string> {
+  const recordProjectId = firstString(records, 'project_id') ?? spool.projectIdFromPath;
+  for (const record of records) {
+    const ms = recordTimestampMs(record);
+    if (ms !== null && ms >= BACKLOG_PROJECT_ID_CUTOFF_MS &&
+        typeof record.project_id === 'string' && record.project_id.length > 0) {
+      return record.project_id;
+    }
+  }
+  const transcriptPath = firstString(records, 'transcript_path');
+  if (!transcriptPath) return recordProjectId;
+  const cwd = await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES);
+  if (!cwd) return recordProjectId;
+  let derived: string;
+  try {
+    derived = resolveProjectId({ cwd, cwdIsExplicit: true });
+  } catch {
+    return recordProjectId;
+  }
+  if (derived.length === 0) return recordProjectId;
+  if (derived !== recordProjectId) {
+    stdout.write(
+      `[cc-memory] auto-capture info: project-id-remapped session=${sessionId} old=${recordProjectId} new=${derived}\n`
+    );
+  }
+  return derived;
 }
 
 // 注入污染防線：transcript 是 JSONL，逐行過濾——整行含 INJECTION_MARKER 即丟棄，
@@ -1797,8 +1894,8 @@ export async function runCaptureWorkerOnce(
       handledSessions += 1;
       await saveTickCursor(root, spool.path);
 
-      const projectId = firstString(snapshot.records, 'project_id') ?? spool.projectIdFromPath;
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
+      const projectId = await resolveSessionProjectId(snapshot.records, spool, sessionId, stdout);
       const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
       const outcomeCountBefore =
         result.processed + result.skipped + result.failed + result.deadLettered +
