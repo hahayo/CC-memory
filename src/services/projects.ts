@@ -7,7 +7,7 @@
 //   1. explicit（函式參數傳入，來自 MCP tool / HTTP query / Telegram /setproj 等）
 //   2. env CC_MEMORY_PROJECT_ID（容器 / CI / 單機手動覆蓋 **server cwd** 解析）
 //   3. CLAUDE.md 中的 <!-- cc-memory: project="..." --> 標記
-//   4. git origin remote → owner/repo
+//   4. git repo root basename（2026-09-02 起；舊為 git origin owner/repo）
 //   5. basename(cwd)
 //
 // cwdIsExplicit=true（codex review round 20 P1）：呼叫者主動送 project_path 時
@@ -19,7 +19,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { eq, ne, and, notInArray, sql } from 'drizzle-orm';
 import { projectMemories, tasks } from '../db/schema.js';
-import { resolveRepoName } from '../utils/repo-name.js';
 import { RESERVED_PROJECT_IDS } from './scope-policy.js';
 import type { DbClient } from './types.js';
 
@@ -27,7 +26,6 @@ import type { DbClient } from './types.js';
 const RESERVED_PROJECT_ID_LIST: string[] = [...RESERVED_PROJECT_IDS];
 
 type ReadFileSyncFn = (path: string) => string;
-type ResolveRepoNameFn = (cwd: string) => string | null;
 type ExistsSyncFn = (path: string) => boolean;
 
 export interface ResolveProjectIdInput {
@@ -41,9 +39,8 @@ export interface ResolveProjectIdInput {
   cwdIsExplicit?: boolean;
   /** 允許測試 override env；production code 應不傳此參數 */
   envOverride?: string | null;
-  /** DI hooks；production 預設為 fs.readFileSync / resolveRepoName / fs.existsSync */
+  /** DI hooks；production 預設為 fs.readFileSync / fs.existsSync */
   readFileSyncFn?: ReadFileSyncFn;
-  resolveRepoNameFn?: ResolveRepoNameFn;
   existsSyncFn?: ExistsSyncFn;
 }
 
@@ -133,7 +130,6 @@ export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
     cwdIsExplicit = false,
     envOverride,
     readFileSyncFn = (p: string) => readFileSync(p, 'utf-8'),
-    resolveRepoNameFn = resolveRepoName,
     existsSyncFn = existsSync,
   } = input;
 
@@ -152,8 +148,11 @@ export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
   const lvl3 = nonEmpty(tryReadClaudeMdMarker(cwd, readFileSyncFn, existsSyncFn));
   if (lvl3) return lvl3;
 
-  // layer 4: git origin → owner/repo
-  const lvl4 = nonEmpty(resolveRepoNameFn(cwd));
+  // layer 4: git repo root basename（2026-09-02 使用者拍板：取代舊的 git origin owner/repo 層，
+  // 與 hooks/capture-common.sh resolve_project_id 一致——無 marker 時 repo 內任何子目錄都解析成同一 id；
+  // 跨裝置一致性改靠 CLAUDE.md marker 或相同 clone 目錄名）
+  const repoRoot = findRepoRoot(cwd, existsSyncFn, readFileSyncFn);
+  const lvl4 = repoRoot === null ? null : nonEmpty(basenameOf(repoRoot));
   if (lvl4) return lvl4;
 
   // layer 5: basename(cwd)

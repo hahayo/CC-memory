@@ -226,6 +226,8 @@ CREATE INDEX ral_created_idx ON refine_audit_log (created_at DESC);
 
 ### `repo_name` 解析（v0.3：`owner/repo` 格式）
 
+> **2026-09-02 SUPERSEDED**：第 4 層改為 git 根目錄名（與 capture hooks 一致），`src/utils/repo-name.ts` 已移除；本節保留為歷史紀錄。見 `docs/decisions/DEC-20260902T151857Z-align-project-id-with-capture-hooks.md`。
+
 `src/utils/repo-name.ts`。為避免 shell injection，一律使用 Node 的 `execFileSync`
 （參數以 argv 陣列傳入，不經 shell 展開）。**回傳 `owner/repo` 而非僅 `repo`**，
 解決 fork vs upstream / 不同 org 同名 repo 漂移問題。實作細節見

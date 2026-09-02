@@ -157,8 +157,8 @@ read_claude_md_marker() {
 }
 
 # project_id：CLAUDE.md marker → git 根目錄名 → cwd 目錄名 → unknown。
-# 刻意不做 resolveProjectId 的 git origin owner/repo 層（需 spawn git；既有 corpus 皆為目錄名）——
-# 與 MCP server 的已知差異，見 docs/auto-capture-v0.5/memory-ops-cutover.md §4.1。
+# 與 src/services/projects.ts resolveProjectId 第 3–5 層一致（2026-09-02 起 server 第 4 層亦為 git 根目錄名，
+# 不再用 git origin owner/repo）；hook 沒有 server 的 explicit／env 兩層。
 # 回傳原始字串（含非 ASCII）；spool 目錄名另外經 sanitize_segment。
 resolve_project_id() {
   local cwd root base
