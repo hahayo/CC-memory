@@ -43,10 +43,21 @@ export interface CaptureSpoolAppendResult {
 }
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
-const UNSAFE_SEGMENT_CHARS = /[^A-Za-z0-9._-]+/g;
+const SAFE_SEGMENT_CHAR = /^[A-Za-z0-9._-]$/;
 
+/**
+ * spool 目錄／檔名編碼（與 hooks/*.sh 的 sanitize_segment 同構）：
+ * 安全字元原樣，其餘每個 code point 編成 `_uXXXX`——可逆、不同 id 不碰撞
+ * （舊版把非安全字元一律換 `_`，中文目錄名會崩塌成 `__`）。
+ */
 export function sanitizeSpoolSegment(value: string): string {
-  const sanitized = value.trim().replace(UNSAFE_SEGMENT_CHARS, '_').replace(/^\.+/, '_');
+  let encoded = '';
+  for (const ch of value.trim()) {
+    encoded += SAFE_SEGMENT_CHAR.test(ch)
+      ? ch
+      : `_u${(ch.codePointAt(0) ?? 0xfffd).toString(16).padStart(4, '0')}`;
+  }
+  const sanitized = encoded.replace(/^\.+/, '_');
   if (sanitized.length === 0 || sanitized === '.' || sanitized === '..') {
     return 'unknown';
   }

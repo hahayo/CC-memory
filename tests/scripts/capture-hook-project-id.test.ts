@@ -1,12 +1,13 @@
 // tests/scripts/capture-hook-project-id.test.ts
 //
 // hooks/post-tool-use-capture.sh 與 hooks/stop-capture-sentinel.sh 的 project_id 解析契約。
-// 對齊 src/services/projects.ts resolveProjectId 的 layer 3-5：
-//   CLAUDE.md marker（cwd 往上走到 repo root 為止）→ repo root basename → cwd basename。
-// 非 ASCII（中文）目錄名保留原字，只有 spool 目錄名做 sanitize。
+// 解析順序：CLAUDE.md marker（cwd 往上走到 repo root 為止，同 tryReadClaudeMdMarker）
+//   → git repo root basename → cwd basename → unknown。
+// 刻意不做 resolveProjectId 的 git-origin owner/repo 層（需 spawn git；既有 corpus 皆目錄名）。
+// 非 ASCII（中文）目錄名保留原字寫進記錄行；spool 目錄名以 _uXXXX 編碼（不碰撞）。
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -133,10 +134,8 @@ describe('capture hooks resolve project_id like resolveProjectId', () => {
     const result = runHook(POST_HOOK, cwd);
 
     expect(result.status).toBe(0);
-    const dirs = spoolDirs();
-    expect(dirs).toHaveLength(1);
-    expect(dirs[0]).toMatch(/^_+$/);
-    expect(firstRecord(dirs[0]).project_id).toBe('手機遠端控制');
+    expect(spoolDirs()).toEqual(['_u624b_u6a5f_u9060_u7aef_u63a7_u5236']);
+    expect(firstRecord('_u624b_u6a5f_u9060_u7aef_u63a7_u5236').project_id).toBe('手機遠端控制');
   });
 
   it('escapes double quotes and backslashes in the raw project_id', () => {
@@ -167,6 +166,120 @@ describe('capture hooks resolve project_id like resolveProjectId', () => {
     expect(result.status).toBe(0);
     expect(spoolDirs()).toEqual(['escaped-repo']);
     expect(firstRecord('escaped-repo').project_id).toBe('escaped-repo');
+  });
+
+  it('keeps two non-git non-ASCII dirs of one session in two spool files (no collision)', () => {
+    const a = join(sandbox, '甲乙');
+    const b = join(sandbox, '丙丁');
+    mkdirSync(a); mkdirSync(b);
+
+    runHook(POST_HOOK, a);
+    runHook(POST_HOOK, b);
+
+    expect(spoolDirs()).toEqual(['_u4e19_u4e01', '_u7532_u4e59']);
+    expect(firstRecord('_u7532_u4e59').project_id).toBe('甲乙');
+    expect(firstRecord('_u4e19_u4e01').project_id).toBe('丙丁');
+  });
+
+  it('detects a worktree .git file that has no trailing newline', () => {
+    const worktree = join(sandbox, 'wt-nonl');
+    mkdirSync(worktree, { recursive: true });
+    writeFileSync(join(worktree, '.git'), 'gitdir: /somewhere/.git/worktrees/wt-nonl', 'utf8');
+    const cwd = join(worktree, 'sub');
+    mkdirSync(cwd);
+
+    runHook(POST_HOOK, cwd);
+
+    expect(spoolDirs()).toEqual(['wt-nonl']);
+  });
+
+  it('strips repeated trailing slashes like Node basename', () => {
+    mkdirSync(join(sandbox, 'proj'));
+
+    runHook(POST_HOOK, `${join(sandbox, 'proj')}//`);
+
+    expect(spoolDirs()).toEqual(['proj']);
+    expect(firstRecord('proj').project_id).toBe('proj');
+  });
+
+  it('trims marker whitespace and treats a whitespace-only marker as absent', () => {
+    const spaced = makeGitRepo('spaced');
+    writeFileSync(join(spaced, 'CLAUDE.md'), '<!-- cc-memory: project="  spaced-id  " -->\n', 'utf8');
+    runHook(POST_HOOK, spaced, 'session-a');
+    expect(firstRecord('spaced-id', 'session-a').project_id).toBe('spaced-id');
+
+    const blank = makeGitRepo('blank-marker');
+    writeFileSync(join(blank, 'CLAUDE.md'), '<!-- cc-memory: project="   " -->\n', 'utf8');
+    runHook(POST_HOOK, blank, 'session-b');
+    expect(firstRecord('blank-marker', 'session-b').project_id).toBe('blank-marker');
+  });
+
+  it('ignores a CLAUDE.md that is a FIFO instead of hanging', () => {
+    const root = makeGitRepo('fifo-repo');
+    const fifo = join(root, 'CLAUDE.md');
+    expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
+    const cwd = join(root, 'sub');
+    mkdirSync(cwd);
+
+    const started = Date.now();
+    const result = runHook(POST_HOOK, cwd);
+
+    expect(result.status).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(spoolDirs()).toEqual(['fifo-repo']);
+  });
+
+  it('decodes surrogate pairs and keeps a literal backslash-u sequence intact', () => {
+    const emoji = join(sandbox, '😀log');
+    mkdirSync(emoji);
+    runHook(POST_HOOK, emoji, 'session-emoji');
+    expect(spoolDirs()).toContain('_u1f600log');
+    expect(firstRecord('_u1f600log', 'session-emoji').project_id).toBe('😀log');
+
+    const literal = join(sandbox, 'x\\u002fy');
+    mkdirSync(literal);
+    runHook(POST_HOOK, literal, 'session-literal');
+    const dir = spoolDirs().find((d) => d.startsWith('x_u005c'));
+    expect(dir).toBeDefined();
+    expect(firstRecord(dir as string, 'session-literal').project_id).toBe('x\\u002fy');
+  });
+
+  it('refuses to follow a pre-planted symlink at the spool project directory', () => {
+    const outside = join(sandbox, 'outside');
+    mkdirSync(outside);
+    mkdirSync(spoolRoot, { recursive: true });
+    symlinkSync(outside, join(spoolRoot, 'linked'));
+    const cwd = join(sandbox, 'linked');
+    mkdirSync(cwd);
+
+    const result = runHook(POST_HOOK, cwd);
+
+    expect(result.status).toBe(0);
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('keeps walking up past a .git file that is not a gitdir pointer', () => {
+    const outer = makeGitRepo('outer-repo');
+    const inner = join(outer, 'vendor', 'thing');
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(inner, '.git'), 'not a pointer\n', 'utf8');
+    const cwd = join(inner, 'src');
+    mkdirSync(cwd);
+
+    runHook(POST_HOOK, cwd);
+
+    expect(spoolDirs()).toEqual(['outer-repo']);
+  });
+
+  it('ignores a CLAUDE.md marker located above the repo root', () => {
+    writeFileSync(join(sandbox, 'CLAUDE.md'), '<!-- cc-memory: project="too-high" -->\n', 'utf8');
+    const root = makeGitRepo('inner-repo');
+    const cwd = join(root, 'sub');
+    mkdirSync(cwd);
+
+    runHook(POST_HOOK, cwd);
+
+    expect(spoolDirs()).toEqual(['inner-repo']);
   });
 
   it('falls back to "unknown" when cwd is empty (regression guard)', () => {

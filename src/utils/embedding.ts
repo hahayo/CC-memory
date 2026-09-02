@@ -191,7 +191,9 @@ export async function generateEmbedding(
     // 刻意不記錄 error.message（provider 可能回吐請求內容，見 tests/utils/embedding.test.ts
     // 「egress redaction」）。只記錯誤類別與 HTTP status，讓 supervisor journal 能分辨
     // 配額（429）／驗證（401/403）／網路（無 status）——2026-09-01 事故因此不可考。
-    const name = error instanceof Error ? error.name : 'UnknownError';
+    // error.name 是 provider 可改寫的字串，只放行識別字形式，避免被塞入回吐內容。
+    const rawName = error instanceof Error ? error.name : 'UnknownError';
+    const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
     const status = (error as { status?: unknown } | null)?.status;
     const statusText = typeof status === 'number' ? ` status=${status}` : '';
     console.error(`Failed to generate embedding (${name}${statusText})`);
@@ -237,8 +239,13 @@ export async function generateQueryEmbedding(
     }
 
     return normalizeVector(embedding);
-  } catch {
-    console.error('Failed to generate query embedding');
+  } catch (error) {
+    // 同 generateEmbedding：不記 message，只記白名單化的錯誤類別與 HTTP status。
+    const rawName = error instanceof Error ? error.name : 'UnknownError';
+    const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
+    const status = (error as { status?: unknown } | null)?.status;
+    const statusText = typeof status === 'number' ? ` status=${status}` : '';
+    console.error(`Failed to generate query embedding (${name}${statusText})`);
     return null;
   }
 }

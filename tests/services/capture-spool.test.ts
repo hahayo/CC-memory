@@ -25,6 +25,7 @@ import {
   type CaptureSpoolOptions,
   type CaptureStopSentinel,
   type CaptureThinEvent,
+  sanitizeSpoolSegment,
 } from '../../src/services/capture-spool.js';
 
 const TIMESTAMP = '2026-07-06T00:00:00.000Z';
@@ -141,6 +142,15 @@ describe('capture-spool append', () => {
     expect(modeOf(root)).toBe(0o700);
     expect(modeOf(projectDir)).toBe(0o700);
     expect(modeOf(spoolFile)).toBe(0o600);
+  });
+
+  it('encodes non-safe characters as _uXXXX so distinct ids never share a spool directory', () => {
+    expect(sanitizeSpoolSegment('手機遠端控制')).toBe('_u624b_u6a5f_u9060_u7aef_u63a7_u5236');
+    expect(sanitizeSpoolSegment('甲乙')).not.toBe(sanitizeSpoolSegment('丙丁'));
+    expect(sanitizeSpoolSegment('a b/😀')).toBe('a_u0020b_u002f_u1f600');
+    expect(sanitizeSpoolSegment('..x')).toBe('_x');
+    expect(sanitizeSpoolSegment('')).toBe('unknown');
+    expect(sanitizeSpoolSegment('project-alpha')).toBe('project-alpha');
   });
 
   it('sanitizes project and session ids before resolving a path under the spool root', async () => {
