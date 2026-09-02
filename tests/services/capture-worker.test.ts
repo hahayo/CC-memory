@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -4342,6 +4342,47 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     await runWorker(harness, { db: {}, llm: llm2 });
     expect(llm2.calls).toHaveLength(1);
     expect(llm2.calls[0].projectId).toBe(repoName);
+  });
+
+  it('pre-upgrade state without projectId: old events already consumed, sentinel-only snapshot still derives from whole-file evidence (Codex R1c)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repoName = `capture-worker-repo-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'old era' },
+    ]);
+    // 舊版 worker 已消耗 event（模擬：跑一次只有 event 的 tick，再把 state 的 projectId 拿掉）
+    await appendWindow(harness, { transcriptStart: 0, timestamp: OLD_TS });
+    await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    const state = readState(harness);
+    delete state.projectId;
+    writeFileSync(statePath(harness), JSON.stringify(state));
+    expect(readState(harness).projectId).toBeUndefined();
+    // 只剩 sentinel
+    appendBashStyleSentinel(harness, '__', transcriptEnd);
+    const llm = mockLlm([extractionFor('late-sentinel')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(repoName);
+    expect(readState(harness).projectId).toBe(repoName);
+  });
+
+  it('a later new-hook event is authoritative and overwrites a derived state id', async () => {
+    const harness = makeHarness({ projectId: 'capture-worker-authoritative' });
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const mid = appendTranscriptEntries(harness.transcriptPath, [{ cwd: join(otherRepo, 'sub'), message: 'a' }]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: mid, timestamp: OLD_TS });
+    const llm1 = mockLlm([extractionFor('w1')]);
+    await runWorker(harness, { db: {}, llm: llm1 });
+    expect(readState(harness).projectId).toBe(basename(otherRepo));
+    const end = appendTranscriptEntries(harness.transcriptPath, [{ message: 'b' }]);
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd: end, timestamp: NEW_TS });
+    const llm2 = mockLlm([extractionFor('w2')]);
+    await runWorker(harness, { db: {}, llm: llm2 });
+    expect(llm2.calls[0].projectId).toBe('capture-worker-authoritative');
+    expect(readState(harness).projectId).toBe('capture-worker-authoritative');
   });
 
   it('old-era event plus an event with an unparsable timestamp still derives (documented: garbage timestamps are not era evidence)', async () => {

@@ -46,7 +46,10 @@ const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const SAFE_SEGMENT_CHAR = /^[A-Za-z0-9-]$/;
 
 /**
- * spool 目錄／檔名編碼（與 hooks/capture-common.sh 的 sanitize_segment 同構、可逆、不同 id 不碰撞）：
+ * spool 目錄／檔名編碼（與 hooks/capture-common.sh 的 sanitize_segment 同構）。
+ * **注意：不是單射、不可逆**（Codex 2026-09-03 R1b／R1c）：`_uXXXX` 不定長無分隔，`中a`→`_u4e2da`、`😀`→`_u1f600`、
+ * `U+1000`+`00` 與 `U+100000` 同為 `_u100000`——不同 id 可能共用目錄（project isolation 風險，實務上需 BMP 字元後接
+ * `[0-9a-f]` 才會碰撞）。worker 對 project_id 一律以記錄行／state 為準，目錄名只是最後的 best-effort fallback。
  * `[A-Za-z0-9.-]` 原樣；`_` 後面接 `u` 時編成 `_u005f`（否則原樣）；第一個字元若是 `.` 編成 `_u002e`；
  * 其餘每個 code point 編成 `_uXXXX`（至少 4 位十六進位）；空字串 → `unknown`。
  * 不 trim（與 bash 端一致；舊版 trim + 一律換 `_` 會讓不同中文名崩塌成同一目錄）。

@@ -856,24 +856,33 @@ export async function readFirstTranscriptCwd(path: string, maxBytes: number): Pr
 }
 
 /**
- * 決定此 snapshot 的 project_id，並把結果持久化到 state.projectId（呼叫端負責寫 state 檔）。
- * 1. 任一「帶 project_id 且 timestamp >= cutoff」的 event → 新 hook 寫的，直接信它。
- * 2. 沒有任何「帶 project_id 且 timestamp 可解析且 < cutoff」的 event（sentinel-only、timestamp 缺失或異常）
- *    → fail-safe：先用 state 已確認的 id，再退到記錄行 id，最後才是目錄名解碼。
+ * 決定此 snapshot 的 project_id，並視情況持久化到 state.projectId（呼叫端負責寫 state 檔）。
+ * 時代證據看**整個 spool 檔**（cursor 之前已消耗的記錄行也算，Codex R1c important 2）：
+ * 1. 任一「帶 project_id 且 timestamp >= cutoff」的 event → 新 hook 寫的＝權威來源，直接信它並寫入 state
+ *    （可覆寫先前推導值；穩定路由下值相同）。
+ * 2. 沒有任何「帶 project_id 且 timestamp 可解析且 < cutoff」的 event（整檔 sentinel-only、timestamp 缺失或異常）
+ *    → fail-safe：先用 state 已確認的 id，再退到記錄行 id，最後才是目錄名 best-effort 解碼；解碼結果**不**寫入 state。
  * 3. 有舊時代 event → state 已確認就沿用（同一 spool 檔只推導一次，跨 tick 一致）；否則讀 transcript
- *    第一個 cwd 推導；無 cwd／讀失敗 → 維持記錄行 id。
+ *    第一個 cwd 推導並寫入 state；無 cwd／讀失敗 → 維持記錄行 id、不寫 state（之後 transcript 出現仍可修正）。
  * Stop sentinel 只有 transcript_path／hwm_offset，不能當任何時代的證據（見 memory-ops-cutover §4.1）。
+ * 已知殘餘風險（Codex R1c，留使用者裁決 #c7b7974a）：舊 id == 新 id 的檔案若在 Stop 之後、worker 處理之前
+ * 改了 CLAUDE.md marker，推導會讀到新 marker（TOCTOU）；根治需 sentinel 攜帶 metadata。
  */
 async function resolveSessionProjectId(
   records: SpoolRecord[],
+  priorRecords: SpoolRecord[],
   spool: SpoolSession,
   sessionId: string,
   state: CaptureStateV2,
   stdout: { write(chunk: string): unknown },
 ): Promise<string> {
-  const recordProjectId = firstString(records, 'project_id') ?? state.projectId ?? spool.projectIdFromPath;
+  const recordProjectId =
+    firstString(records, 'project_id') ??
+    firstString(priorRecords, 'project_id') ??
+    state.projectId ??
+    spool.projectIdFromPath;
   let sawOldEra = false;
-  for (const record of records) {
+  for (const record of [...records, ...priorRecords]) {
     if (typeof record.project_id !== 'string' || record.project_id.length === 0) continue;
     const ms = recordTimestampMs(record);
     if (ms === null) continue;
@@ -885,18 +894,17 @@ async function resolveSessionProjectId(
   }
   if (!sawOldEra) return state.projectId ?? recordProjectId;
   if (state.projectId) return state.projectId;
-  let resolved = recordProjectId;
-  const transcriptPath = firstString(records, 'transcript_path');
+  const transcriptPath = firstString(records, 'transcript_path') ?? firstString(priorRecords, 'transcript_path');
   const cwd = transcriptPath
     ? await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES)
     : null;
-  if (cwd) {
-    try {
-      const derived = resolveProjectId({ cwd, cwdIsExplicit: true });
-      if (derived.length > 0) resolved = derived;
-    } catch {
-      // resolver 失敗 → 維持記錄行 id
-    }
+  if (!cwd) return recordProjectId;
+  let resolved = recordProjectId;
+  try {
+    const derived = resolveProjectId({ cwd, cwdIsExplicit: true });
+    if (derived.length > 0) resolved = derived;
+  } catch {
+    return recordProjectId;
   }
   if (resolved !== recordProjectId) {
     stdout.write(
@@ -1938,7 +1946,10 @@ export async function runCaptureWorkerOnce(
 
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
       const projectIdBefore = state.projectId;
-      const projectId = await resolveSessionProjectId(snapshot.records, spool, sessionId, state, stdout);
+      const priorRecords = snapshotCursor > 0 ? readSpoolBuffer(buffer, 0, snapshotCursor)?.records ?? [] : [];
+      const projectId = await resolveSessionProjectId(
+        snapshot.records, priorRecords, spool, sessionId, state, stdout,
+      );
       if (state.projectId !== projectIdBefore) await stateWriter(statePath, state);
       const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
       const outcomeCountBefore =
