@@ -623,10 +623,39 @@ export function resolveAutoCaptureAlertTarget(
   }
 }
 
-export async function sendAutoCaptureTelegramMessage(
+export const DEFAULT_ALERT_SEND_ATTEMPTS = 3
+export const DEFAULT_ALERT_SEND_BACKOFF_MS: readonly number[] = [2_000, 4_000]
+
+export interface TelegramSendOptions {
+  /** 總嘗試次數（含第一次；預設 3） */
+  attempts?: number
+  /** 第 n 次失敗後等多久再試（預設 2 s、4 s；不足時沿用最後一個值） */
+  backoffMs?: readonly number[]
+  /** 測試注入用 */
+  sleep?: (ms: number) => Promise<void>
+}
+
+class TelegramHttpError extends Error {
+  constructor(readonly status: number, body: string) {
+    super(`Telegram send failed: HTTP ${status} ${body}`.trim())
+  }
+}
+
+// 哪些錯誤值得重試：網路層（undici 的 `fetch failed`）、逾時 abort、5xx、429。
+// 4xx（token／chat id 錯）重試也不會好，直接拋。
+function isRetryableTelegramError(error: unknown): boolean {
+  if (error instanceof TelegramHttpError) return error.status === 429 || error.status >= 500
+  if (error instanceof Error) {
+    if (error.name === 'AbortError') return true
+    if (/fetch failed|aborted|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up/i.test(error.message)) return true
+  }
+  return false
+}
+
+async function sendTelegramOnce(
   target: AutoCaptureAlertTarget,
   text: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch
 ): Promise<void> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), target.timeoutMs)
@@ -641,9 +670,38 @@ export async function sendAutoCaptureTelegramMessage(
 
     if (!response.ok) {
       const responseText = await response.text()
-      throw new Error(`Telegram send failed: HTTP ${response.status} ${responseText}`.trim())
+      throw new TelegramHttpError(response.status, responseText)
     }
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 送 Telegram 告警，網路類失敗有界重試（T3，2026-09-03）：觀察窗內 8 次送不出全是本機到
+ * api.telegram.org 的間歇性連線問題（同時段另一個 Telegram client 也記到 primary path unreachable），
+ * 單次 10 s 逾時本身合理；預設最多 3 次、間隔 2 s／4 s，最壞約 36 s，仍遠小於 supervisor 的整體逾時。
+ */
+export async function sendAutoCaptureTelegramMessage(
+  target: AutoCaptureAlertTarget,
+  text: string,
+  fetchImpl: typeof fetch = fetch,
+  options: TelegramSendOptions = {}
+): Promise<void> {
+  const attempts = Math.max(1, Math.floor(options.attempts ?? DEFAULT_ALERT_SEND_ATTEMPTS))
+  const backoff = options.backoffMs ?? DEFAULT_ALERT_SEND_BACKOFF_MS
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await sendTelegramOnce(target, text, fetchImpl)
+      return
+    } catch (error) {
+      lastError = error
+      if (attempt >= attempts || !isRetryableTelegramError(error)) throw error
+      const wait = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0
+      await sleep(wait)
+    }
+  }
+  throw lastError
 }

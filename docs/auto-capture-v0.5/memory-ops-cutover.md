@@ -425,6 +425,7 @@ systemctl --user status cc-memory-todoist-sync.timer
 - 第一次失敗立即告警。
 - 同 fingerprint 6 小時內不重複發送。
 - 成功恢復後發一則 recovery（恢復通知），並清除 active failure（現行失敗狀態）。
+- 送出本身有界重試（2026-09-03 起）：單次逾時 `CC_MEMORY_ALERT_TIMEOUT_MS`（預設 10 s），網路類錯誤（undici `fetch failed`、逾時 abort、HTTP 5xx／429）最多 3 次、間隔 2 s／4 s；HTTP 4xx（token／chat id 錯）不重試。背景：Phase 8 觀察窗 8/29–9/2 共 8 次 `alert failed`（`fetch failed`×6、`This operation was aborted`×2），同分鐘本機另一個 Telegram client（journal `python[…] plugins.platforms.telegram.telegram_network`）也記到 `Primary api.telegram.org connection failed`，且 17:32 同時有 cloudflared QUIC timeout——是本機到 Telegram 的間歇性網路中斷，不是程式邏輯；重試後仍失敗仍 exit 2、state 不標已送（下一 tick 再送）。
 
 runtime state（執行期狀態）位於：
 
