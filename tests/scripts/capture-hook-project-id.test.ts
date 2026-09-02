@@ -70,7 +70,7 @@ function makeGitRepo(name: string): string {
   return root;
 }
 
-describe('capture hooks resolve project_id like resolveProjectId', () => {
+describe('capture hooks resolve project_id (marker → repo root → cwd basename; no git-origin layer)', () => {
   it('uses the git repo root basename when cwd is a non-ASCII subdirectory', () => {
     const root = makeGitRepo('recycling-recognition');
     const cwd = join(root, '文件', '評選簡報');
@@ -239,9 +239,8 @@ describe('capture hooks resolve project_id like resolveProjectId', () => {
     const literal = join(sandbox, 'x\\u002fy');
     mkdirSync(literal);
     runHook(POST_HOOK, literal, 'session-literal');
-    const dir = spoolDirs().find((d) => d.startsWith('x_u005c'));
-    expect(dir).toBeDefined();
-    expect(firstRecord(dir as string, 'session-literal').project_id).toBe('x\\u002fy');
+    expect(spoolDirs()).toContain('x_u005cu002fy');
+    expect(firstRecord('x_u005cu002fy', 'session-literal').project_id).toBe('x\\u002fy');
   });
 
   it('refuses to follow a pre-planted symlink at the spool project directory', () => {
@@ -280,6 +279,32 @@ describe('capture hooks resolve project_id like resolveProjectId', () => {
     runHook(POST_HOOK, cwd);
 
     expect(spoolDirs()).toEqual(['inner-repo']);
+  });
+
+  it('encodes dot-prefixed and literal _u ids without colliding (bash side matches TS)', () => {
+    const names = ['.x', '..x', '_x', '_u002f'];
+    names.forEach((name, index) => {
+      mkdirSync(join(sandbox, name));
+      runHook(POST_HOOK, join(sandbox, name), `session-${index}`);
+    });
+
+    expect(spoolDirs()).toEqual(['_u002e.x', '_u002ex', '_u005fu002f', '_x']);
+    expect(firstRecord('_u005fu002f', 'session-3').project_id).toBe('_u002f');
+    expect(firstRecord('_u002e.x', 'session-1').project_id).toBe('..x');
+  });
+
+  it('bounds the CLAUDE.md read to 64 KiB of bytes, not characters', () => {
+    const root = makeGitRepo('big-claude-md');
+    // 70,000 個三位元組字元（210 KB）後才出現 marker：64 KiB 位元組上限內讀不到 → 落到根目錄名
+    writeFileSync(join(root, 'CLAUDE.md'), `${'中'.repeat(70000)}\n<!-- cc-memory: project="late-marker" -->\n`, 'utf8');
+    const cwd = join(root, 'sub');
+    mkdirSync(cwd);
+
+    const started = Date.now();
+    runHook(POST_HOOK, cwd);
+
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(spoolDirs()).toEqual(['big-claude-md']);
   });
 
   it('falls back to "unknown" when cwd is empty (regression guard)', () => {
