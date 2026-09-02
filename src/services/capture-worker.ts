@@ -2483,7 +2483,12 @@ export async function runCaptureWorkerOnce(
             checkpoint.checkpoint = chunk.end;
             clearCoveredEntries(state, chunk.pathHash, checkpoint.checkpoint);
             await stateWriter(statePath, state);
-          } catch {
+          } catch (error) {
+            // 2026-09-03：原本靜默吞掉，journal 只看得到 failed=1 無法診斷；印錯誤訊息（不含 transcript 內容）
+            const message = error instanceof Error ? error.message : String(error);
+            stdout.write(
+              `[cc-memory] auto-capture warning: db-write-failed session=${sessionId} project=${chunkWindow.projectId} source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} error=${message}\n`
+            );
             result.failed += 1;
             sessionStopped = true;
             snapshotCompleted = false;
