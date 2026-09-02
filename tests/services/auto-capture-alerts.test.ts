@@ -13,6 +13,7 @@ import {
   parseSimpleEnvFile,
   resolveAutoCaptureAlertTarget,
   saveAutoCaptureAlertState,
+  sendAutoCaptureTelegramMessage,
 } from '../../src/services/auto-capture-alerts.js'
 
 describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
@@ -673,5 +674,82 @@ describe('decideWarningAlert', () => {
     expect(result.send).toBe(false)
     expect(result.updatedState.fallbackSuccessStreak).toBe(0)
     expect(result.updatedState.fallbackWarningLastSentAt).toBe(null)
+  })
+})
+
+// T3（2026-09-03）：觀察窗內 8 次「alert failed: fetch failed／This operation was aborted」，同時段本機另一個
+// Telegram client 也記到 api.telegram.org 暫時連不上——屬本機到 Telegram 的間歇性網路問題，不是程式邏輯。
+// 修法：網路類錯誤（fetch failed／abort／5xx／429）有界重試；4xx（token／chat 錯）不重試。
+describe('services/auto-capture-alerts sendAutoCaptureTelegramMessage retry', () => {
+  const target = { botToken: 't', chatId: 'c', apiBase: 'https://api.telegram.test', timeoutMs: 50 }
+  const okResponse = () => ({ ok: true, status: 200, text: async () => '' }) as unknown as Response
+
+  it('retries transient fetch failures with backoff and succeeds', async () => {
+    const calls: number[] = []
+    const sleeps: number[] = []
+    let n = 0
+    const fetchImpl = (async () => {
+      calls.push(++n)
+      if (n < 3) throw new TypeError('fetch failed')
+      return okResponse()
+    }) as unknown as typeof fetch
+    await sendAutoCaptureTelegramMessage(target, 'hello', fetchImpl, {
+      attempts: 3,
+      backoffMs: [100, 200],
+      sleep: async (ms) => { sleeps.push(ms) },
+    })
+    expect(calls).toEqual([1, 2, 3])
+    expect(sleeps).toEqual([100, 200])
+  })
+
+  it('gives up after the configured attempts and rethrows the last error', async () => {
+    let n = 0
+    const fetchImpl = (async () => { n += 1; throw new TypeError('fetch failed') }) as unknown as typeof fetch
+    await expect(sendAutoCaptureTelegramMessage(target, 'hello', fetchImpl, {
+      attempts: 3, backoffMs: [0, 0], sleep: async () => {},
+    })).rejects.toThrow('fetch failed')
+    expect(n).toBe(3)
+  })
+
+  it('does not retry HTTP 4xx (bad token / chat id)', async () => {
+    let n = 0
+    const fetchImpl = (async () => {
+      n += 1
+      return { ok: false, status: 401, text: async () => 'Unauthorized' } as unknown as Response
+    }) as unknown as typeof fetch
+    await expect(sendAutoCaptureTelegramMessage(target, 'hello', fetchImpl, {
+      attempts: 3, backoffMs: [0, 0], sleep: async () => {},
+    })).rejects.toThrow('HTTP 401')
+    expect(n).toBe(1)
+  })
+
+  it('retries HTTP 5xx and 429', async () => {
+    let n = 0
+    const fetchImpl = (async () => {
+      n += 1
+      if (n === 1) return { ok: false, status: 502, text: async () => 'bad gateway' } as unknown as Response
+      if (n === 2) return { ok: false, status: 429, text: async () => 'slow down' } as unknown as Response
+      return okResponse()
+    }) as unknown as typeof fetch
+    await sendAutoCaptureTelegramMessage(target, 'hello', fetchImpl, {
+      attempts: 3, backoffMs: [0, 0], sleep: async () => {},
+    })
+    expect(n).toBe(3)
+  })
+
+  it('retries when the per-attempt timeout aborts the request', async () => {
+    let n = 0
+    const fetchImpl = ((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      n += 1
+      if (n === 1) {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('This operation was aborted', 'AbortError')))
+        return
+      }
+      resolve(okResponse())
+    })) as unknown as typeof fetch
+    await sendAutoCaptureTelegramMessage(target, 'hello', fetchImpl, {
+      attempts: 2, backoffMs: [0], sleep: async () => {},
+    })
+    expect(n).toBe(2)
   })
 })
