@@ -283,6 +283,18 @@ Stop hook 也必須在 Claude Code 與 Codex 都指向 `hooks/stop-capture-senti
 
 auto-capture service 不 enable（設為開機常駐啟用），也不觀察五分鐘週期；它只由 Stop／SessionStart hooks 啟動。Hermes memory job 只保留為 paused 備援，不再承擔執行或告警。
 
+### 4.1 hook 的 project_id 解析（2026-09-02 起）
+
+兩支 capture hook（`hooks/post-tool-use-capture.sh`、`hooks/stop-capture-sentinel.sh`）共用 `hooks/capture-common.sh` 的 helper（純 bash、不 spawn 子程序、結果以 `REPLY` 回傳；共用檔找不到時 hook 靜默退出）。`project_id` 解析順序：從 hook payload 的 `cwd`（JSON 解碼後）往上找 git 根目錄（`.git/HEAD` 或 worktree 的 `.git` 檔，同 `findRepoRoot`），沿途最近的 `CLAUDE.md` `<!-- cc-memory: project="…" -->` marker 優先（同 `tryReadClaudeMdMarker`；值 trim 後為空視同無 marker），沒有 marker 就用根目錄名；不在 git 內的目錄用 `cwd` 本身的目錄名；空 `cwd` 為 `unknown`。
+
+**與 MCP server 的已知差異（待拍板，personal task #274821ed）**：hook **刻意不做** `resolveProjectId` 的第 4 層 git-origin `owner/repo`（hook 不 spawn git；既有 corpus 全是目錄名，2026-09-02 唯讀查詢 `project_memories`／`observations` 均無含 `/` 的 `project_id`），也不用 `cwd` 目錄名取代根目錄名（那正是崩塌來源）。後果：**沒有 marker 但有 origin 的 repo**，hook 寫 `repo`、`cc_memory_search` 以 `project_path` 解析出 `owner/repo`，scoped 搜尋會查不到 hook 寫入的列（`src/index.ts` 的 `resolveProjectId({ cwd, cwdIsExplicit: true })` → `src/services/projects.ts` 第 4 層）。此差異在改版前就存在（舊 hook 同樣用目錄名），非本次引入；兩邊統一（server 拿掉第 4 層、或 hook 讀 `.git/config` 補第 4 層）由使用者決定。有 marker 的 repo（CC-memory、AI_Copilot、ops-ten-year-v4）兩邊一致。
+
+`project_id` 以原始字串（含中文）寫進 spool 記錄行；spool 目錄名／session 檔名用可逆編碼（bash `sanitize_segment` 與 TypeScript `sanitizeSpoolSegment` 同構）：`[A-Za-z0-9.-]` 原樣、`_` 後面接 `u` 時編成 `_u005f`、第一個字元若是 `.` 編成 `_u002e`、其餘每個字元編成 `_uXXXX`（碼位十六進位）、空字串 → `unknown`。不同 id 不會共用目錄（唯一刻意重疊：空 id 與字面 `unknown`，hook 端空 `cwd` 在解析層就已回 `unknown`）；舊版一律換 `_` 會讓不同中文名共用同一目錄。worker 以記錄行的 `project_id` 為準。
+
+防護：CLAUDE.md 只讀一般檔（FIFO／裝置檔不讀），且以 `LC_ALL=C` 讓 `read -N` 按**位元組**計、最多 64 KiB；spool 目錄或檔案若是 symlink 直接放棄寫入。`-L` 檢查與 `mkdir`／append 之間仍有 TOCTOU（檢查與使用間競態），威脅模型是 spool root `0700` 僅本人可寫，同一 UID 的惡意程序不在範圍內（Codex 對審第二輪判 needs_human；此處記為接受的風險）。
+
+背景（數字來源）：2026-09-02 Phase 8 第 4 天檢查，唯讀 SQL 為 `docs/auto-capture-v0.5/phase8-observation-checks.sql`（執行殼 `phase8-observation-checks.sh`），journal 統計為 `journalctl --user -u cc-memory-auto-capture.service --since "2026-08-29 23:00" -o short-iso` 對 `auto-capture summary:` 行加總。結果：觀察窗內新增 observation 1,206 筆全部落在底線 id（`observations.project_id LIKE '\_%'`）；`__` 混入 recycling-recognition、recycling-recognition-tender-pmo、ops-ten-year-v4、AI_Copilot 四個 repo 的 session（spool 記錄行 `transcript_path` 去重）；72 個 session 中 9 個因換目錄被拆到多個 id（同一 `session_id` 對應多個 `project_id`）。只影響新對話：切換當下仍在進行的 session 會一次性換 id（舊 spool 檔不再收到 Stop sentinel）；已在 spool 內的 backlog 記錄行仍帶舊 id，重新歸屬另案處理。hook 耗時以 300 次 spawn 量測（fixture：repo 下 4 層中文子目錄、CLAUDE.md 帶 marker）：改版前 p95 15–17 ms、改版後 p95 17 ms（門檻 20 ms）。
+
 ## 5. 封存歷史 capture backlog，再按需回放
 
 ### 5.0 未處理 backlog 的 copy-live 異地備份（canary 前的硬性 gate）

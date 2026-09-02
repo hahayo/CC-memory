@@ -43,14 +43,30 @@ export interface CaptureSpoolAppendResult {
 }
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
-const UNSAFE_SEGMENT_CHARS = /[^A-Za-z0-9._-]+/g;
+const SAFE_SEGMENT_CHAR = /^[A-Za-z0-9-]$/;
 
+/**
+ * spool 目錄／檔名編碼（與 hooks/capture-common.sh 的 sanitize_segment 同構、可逆、不同 id 不碰撞）：
+ * `[A-Za-z0-9.-]` 原樣；`_` 後面接 `u` 時編成 `_u005f`（否則原樣）；第一個字元若是 `.` 編成 `_u002e`；
+ * 其餘每個 code point 編成 `_uXXXX`（至少 4 位十六進位）；空字串 → `unknown`。
+ * 不 trim（與 bash 端一致；舊版 trim + 一律換 `_` 會讓不同中文名崩塌成同一目錄）。
+ */
 export function sanitizeSpoolSegment(value: string): string {
-  const sanitized = value.trim().replace(UNSAFE_SEGMENT_CHARS, '_').replace(/^\.+/, '_');
-  if (sanitized.length === 0 || sanitized === '.' || sanitized === '..') {
-    return 'unknown';
+  const chars = Array.from(value);
+  let out = '';
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch === '_') {
+      out += chars[i + 1] === 'u' ? '_u005f' : '_';
+    } else if (ch === '.') {
+      out += out.length === 0 ? '_u002e' : '.';
+    } else if (SAFE_SEGMENT_CHAR.test(ch)) {
+      out += ch;
+    } else {
+      out += `_u${(ch.codePointAt(0) ?? 0xfffd).toString(16).padStart(4, '0')}`;
+    }
   }
-  return sanitized;
+  return out.length === 0 ? 'unknown' : out;
 }
 
 function spoolRoot(env: Record<string, string | undefined>): string {

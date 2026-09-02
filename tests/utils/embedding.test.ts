@@ -135,7 +135,19 @@ describe('embedding egress redaction', () => {
 
     await expect(generateEmbedding('safe input', { apiKey: 'test-key' })).resolves.toBeNull();
 
-    expect(consoleError).toHaveBeenCalledWith('Failed to generate embedding');
+    expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/^Failed to generate embedding \(Error\)$/));
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain('private request body');
+    consoleError.mockRestore();
+  });
+
+  it('does not log a provider-controlled error name and only logs a numeric status', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const hostile = Object.assign(new Error('x'), { name: 'private request body', status: 429 });
+    embedContent.mockRejectedValue(hostile);
+
+    await expect(generateEmbedding('safe input', { apiKey: 'test-key' })).resolves.toBeNull();
+
+    expect(consoleError).toHaveBeenCalledWith('Failed to generate embedding (Error status=429)');
     expect(consoleError.mock.calls.flat().join(' ')).not.toContain('private request body');
     consoleError.mockRestore();
   });
