@@ -3,7 +3,7 @@
 // CC-memory v0.5 M2b capture worker.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
@@ -34,6 +34,7 @@ import {
 import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
+import { decodeSpoolSegment } from './capture-spool.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -726,7 +727,7 @@ async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
       sessions.push({
         projectDir,
-        projectIdFromPath: projectEntry.name,
+        projectIdFromPath: decodeSpoolSegment(projectEntry.name),
         sessionIdFromPath: basename(file.name, '.jsonl'),
         path: join(projectDir, file.name),
       });
@@ -782,7 +783,7 @@ function firstString(records: SpoolRecord[], key: keyof SpoolRecord): string | n
 // 已知限制：舊時代 session 中途 cd 到別的 repo 仍歸第一個 cwd 的專案（接受）。
 // ---------------------------------------------------------------------------
 const BACKLOG_PROJECT_ID_CUTOFF_MS = Date.parse('2026-09-02T22:10:00+08:00');
-const TRANSCRIPT_CWD_SCAN_BYTES = 256 * 1024;
+export const TRANSCRIPT_CWD_SCAN_BYTES = 256 * 1024;
 
 function recordTimestampMs(record: SpoolRecord): number | null {
   if (typeof record.timestamp !== 'string') return null;
@@ -809,17 +810,24 @@ function extractCwdFromTranscriptLine(line: string): string | null {
   return null;
 }
 
-/** 讀 transcript 開頭最多 maxBytes，回第一個 cwd；任何錯誤都回 null（不拋）。 */
-async function readFirstTranscriptCwd(path: string, maxBytes: number): Promise<string | null> {
+/**
+ * 讀 transcript 開頭最多 maxBytes，回第一個 cwd；任何錯誤都回 null（不拋，拋了會讓整個 tick 失敗）。
+ * 只接受 regular file（lstat，不跟隨 symlink：指向 FIFO／裝置的 symlink 會讓 open 阻塞而吃掉 tick 預算）。
+ * 多讀 1 byte 判定是否真的截斷：剛好 maxBytes 且無結尾換行的完整行不會被誤丟（Codex R1 finding 3）。
+ */
+export async function readFirstTranscriptCwd(path: string, maxBytes: number): Promise<string | null> {
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
+    const info = await lstat(path);
+    if (!info.isFile()) return null;
     handle = await open(path, 'r');
-    const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
-    const text = buffer.subarray(0, bytesRead).toString('utf8');
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+    const truncated = bytesRead > maxBytes;
+    const text = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8');
     const lines = text.split('\n');
-    // 讀滿 maxBytes 時最後一段可能是半行，不解析；未讀滿代表已到檔尾，整段都是完整行。
-    const completeCount = bytesRead >= maxBytes ? lines.length - 1 : lines.length;
+    // 截斷時最後一段是半行，不解析；未截斷代表已到檔尾，整段都是完整行。
+    const completeCount = truncated ? lines.length - 1 : lines.length;
     for (let i = 0; i < completeCount; i += 1) {
       const cwd = extractCwdFromTranscriptLine(lines[i]);
       if (cwd) return cwd;
@@ -836,16 +844,21 @@ async function resolveSessionProjectId(
   records: SpoolRecord[],
   spool: SpoolSession,
   sessionId: string,
-  stdout: { write(chunk: string): unknown }
+  stdout: { write(chunk: string): unknown },
 ): Promise<string> {
   const recordProjectId = firstString(records, 'project_id') ?? spool.projectIdFromPath;
+  // 只看帶 project_id 的記錄行（event）；Stop sentinel 只有 transcript_path／hwm_offset，不能當時代證據。
+  // 任一 event timestamp >= cutoff → 新 hook 寫的，直接信它；
+  // 沒有任何可解析且 < cutoff 的 event（sentinel-only、timestamp 缺失或格式異常）→ fail-safe 維持既有 id。
+  let sawOldEra = false;
   for (const record of records) {
+    if (typeof record.project_id !== 'string' || record.project_id.length === 0) continue;
     const ms = recordTimestampMs(record);
-    if (ms !== null && ms >= BACKLOG_PROJECT_ID_CUTOFF_MS &&
-        typeof record.project_id === 'string' && record.project_id.length > 0) {
-      return record.project_id;
-    }
+    if (ms === null) continue;
+    if (ms >= BACKLOG_PROJECT_ID_CUTOFF_MS) return record.project_id;
+    sawOldEra = true;
   }
+  if (!sawOldEra) return recordProjectId;
   const transcriptPath = firstString(records, 'transcript_path');
   if (!transcriptPath) return recordProjectId;
   const cwd = await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES);

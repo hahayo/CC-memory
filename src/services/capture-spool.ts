@@ -69,6 +69,26 @@ export function sanitizeSpoolSegment(value: string): string {
   return out.length === 0 ? 'unknown' : out;
 }
 
+/**
+ * sanitizeSpoolSegment 的反函數（Codex R1 finding 2）：把 spool 目錄名還原成原始 project_id。
+ * 編碼端 `_uXXXX` 不定長（至少 4 位十六進位、無分隔），BMP 外字元後面若剛好接十六進位字元會有歧義；
+ * 這裡採「最長合法讀法優先」：6 位（0x100000–0x10FFFF）→ 5 位（0x10000–0xFFFFF）→ 4 位。
+ * 4 位若落在 surrogate 區（D800–DFFF）不是合法 code point，原樣保留。`unknown` 原樣回傳。
+ */
+export function decodeSpoolSegment(value: string): string {
+  return value.replace(/_u([0-9a-f]{4,6})/g, (whole, hex: string) => {
+    for (const width of [6, 5, 4]) {
+      if (hex.length < width) continue;
+      const code = Number.parseInt(hex.slice(0, width), 16);
+      const minForWidth = width === 6 ? 0x100000 : width === 5 ? 0x10000 : 0;
+      if (code < minForWidth || code > 0x10ffff) continue;
+      if (code >= 0xd800 && code <= 0xdfff) return whole;
+      return String.fromCodePoint(code) + hex.slice(width);
+    }
+    return whole;
+  });
+}
+
 function spoolRoot(env: Record<string, string | undefined>): string {
   const configured = env.CC_MEMORY_SPOOL_DIR?.trim();
   return resolve(configured && configured.length > 0 ? configured : DEFAULT_SPOOL_DIR);

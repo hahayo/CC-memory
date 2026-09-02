@@ -25,6 +25,7 @@ import {
   type CaptureSpoolOptions,
   type CaptureStopSentinel,
   type CaptureThinEvent,
+  decodeSpoolSegment,
   sanitizeSpoolSegment,
 } from '../../src/services/capture-spool.js';
 
@@ -290,5 +291,23 @@ describe('capture-spool append', () => {
       transcript_path: '/tmp/claude-session.jsonl',
       hwm_offset: 8192,
     });
+  });
+});
+
+describe('decodeSpoolSegment (inverse of sanitizeSpoolSegment; Codex R1 finding 2)', () => {
+  it('round-trips ASCII, CJK, literal _u, leading dot, spaces and astral code points', () => {
+    for (const id of ['CC-memory', '手機遠端控制', '回收辨識_u測試', '.claude', 'a b/😀', '_plain', '__', '_14_raw']) {
+      expect(decodeSpoolSegment(sanitizeSpoolSegment(id))).toBe(id);
+    }
+  });
+
+  it('leaves unknown and already-plain segments untouched', () => {
+    expect(decodeSpoolSegment('unknown')).toBe('unknown');
+    expect(decodeSpoolSegment('CC-memory')).toBe('CC-memory');
+    expect(decodeSpoolSegment('__')).toBe('__');
+  });
+
+  it('does not decode a lone surrogate escape into an invalid code point', () => {
+    expect(decodeSpoolSegment('_ud800')).toBe('_ud800');
   });
 });

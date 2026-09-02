@@ -142,12 +142,20 @@ function appendTranscriptEntries(path: string, entries: Array<Record<string, unk
 
 async function appendWindow(
   harness: TestHarness,
-  input: { transcriptStart: number; transcriptEnd: number; timestamp: string }
+  input: {
+    transcriptStart: number;
+    /** 省略時只寫 event、不寫 Stop sentinel（T1 混合時代測試用） */
+    transcriptEnd?: number;
+    timestamp: string;
+    /** 省略時用 harness.projectId（T1 測試用舊 hook 崩塌 id 覆寫） */
+    projectId?: string;
+  }
 ): Promise<number> {
+  const projectId = input.projectId ?? harness.projectId;
   const eventResult = await appendCaptureEvent(
     {
       session_id: harness.sessionId,
-      project_id: harness.projectId,
+      project_id: projectId,
       tool_name: 'Bash',
       timestamp: input.timestamp,
       transcript_path: harness.transcriptPath,
@@ -157,20 +165,27 @@ async function appendWindow(
   );
   expect(eventResult).toMatchObject({ success: true });
 
-  const sentinelResult = await appendStopSentinel(
-    {
-      project_id: harness.projectId,
-      session_id: harness.sessionId,
-      timestamp: input.timestamp,
-      transcript_path: harness.transcriptPath,
-      hwm_offset: input.transcriptEnd,
-    },
-    { env: harness.env }
-  );
-  expect(sentinelResult).toMatchObject({ success: true });
+  if (input.transcriptEnd !== undefined) {
+    const sentinelResult = await appendStopSentinel(
+      {
+        project_id: projectId,
+        session_id: harness.sessionId,
+        timestamp: input.timestamp,
+        transcript_path: harness.transcriptPath,
+        hwm_offset: input.transcriptEnd,
+      },
+      { env: harness.env }
+    );
+    expect(sentinelResult).toMatchObject({ success: true });
+  }
 
-  return statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env }))
-    .size;
+  return statSync(resolveCaptureSpoolPath(projectId, harness.sessionId, { env: harness.env })).size;
+}
+
+/** 模擬 hooks/stop-capture-sentinel.sh 實際寫法：只有 transcript_path 與 hwm_offset，沒有 project_id／timestamp。 */
+function appendBashStyleSentinel(harness: TestHarness, projectId: string, hwmOffset: number): void {
+  const path = resolveCaptureSpoolPath(projectId, harness.sessionId, { env: harness.env });
+  appendFileSync(path, `${JSON.stringify({ transcript_path: harness.transcriptPath, hwm_offset: hwmOffset })}\n`);
 }
 
 function hwmPath(harness: TestHarness): string {
@@ -4118,6 +4133,8 @@ describe('capture worker DB-backed RED contracts', () => {
 // T1（2026-09-03）：舊 hook 時代 backlog 的 project_id 已崩塌（`__`、`_raw`…），
 // worker 改以 transcript 內第一個 `cwd` 經 resolveProjectId 推導；新 hook 時代
 // （記錄行 timestamp >= 2026-09-02T22:10:00+08:00）一律信記錄行。
+// 只有「帶 project_id 且 timestamp 可解析且 < cutoff」的 event 才算舊時代證據；
+// Stop sentinel（只有 transcript_path／hwm_offset）與異常 timestamp 不算（Codex R1 finding 1）。
 // ---------------------------------------------------------------------------
 describe('T1: backlog project_id remap from transcript cwd', () => {
   const OLD_TS = '2026-09-01T10:00:00+0800';
@@ -4134,37 +4151,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     return repo;
   }
 
-  async function appendRecords(
-    harness: TestHarness,
-    records: Array<{ projectId: string; timestamp: string; transcriptStart: number; transcriptEnd?: number }>
-  ): Promise<void> {
-    for (const record of records) {
-      const eventResult = await appendCaptureEvent(
-        {
-          session_id: harness.sessionId,
-          project_id: record.projectId,
-          tool_name: 'Bash',
-          timestamp: record.timestamp,
-          transcript_path: harness.transcriptPath,
-          transcript_offset: record.transcriptStart,
-        },
-        { env: harness.env }
-      );
-      expect(eventResult).toMatchObject({ success: true });
-      if (record.transcriptEnd !== undefined) {
-        const sentinelResult = await appendStopSentinel(
-          {
-            project_id: record.projectId,
-            session_id: harness.sessionId,
-            timestamp: record.timestamp,
-            transcript_path: harness.transcriptPath,
-            hwm_offset: record.transcriptEnd,
-          },
-          { env: harness.env }
-        );
-        expect(sentinelResult).toMatchObject({ success: true });
-      }
-    }
+  function extractionFor(name: string): CaptureLlmRawResponse {
+    return rawExtraction({ summary: name, observations: [observation(name, `${name} narrative`)] });
   }
 
   let sql: Sql;
@@ -4183,8 +4171,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
   });
 
   afterEach(async () => {
-    await sql`DELETE FROM observations WHERE project_id LIKE 'capture-worker-%' OR project_id = '__'`;
-    await sql`DELETE FROM project_memories WHERE project_id LIKE 'capture-worker-%' OR project_id = '__'`;
+    await sql`DELETE FROM observations WHERE project_id LIKE 'capture-worker-%' OR project_id LIKE '\\_%'`;
+    await sql`DELETE FROM project_memories WHERE project_id LIKE 'capture-worker-%' OR project_id LIKE '\\_%'`;
   });
 
   it('old-hook record with Claude transcript cwd writes rows under the repo-root project id', async () => {
@@ -4195,13 +4183,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
       { type: 'user', cwd: join(repo, 'sub'), message: 'first entry carries cwd' },
       { type: 'assistant', cwd: join(repo, 'sub'), message: 'second entry' },
     ]);
-    await appendRecords(harness, [
-      { projectId: '__', timestamp: OLD_TS, transcriptStart: 0, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({
-      summary: 'remapped session',
-      observations: [observation('remapped', 'remapped narrative')],
-    })]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('remapped')]);
     const lines: string[] = [];
 
     await expect(runWorker(harness, { db, llm, stdout: { write: (c: string) => lines.push(c) } }))
@@ -4227,10 +4210,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
       },
       { type: 'response_item', payload: { type: 'message', role: 'user', content: 'hi' } },
     ]);
-    await appendRecords(harness, [
-      { projectId: '___', timestamp: OLD_TS, transcriptStart: 0, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({ summary: 'codex', observations: [observation('codex', 'n')] })]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('codex')]);
 
     await runWorker(harness, { db: {}, llm });
 
@@ -4244,10 +4225,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { cwd: join(otherRepo, 'sub'), message: 'cwd points elsewhere' },
     ]);
-    await appendRecords(harness, [
-      { projectId: harness.projectId, timestamp: NEW_TS, transcriptStart: 0, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({ summary: 'new', observations: [observation('new', 'n')] })]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: NEW_TS });
+    const llm = mockLlm([extractionFor('new')]);
     const lines: string[] = [];
 
     await runWorker(harness, { db: {}, llm, stdout: { write: (c: string) => lines.push(c) } });
@@ -4266,16 +4245,68 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { cwd: join(otherRepo, 'sub'), message: 'new era entry' },
     ]);
-    await appendRecords(harness, [
-      { projectId: harness.projectId, timestamp: OLD_TS, transcriptStart: 0 },
-      { projectId: harness.projectId, timestamp: NEW_TS, transcriptStart: mid, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({ summary: 'mixed', observations: [observation('mixed', 'n')] })]);
+    await appendWindow(harness, { transcriptStart: 0, timestamp: OLD_TS });
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd, timestamp: NEW_TS });
+    const llm = mockLlm([extractionFor('mixed')]);
 
     await runWorker(harness, { db: {}, llm });
 
     expect(llm.calls).toHaveLength(1);
     expect(llm.calls[0].projectId).toBe(harness.projectId);
+  });
+
+  it('sentinel-only snapshot after the new-hook event was consumed keeps the record id (Codex R1)', async () => {
+    const harness = makeHarness();
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'session started elsewhere, then cd into this project' },
+    ]);
+    // tick 1：只有新 hook 的 event（無 sentinel）→ worker 只初始化 checkpoint 並推進 cursor
+    await appendWindow(harness, { transcriptStart: 0, timestamp: NEW_TS });
+    const first = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    expect(first).toMatchObject({ processed: 0 });
+    // tick 2：只剩 bash 版 Stop sentinel（無 project_id／timestamp）
+    appendBashStyleSentinel(harness, harness.projectId, transcriptEnd);
+    const llm = mockLlm([extractionFor('sentinel-only')]);
+    const lines: string[] = [];
+
+    await runWorker(harness, { db: {}, llm, stdout: { write: (c: string) => lines.push(c) } });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(harness.projectId);
+    expect(lines.join('')).not.toContain('project-id-remapped');
+  });
+
+  it('sentinel-only snapshot in an encoded (non-ASCII) spool dir falls back to the decoded id (Codex R1)', async () => {
+    const harness = makeHarness({ projectId: '回收辨識_u測試' });
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'no cwd here' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, timestamp: NEW_TS });
+    await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    appendBashStyleSentinel(harness, harness.projectId, transcriptEnd);
+    const llm = mockLlm([extractionFor('encoded')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe('回收辨識_u測試');
+    expect(sanitizeSpoolSegment('回收辨識_u測試')).not.toBe('回收辨識_u測試');
+  });
+
+  it('old-looking record with an unparsable timestamp keeps the record id (fail-safe)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repo = makeFixtureRepo(harness.root, `capture-worker-repo-${randomUUID()}`);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'cwd exists but timestamp is garbage' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: 'not-a-timestamp' });
+    const llm = mockLlm([extractionFor('badts')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe('__');
   });
 
   it('old-hook record whose transcript has no cwd keeps the record project_id', async () => {
@@ -4283,10 +4314,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { message: 'no cwd anywhere' },
     ]);
-    await appendRecords(harness, [
-      { projectId: harness.projectId, timestamp: OLD_TS, transcriptStart: 0, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({ summary: 'nocwd', observations: [observation('nocwd', 'n')] })]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('nocwd')]);
 
     await runWorker(harness, { db: {}, llm });
 
@@ -4294,21 +4323,24 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     expect(llm.calls[0].projectId).toBe(harness.projectId);
   });
 
-  it('derived __personal__ takes the existing skip path without calling the LLM', async () => {
+  it('derived __personal__ takes the existing skip path: no LLM call and zero rows in the project DB', async () => {
     const harness = makeHarness({ projectId: '__' });
     const repo = makeFixtureRepo(harness.root, `capture-worker-personal-${randomUUID()}`, '__personal__');
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { cwd: join(repo, 'sub'), message: 'personal repo' },
     ]);
-    await appendRecords(harness, [
-      { projectId: '__', timestamp: OLD_TS, transcriptStart: 0, transcriptEnd },
-    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
     const llm = mockLlm([]);
 
-    const result = await runWorker(harness, { db: {}, llm });
+    const result = await runWorker(harness, { db, llm });
 
     expect(result).toMatchObject({ skipped: 1, processed: 0 });
     expect(llm.calls).toHaveLength(0);
+    const rows = await sql<{ n: number }[]>`
+      SELECT (SELECT COUNT(*)::int FROM observations WHERE session_id = ${harness.sessionId})
+           + (SELECT COUNT(*)::int FROM project_memories
+               WHERE idempotency_key LIKE ${`capture:v05:%:${harness.sessionId}`}) AS n`;
+    expect(rows[0].n).toBe(0);
   });
 
   it('cwd that no longer exists (no repo ancestor) falls back to basename(cwd)', async () => {
@@ -4317,10 +4349,8 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
     const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
       { cwd: join(harness.root, 'deleted-parent', goneName), message: 'deleted worktree' },
     ]);
-    await appendRecords(harness, [
-      { projectId: '_raw', timestamp: OLD_TS, transcriptStart: 0, transcriptEnd },
-    ]);
-    const llm = mockLlm([rawExtraction({ summary: 'gone', observations: [observation('gone', 'n')] })]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('gone')]);
 
     await runWorker(harness, { db: {}, llm });
 
