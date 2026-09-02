@@ -691,17 +691,15 @@ export async function sendAutoCaptureTelegramMessage(
   const attempts = Math.max(1, Math.floor(options.attempts ?? DEFAULT_ALERT_SEND_ATTEMPTS))
   const backoff = options.backoffMs ?? DEFAULT_ALERT_SEND_BACKOFF_MS
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-  let lastError: unknown
+  // 最後一次失敗在 catch 內直接 throw，迴圈只會以 return 結束（reviewer：原 `throw lastError` 是 dead code）
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       await sendTelegramOnce(target, text, fetchImpl)
       return
     } catch (error) {
-      lastError = error
       if (attempt >= attempts || !isRetryableTelegramError(error)) throw error
       const wait = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0
       await sleep(wait)
     }
   }
-  throw lastError
 }
