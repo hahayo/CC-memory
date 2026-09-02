@@ -59,4 +59,4 @@ Not recorded
 
 ## 後續結果與沿革
 
-Not recorded
+- 2026-09-02：實作於 PR #22（`src/services/projects.ts` 第 4 層改為 `findRepoRoot` 的根目錄 basename，`src/utils/repo-name.ts` 移除）。Codex 對審指出跨裝置一致性自此為條件式：需 CLAUDE.md marker 相同或 clone 目錄名相同，已寫入 `docs/spec.md` US-2 與 `docs/auto-capture-v0.5/memory-ops-cutover.md` §4.1。

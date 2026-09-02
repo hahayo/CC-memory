@@ -428,7 +428,7 @@
 - [x] A 電腦 Claude Code `cc_memory_save` → B 電腦 `cc_memory_list` 能看到，`writer_host` 顯示 A hostname
 - [x] A 電腦 `cc_task_create` → B 電腦 `cc_task_list` 能看到，`writer_host` 顯示 A hostname
 - [x] Codex CLI `codex mcp add cc-memory` 後能呼叫 `cc_memory_search`
-- [x] B 電腦 clone 到不同 path → 自動解析到相同 `project_id`（靠 repo_name）
+- [x] B 電腦 clone 到不同 path → 自動解析到相同 `project_id`（原靠 repo_name；2026-09-02 起改為靠 CLAUDE.md marker 或相同 clone 目錄名，見 DEC-20260902T151857Z）
 - [x] MCP `cc_memory_search` 每次呼叫後 `search_feedback` 多一筆（`CC_SEARCH_FEEDBACK` 預設 on 時；設 off 則不寫，見 personal-hub Phase 2）
 - [x] `scripts/eval-retrieval.ts` 能產出 markdown 報告
 

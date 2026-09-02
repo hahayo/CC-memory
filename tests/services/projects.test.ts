@@ -127,6 +127,25 @@ describe('resolveProjectId (5-layer priority)', () => {
     }
   });
 
+  it('layer 3: marker value is trimmed; whitespace-only marker is ignored (falls to repo root basename)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj3-trim-'));
+    try {
+      const spaced = join(dir, 'spaced-repo');
+      mkdirSync(join(spaced, '.git'), { recursive: true });
+      writeFileSync(join(spaced, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      writeFileSync(join(spaced, 'CLAUDE.md'), '<!-- cc-memory: project="  spaced-id  " -->');
+      expect(resolveProjectId({ cwd: spaced })).toBe('spaced-id');
+
+      const blank = join(dir, 'blank-repo');
+      mkdirSync(join(blank, '.git'), { recursive: true });
+      writeFileSync(join(blank, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      writeFileSync(join(blank, 'CLAUDE.md'), '<!-- cc-memory: project="   " -->');
+      expect(resolveProjectId({ cwd: blank })).toBe('blank-repo');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('layer 5: basename(cwd) as last resort', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj5-'));
     try {

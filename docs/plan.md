@@ -218,7 +218,7 @@ CREATE INDEX ral_created_idx ON refine_audit_log (created_at DESC);
 (1) explicit function arg（MCP tool 或 HTTP body 明示）
 (2) env CC_MEMORY_PROJECT_ID（override）
 (3) CLAUDE.md marker `<!-- cc-memory: project="xxx" -->`（專案預設）
-(4) repo_name（git remote 穩定 id，跨電腦一致）
+(4) git 根目錄名（2026-09-02 起；舊為 repo_name＝git remote owner/repo，見 DEC-20260902T151857Z-align-project-id-with-capture-hooks）
 (5) basename(cwd)（最弱 fallback）
 ```
 

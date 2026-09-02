@@ -107,9 +107,9 @@ Phase A 已完工（tag `v0.3-phase-a`，248 tests 綠），但使用者決策�
 
 **作為** 會把同一個 repo clone 到 `/home/me/x` 或 `/workspace/x` 的使用者，**我希望** 兩邊 cc-memory 都解析到同一個 `project_id`，**以便** 跨電腦不會被誤判成兩個專案。
 
-- 優先序 `explicit > env > marker > repo_name > basename`
-- `repo_name` 從 `git remote get-url origin` 抽取（https / ssh 兩種格式）
-- 非 git 或無 remote → fallback basename
+- 優先序 `explicit > env > marker > git 根目錄名 > basename`（2026-09-02 起；舊第 4 層 `repo_name` 由 git origin 抽 `owner/repo`，已由 `DEC-20260902T151857Z-align-project-id-with-capture-hooks` 取代）
+- 跨電腦一致的前提：CLAUDE.md marker 相同，或 clone 目錄名相同；不同 clone 目錄名要靠 marker
+- 非 git → fallback basename(cwd)
 - 對應 Goal 1 + Design Principle「跨電腦 project_id 穩定」
 
 #### US-3 — Claude Code 和 Codex CLI 同一份記憶

@@ -1,7 +1,8 @@
 // src/services/projects.ts
 //
 // 專案 ID 解析（5 層）+ listProjects + projectExists。
-// 所有 service 都 call resolveProjectId()，確保跨裝置同 repo 解析出一致 id。
+// 所有 service 都 call resolveProjectId()，讓各裝置對同一 repo 解析出一致 id——
+// 前提是 CLAUDE.md marker 相同，或 clone 目錄名相同（2026-09-02 起第 4 層為 git 根目錄名，不再讀 git origin）。
 //
 // 5 層優先序：
 //   1. explicit（函式參數傳入，來自 MCP tool / HTTP query / Telegram /setproj 等）

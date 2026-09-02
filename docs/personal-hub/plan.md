@@ -205,7 +205,7 @@ UPDATE tasks SET remind_at = next, snooze_until = NULL, last_notified_at = now()
 
 ## Canonical Project Identity
 
-沿用既有 `resolveProjectId`（`src/services/projects.ts`）五層優先序 `explicit > env > marker > repo_name > basename`，**外加 Phase 0 的 scope 後處理**：
+沿用既有 `resolveProjectId`（`src/services/projects.ts`）五層優先序 `explicit > env > marker > git 根目錄名 > basename`（2026-09-02 起第 4 層由 repo_name 改為 git 根目錄名），**外加 Phase 0 的 scope 後處理**：
 
 ```
 resolveProjectId(args) → rawId
