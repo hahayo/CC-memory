@@ -6,6 +6,7 @@
 
 | ID | 狀態 | 日期 | 標題 | 決策卡 |
 |---|---|---|---|---|
+| `DEC-20260902T151857Z-align-project-id-with-capture-hooks` | active | 2026-09-02 | project_id 解析對齊 capture hooks：server 第 4 層改為 git 根目錄名 | [開啟](./DEC-20260902T151857Z-align-project-id-with-capture-hooks.md) |
 | `DEC-20260823T044312Z-codex-primary-haiku-fallback-sandbox` | active | 2026-08-23 | auto-capture 主力 LLM 改 codex-cli，haiku 降為 fallback（退回），並採 bwrap+execpolicy 沙箱 | [開啟](./DEC-20260823T044312Z-codex-primary-haiku-fallback-sandbox.md) |
 | `DEC-20260818T125648Z-redact-embedding-egress-and-backfill-with-gemini-001` | active | 2026-08-18 | 遮蔽 embedding 外送內容並以 gemini-embedding-001 完成補算 | [開啟](./DEC-20260818T125648Z-redact-embedding-egress-and-backfill-with-gemini-001.md) |
 | `DEC-20260716T092938Z-cross-client-hook-driven-memory-flow` | active | 2026-07-16 | Claude Code 與 Codex 共用 hooks（掛鉤）驅動記憶流程 | [開啟](./DEC-20260716T092938Z-cross-client-hook-driven-memory-flow.md) |

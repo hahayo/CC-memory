@@ -2,7 +2,8 @@
 //
 // Stage 0.5：services/projects.ts 五層 resolveProjectId + listProjects + projectExists
 //
-// 5 層優先序：explicit > env CC_MEMORY_PROJECT_ID > CLAUDE.md marker > repo_name (owner/repo) > basename(cwd)
+// 5 層優先序：explicit > env CC_MEMORY_PROJECT_ID > CLAUDE.md marker > git repo root basename > basename(cwd)
+// （2026-09-02 起 layer 4 由 git origin owner/repo 改為 repo root basename，與 capture hooks 一致）
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -61,14 +62,14 @@ describe('resolveProjectId (5-layer priority)', () => {
     }
   });
 
-  it('layer 3: CLAUDE.md marker wins over repo_name / basename', () => {
+  it('layer 3: CLAUDE.md marker wins over repo root / basename', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj3-'));
     try {
       writeFileSync(
         join(dir, 'CLAUDE.md'),
         '<!-- cc-memory: project="from-marker" -->'
       );
-      // 也建 git origin，確保 marker 優先於 repo_name
+      // 也建 git repo（含 origin），確保 marker 優先於 repo root basename
       execFileSync('git', ['-C', dir, 'init', '-q'], { stdio: 'pipe' });
       execFileSync(
         'git',
@@ -82,17 +83,64 @@ describe('resolveProjectId (5-layer priority)', () => {
     }
   });
 
-  it('layer 4: repo_name (owner/repo) wins over basename', () => {
+  it('layer 4: git repo root basename wins over cwd basename (subdirectory resolves to the repo)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj4-'));
     try {
-      execFileSync('git', ['-C', dir, 'init', '-q'], { stdio: 'pipe' });
+      const repo = join(dir, 'my-repo');
+      mkdirSync(join(repo, '.git'), { recursive: true });
+      writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      const subdir = join(repo, '文件', '評選簡報');
+      mkdirSync(subdir, { recursive: true });
+      expect(resolveProjectId({ cwd: subdir })).toBe('my-repo');
+      expect(resolveProjectId({ cwd: repo })).toBe('my-repo');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('layer 4: git origin owner/repo is no longer used (repo with remote still resolves to root basename)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj4b-'));
+    try {
+      const repo = join(dir, 'myrepo');
+      mkdirSync(repo);
+      execFileSync('git', ['-C', repo, 'init', '-q'], { stdio: 'pipe' });
       execFileSync(
         'git',
-        ['-C', dir, 'remote', 'add', 'origin', 'https://github.com/owner/myrepo.git'],
+        ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/owner/myrepo.git'],
         { stdio: 'pipe' }
       );
-      const id = resolveProjectId({ cwd: dir });
-      expect(id).toBe('owner/myrepo');
+      expect(resolveProjectId({ cwd: repo })).toBe('myrepo');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('layer 4: a git worktree (.git file with gitdir:) counts as the repo root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj4c-'));
+    try {
+      const wt = join(dir, 'ccm-feature');
+      mkdirSync(join(wt, 'src'), { recursive: true });
+      writeFileSync(join(wt, '.git'), 'gitdir: /somewhere/.git/worktrees/ccm-feature');
+      expect(resolveProjectId({ cwd: join(wt, 'src') })).toBe('ccm-feature');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('layer 3: marker value is trimmed; whitespace-only marker is ignored (falls to repo root basename)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-proj3-trim-'));
+    try {
+      const spaced = join(dir, 'spaced-repo');
+      mkdirSync(join(spaced, '.git'), { recursive: true });
+      writeFileSync(join(spaced, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      writeFileSync(join(spaced, 'CLAUDE.md'), '<!-- cc-memory: project="  spaced-id  " -->');
+      expect(resolveProjectId({ cwd: spaced })).toBe('spaced-id');
+
+      const blank = join(dir, 'blank-repo');
+      mkdirSync(join(blank, '.git'), { recursive: true });
+      writeFileSync(join(blank, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      writeFileSync(join(blank, 'CLAUDE.md'), '<!-- cc-memory: project="   " -->');
+      expect(resolveProjectId({ cwd: blank })).toBe('blank-repo');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -218,7 +266,7 @@ describe('resolveProjectId (5-layer priority)', () => {
   it('沒有任何 CLAUDE.md marker 在路徑上 → 落到 layer 4/5', () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-memory-nomarker-'));
     try {
-      // 無 CLAUDE.md → 走 basename 或 git origin
+      // 無 CLAUDE.md、無 .git → 走 layer 5 basename(cwd)
       const id = resolveProjectId({ cwd: root });
       const parts = root.replace(/\\/g, '/').split('/').filter(Boolean);
       expect(id).toBe(parts[parts.length - 1]);
@@ -241,9 +289,9 @@ describe('resolveProjectId (5-layer priority)', () => {
       mkdirSync(subdir, { recursive: true });
       // 從 subdir 解析，walk-up 應在 repo (`.git`) 邊界停；不會拿 parent 的 marker
       const id = resolveProjectId({ cwd: subdir });
-      // 該掉到 layer 4 git origin 失敗 → layer 5 basename（= 'tools'）
+      // 落到 layer 4 repo root basename（= 'my-repo'），不是 cwd basename 'tools'
       expect(id).not.toBe('outer-stranger');
-      expect(id).toBe('tools');
+      expect(id).toBe('my-repo');
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

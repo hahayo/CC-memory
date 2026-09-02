@@ -218,13 +218,15 @@ CREATE INDEX ral_created_idx ON refine_audit_log (created_at DESC);
 (1) explicit function arg（MCP tool 或 HTTP body 明示）
 (2) env CC_MEMORY_PROJECT_ID（override）
 (3) CLAUDE.md marker `<!-- cc-memory: project="xxx" -->`（專案預設）
-(4) repo_name（git remote 穩定 id，跨電腦一致）
+(4) git 根目錄名（2026-09-02 起；舊為 repo_name＝git remote owner/repo，見 DEC-20260902T151857Z-align-project-id-with-capture-hooks）
 (5) basename(cwd)（最弱 fallback）
 ```
 
 **v1.1 → v1.3 變動**：env 從 #2 升到顯式 override；新增 `repo_name` 層。
 
 ### `repo_name` 解析（v0.3：`owner/repo` 格式）
+
+> **2026-09-02 SUPERSEDED**：第 4 層改為 git 根目錄名（與 capture hooks 一致），`src/utils/repo-name.ts` 已移除；本節保留為歷史紀錄。見 `docs/decisions/DEC-20260902T151857Z-align-project-id-with-capture-hooks.md`。
 
 `src/utils/repo-name.ts`。為避免 shell injection，一律使用 Node 的 `execFileSync`
 （參數以 argv 陣列傳入，不經 shell 展開）。**回傳 `owner/repo` 而非僅 `repo`**，
