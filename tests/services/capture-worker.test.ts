@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -142,12 +142,20 @@ function appendTranscriptEntries(path: string, entries: Array<Record<string, unk
 
 async function appendWindow(
   harness: TestHarness,
-  input: { transcriptStart: number; transcriptEnd: number; timestamp: string }
+  input: {
+    transcriptStart: number;
+    /** 省略時只寫 event、不寫 Stop sentinel（T1 混合時代測試用） */
+    transcriptEnd?: number;
+    timestamp: string;
+    /** 省略時用 harness.projectId（T1 測試用舊 hook 崩塌 id 覆寫） */
+    projectId?: string;
+  }
 ): Promise<number> {
+  const projectId = input.projectId ?? harness.projectId;
   const eventResult = await appendCaptureEvent(
     {
       session_id: harness.sessionId,
-      project_id: harness.projectId,
+      project_id: projectId,
       tool_name: 'Bash',
       timestamp: input.timestamp,
       transcript_path: harness.transcriptPath,
@@ -157,20 +165,28 @@ async function appendWindow(
   );
   expect(eventResult).toMatchObject({ success: true });
 
-  const sentinelResult = await appendStopSentinel(
-    {
-      project_id: harness.projectId,
-      session_id: harness.sessionId,
-      timestamp: input.timestamp,
-      transcript_path: harness.transcriptPath,
-      hwm_offset: input.transcriptEnd,
-    },
-    { env: harness.env }
-  );
-  expect(sentinelResult).toMatchObject({ success: true });
+  if (input.transcriptEnd !== undefined) {
+    const sentinelResult = await appendStopSentinel(
+      {
+        project_id: projectId,
+        session_id: harness.sessionId,
+        timestamp: input.timestamp,
+        transcript_path: harness.transcriptPath,
+        hwm_offset: input.transcriptEnd,
+      },
+      { env: harness.env }
+    );
+    expect(sentinelResult).toMatchObject({ success: true });
+  }
 
-  return statSync(resolveCaptureSpoolPath(harness.projectId, harness.sessionId, { env: harness.env }))
-    .size;
+  return statSync(resolveCaptureSpoolPath(projectId, harness.sessionId, { env: harness.env })).size;
+}
+
+/** 模擬 hooks/stop-capture-sentinel.sh 實際寫法：只有 transcript_path 與 hwm_offset，沒有 project_id／timestamp。 */
+function appendBashStyleSentinel(harness: TestHarness, projectId: string, hwmOffset: number): void {
+  const path = resolveCaptureSpoolPath(projectId, harness.sessionId, { env: harness.env });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify({ transcript_path: harness.transcriptPath, hwm_offset: hwmOffset })}\n`);
 }
 
 function hwmPath(harness: TestHarness): string {
@@ -4111,5 +4127,341 @@ describe('capture worker DB-backed RED contracts', () => {
       expect(observed).not.toContain(timestamp);
     }
     expect(rows[2].observedAt.getTime()).toBeGreaterThan(rows[1].observedAt.getTime());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T1（2026-09-03）：舊 hook 時代 backlog 的 project_id 已崩塌（`__`、`_raw`…），
+// worker 改以 transcript 內第一個 `cwd` 經 resolveProjectId 推導；新 hook 時代
+// （記錄行 timestamp >= 2026-09-02T22:10:00+08:00）一律信記錄行。
+// 只有「帶 project_id 且 timestamp 可解析且 < cutoff」的 event 才算舊時代證據；
+// Stop sentinel（只有 transcript_path／hwm_offset）與異常 timestamp 不算（Codex R1 finding 1）。
+// ---------------------------------------------------------------------------
+describe('T1: backlog project_id remap from transcript cwd', () => {
+  const OLD_TS = '2026-09-01T10:00:00+0800';
+  const NEW_TS = '2026-09-02T22:10:00+0800';
+
+  function makeFixtureRepo(root: string, name: string, marker?: string): string {
+    const repo = join(root, name);
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    if (marker) {
+      writeFileSync(join(repo, 'CLAUDE.md'), `# x\n<!-- cc-memory: project="${marker}" -->\n`);
+    }
+    return repo;
+  }
+
+  function extractionFor(name: string): CaptureLlmRawResponse {
+    return rawExtraction({ summary: name, observations: [observation(name, `${name} narrative`)] });
+  }
+
+  let sql: Sql;
+  let pg: Sql;
+  let db: unknown;
+
+  beforeAll(async () => {
+    sql = await connectDb(TEST_DB_URL);
+    pg = postgres(TEST_DB_URL, { max: 4 });
+    db = drizzle(pg);
+  });
+
+  afterAll(async () => {
+    if (pg) await pg.end();
+    if (sql) await sql.end();
+  });
+
+  afterEach(async () => {
+    await sql`DELETE FROM observations WHERE project_id LIKE 'capture-worker-%' OR project_id LIKE '\\_%'`;
+    await sql`DELETE FROM project_memories WHERE project_id LIKE 'capture-worker-%' OR project_id LIKE '\\_%'`;
+  });
+
+  it('old-hook record with Claude transcript cwd writes rows under the repo-root project id', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repoName = `capture-worker-repo-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { type: 'user', cwd: join(repo, 'sub'), message: 'first entry carries cwd' },
+      { type: 'assistant', cwd: join(repo, 'sub'), message: 'second entry' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('remapped')]);
+    const lines: string[] = [];
+
+    await expect(runWorker(harness, { db, llm, stdout: { write: (c: string) => lines.push(c) } }))
+      .resolves.toMatchObject({ processed: 1, observationsWritten: 1 });
+
+    expect(llm.calls[0].projectId).toBe(repoName);
+    expect(await countRows(sql, repoName, harness.sessionId)).toEqual({ observations: 1, rollups: 1 });
+    expect(await countRows(sql, '__', harness.sessionId)).toEqual({ observations: 0, rollups: 0 });
+    const rollupRows = await rollups(sql, repoName, harness.sessionId);
+    expect(rollupRows[0].idempotencyKey).toBe(`capture:v05:${repoName}:${harness.sessionId}`);
+    expect(lines.join('')).toContain(`project-id-remapped session=${harness.sessionId} old=__ new=${repoName}`);
+  });
+
+  it('old-hook record with Codex session_meta payload.cwd resolves the same way', async () => {
+    const harness = makeHarness({ projectId: '___' });
+    const repoName = `capture-worker-codex-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      {
+        timestamp: '2026-09-01T02:00:00.000Z',
+        type: 'session_meta',
+        payload: { id: harness.sessionId, cwd: join(repo, 'sub'), originator: 'codex_exec' },
+      },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: 'hi' } },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('codex')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(repoName);
+  });
+
+  it('new-hook record keeps its project_id and ignores transcript cwd', async () => {
+    const harness = makeHarness();
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'cwd points elsewhere' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: NEW_TS });
+    const llm = mockLlm([extractionFor('new')]);
+    const lines: string[] = [];
+
+    await runWorker(harness, { db: {}, llm, stdout: { write: (c: string) => lines.push(c) } });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(harness.projectId);
+    expect(lines.join('')).not.toContain('project-id-remapped');
+  });
+
+  it('snapshot straddling the cutoff trusts the new-hook record over transcript cwd', async () => {
+    const harness = makeHarness();
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const mid = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'old era entry' },
+    ]);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'new era entry' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, timestamp: OLD_TS });
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd, timestamp: NEW_TS });
+    const llm = mockLlm([extractionFor('mixed')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(harness.projectId);
+  });
+
+  it('sentinel-only snapshot after the new-hook event was consumed keeps the record id (Codex R1)', async () => {
+    const harness = makeHarness();
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'session started elsewhere, then cd into this project' },
+    ]);
+    // tick 1：只有新 hook 的 event（無 sentinel）→ worker 只初始化 checkpoint 並推進 cursor
+    const spoolSizeAfterEvent = await appendWindow(harness, { transcriptStart: 0, timestamp: NEW_TS });
+    const first = await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    expect(first).toMatchObject({ processed: 0 });
+    expect(readState(harness).spool.cursor).toBe(spoolSizeAfterEvent);
+    expect(readState(harness).projectId).toBe(harness.projectId);
+    // tick 2：只剩 bash 版 Stop sentinel（無 project_id／timestamp）
+    appendBashStyleSentinel(harness, harness.projectId, transcriptEnd);
+    const llm = mockLlm([extractionFor('sentinel-only')]);
+    const lines: string[] = [];
+
+    await runWorker(harness, { db: {}, llm, stdout: { write: (c: string) => lines.push(c) } });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(harness.projectId);
+    expect(lines.join('')).not.toContain('project-id-remapped');
+  });
+
+  it('sentinel-only snapshot in an encoded (non-ASCII) spool dir uses the id persisted in state, not the lossy dir-name decode (Codex R1/R1b)', async () => {
+    // 😀x 的目錄名 _u1f600x 用 4 位啟發式會解成 ὠ0x（不可逆編碼的已知案例）；state.projectId 讓 sentinel-only 仍拿到原名
+    const harness = makeHarness({ projectId: '😀x' });
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'no cwd here' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, timestamp: NEW_TS });
+    await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    expect(readState(harness).projectId).toBe('😀x');
+    appendBashStyleSentinel(harness, harness.projectId, transcriptEnd);
+    const llm = mockLlm([extractionFor('encoded')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe('😀x');
+    expect(sanitizeSpoolSegment('😀x')).toBe('_u1f600x');
+  });
+
+  it('sentinel-only snapshot with no state yet (BMP name) falls back to the decoded dir name', async () => {
+    const harness = makeHarness({ projectId: '回收辨識_u測試' });
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'no cwd here' },
+    ]);
+    appendBashStyleSentinel(harness, harness.projectId, transcriptEnd);
+    const llm = mockLlm([extractionFor('encoded-nostate')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    // 第一個 record 就是 sentinel：checkpoint 初始化，不會有 LLM 呼叫；再補一個 sentinel 推進 boundary
+    const end2 = appendTranscriptEntries(harness.transcriptPath, [{ message: 'more' }]);
+    appendBashStyleSentinel(harness, harness.projectId, end2);
+    await runWorker(harness, { db: {}, llm });
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe('回收辨識_u測試');
+  });
+
+  it('old-era file derives once, persists the id in state, and reuses it for later snapshots (Codex R1b high 2)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repoName = `capture-worker-repo-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const mid = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'first window' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: mid, timestamp: OLD_TS });
+    const llm1 = mockLlm([extractionFor('w1')]);
+    await runWorker(harness, { db: {}, llm: llm1 });
+    expect(llm1.calls[0].projectId).toBe(repoName);
+    expect(readState(harness).projectId).toBe(repoName);
+
+    // 之後 transcript 被改寫成指向別的 repo（模擬 cd／檔案重寫）：state 已定案，不再重讀 transcript
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    writeFileSync(harness.transcriptPath, '');
+    const end2 = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(otherRepo, 'sub'), message: 'rewritten first line' },
+      { cwd: join(otherRepo, 'sub'), message: 'second window' },
+    ]);
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd: end2, timestamp: OLD_TS });
+    const llm2 = mockLlm([extractionFor('w2')]);
+    await runWorker(harness, { db: {}, llm: llm2 });
+    expect(llm2.calls).toHaveLength(1);
+    expect(llm2.calls[0].projectId).toBe(repoName);
+  });
+
+  it('pre-upgrade state without projectId: old events already consumed, sentinel-only snapshot still derives from whole-file evidence (Codex R1c)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repoName = `capture-worker-repo-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'old era' },
+    ]);
+    // 舊版 worker 已消耗 event（模擬：跑一次只有 event 的 tick，再把 state 的 projectId 拿掉）
+    await appendWindow(harness, { transcriptStart: 0, timestamp: OLD_TS });
+    await runWorker(harness, { db: {}, llm: mockLlm([]) });
+    const state = readState(harness);
+    delete state.projectId;
+    writeFileSync(statePath(harness), JSON.stringify(state));
+    expect(readState(harness).projectId).toBeUndefined();
+    // 只剩 sentinel
+    appendBashStyleSentinel(harness, '__', transcriptEnd);
+    const llm = mockLlm([extractionFor('late-sentinel')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(repoName);
+    expect(readState(harness).projectId).toBe(repoName);
+  });
+
+  it('a later new-hook event is authoritative and overwrites a derived state id', async () => {
+    const harness = makeHarness({ projectId: 'capture-worker-authoritative' });
+    const otherRepo = makeFixtureRepo(harness.root, `capture-worker-other-${randomUUID()}`);
+    const mid = appendTranscriptEntries(harness.transcriptPath, [{ cwd: join(otherRepo, 'sub'), message: 'a' }]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: mid, timestamp: OLD_TS });
+    const llm1 = mockLlm([extractionFor('w1')]);
+    await runWorker(harness, { db: {}, llm: llm1 });
+    expect(readState(harness).projectId).toBe(basename(otherRepo));
+    const end = appendTranscriptEntries(harness.transcriptPath, [{ message: 'b' }]);
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd: end, timestamp: NEW_TS });
+    const llm2 = mockLlm([extractionFor('w2')]);
+    await runWorker(harness, { db: {}, llm: llm2 });
+    expect(llm2.calls[0].projectId).toBe('capture-worker-authoritative');
+    expect(readState(harness).projectId).toBe('capture-worker-authoritative');
+  });
+
+  it('old-era event plus an event with an unparsable timestamp still derives (documented: garbage timestamps are not era evidence)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repoName = `capture-worker-repo-${randomUUID()}`;
+    const repo = makeFixtureRepo(harness.root, repoName);
+    const mid = appendTranscriptEntries(harness.transcriptPath, [{ cwd: join(repo, 'sub'), message: 'a' }]);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [{ cwd: join(repo, 'sub'), message: 'b' }]);
+    await appendWindow(harness, { transcriptStart: 0, timestamp: OLD_TS });
+    await appendWindow(harness, { transcriptStart: mid, transcriptEnd, timestamp: 'garbage' });
+    const llm = mockLlm([extractionFor('mixed-garbage')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(repoName);
+  });
+
+  it('old-looking record with an unparsable timestamp keeps the record id (fail-safe)', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repo = makeFixtureRepo(harness.root, `capture-worker-repo-${randomUUID()}`);
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'cwd exists but timestamp is garbage' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: 'not-a-timestamp' });
+    const llm = mockLlm([extractionFor('badts')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe('__');
+  });
+
+  it('old-hook record whose transcript has no cwd keeps the record project_id', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { message: 'no cwd anywhere' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('nocwd')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(harness.projectId);
+  });
+
+  it('derived __personal__ takes the existing skip path: no LLM call and zero rows in the project DB', async () => {
+    const harness = makeHarness({ projectId: '__' });
+    const repo = makeFixtureRepo(harness.root, `capture-worker-personal-${randomUUID()}`, '__personal__');
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(repo, 'sub'), message: 'personal repo' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([]);
+
+    const result = await runWorker(harness, { db, llm });
+
+    expect(result).toMatchObject({ skipped: 1, processed: 0 });
+    expect(llm.calls).toHaveLength(0);
+    const rows = await sql<{ n: number }[]>`
+      SELECT (SELECT COUNT(*)::int FROM observations WHERE session_id = ${harness.sessionId})
+           + (SELECT COUNT(*)::int FROM project_memories
+               WHERE idempotency_key LIKE ${`capture:v05:%:${harness.sessionId}`}) AS n`;
+    expect(rows[0].n).toBe(0);
+  });
+
+  it('cwd that no longer exists (no repo ancestor) falls back to basename(cwd)', async () => {
+    const harness = makeHarness({ projectId: '_raw' });
+    const goneName = `capture-worker-gone-${randomUUID()}`;
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { cwd: join(harness.root, 'deleted-parent', goneName), message: 'deleted worktree' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: OLD_TS });
+    const llm = mockLlm([extractionFor('gone')]);
+
+    await runWorker(harness, { db: {}, llm });
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].projectId).toBe(goneName);
   });
 });

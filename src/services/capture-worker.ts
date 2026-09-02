@@ -3,7 +3,7 @@
 // CC-memory v0.5 M2b capture worker.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
@@ -33,6 +33,8 @@ import {
 } from '../utils/embedding.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
+import { resolveProjectId } from './projects.js';
+import { decodeSpoolSegment } from './capture-spool.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -207,6 +209,12 @@ export interface CaptureStateV2 {
   transcripts: Record<string, TranscriptCheckpoint>;
   retries: Record<string, CaptureRetryEntry>;
   splitHints: Record<string, CaptureSplitHint>;
+  /**
+   * 此 spool 檔已確認的 project_id（2026-09-03 T1）：第一個含 event 的 snapshot 決定後持久化，
+   * 之後的 snapshot（尤其 sentinel-only，沒有 project_id／timestamp）直接沿用，不再靠目錄名解碼
+   * 或重讀 transcript。舊 state 檔沒有此欄位 → undefined。
+   */
+  projectId?: string;
 }
 
 export type CaptureStateWriter = (path: string, state: CaptureStateV2) => Promise<void>;
@@ -434,8 +442,17 @@ function parseCaptureState(raw: string, path: string): CaptureStateV2 {
     }
   }
 
+  let projectId: string | undefined;
+  if (record.projectId !== undefined) {
+    if (typeof record.projectId !== 'string' || record.projectId.length === 0) {
+      throw new Error(`CAPTURE_STATE_CORRUPT: invalid projectId at ${basename(path)}`);
+    }
+    projectId = record.projectId;
+  }
+
   return {
     version: 2,
+    ...(projectId === undefined ? {} : { projectId }),
     spool: {
       generation: record.spool.generation,
       cursor: record.spool.cursor,
@@ -725,7 +742,7 @@ async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
       sessions.push({
         projectDir,
-        projectIdFromPath: projectEntry.name,
+        projectIdFromPath: decodeSpoolSegment(projectEntry.name),
         sessionIdFromPath: basename(file.name, '.jsonl'),
         path: join(projectDir, file.name),
       });
@@ -766,6 +783,136 @@ function firstString(records: SpoolRecord[], key: keyof SpoolRecord): string | n
     if (typeof value === 'string' && value.length > 0) return value;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// T1（2026-09-03）：舊 hook 時代 backlog 的 project_id 重新歸屬
+//
+// 2026-09-02 22:10（Asia/Taipei）之前的 hook 以 cwd basename 去非 ASCII 產 id，
+// 中文目錄全崩成 `__`／`___`／`_raw`…（memory-ops-cutover.md §4.1）。
+// 這批 spool 記錄行的 project_id 不可信；改從 transcript 內第一個 `cwd`
+// （Claude：頂層 `cwd`；Codex：`session_meta.payload.cwd`）經 resolveProjectId
+// （cwdIsExplicit=true，與 hook 同規則）推導。
+// 記錄行 timestamp >= cutoff → 新 hook 寫的，一律信記錄行、不開 transcript。
+// transcript 沒 cwd／讀不到／解析失敗 → 維持記錄行 project_id（fail-safe）。
+// 已知限制：舊時代 session 中途 cd 到別的 repo 仍歸第一個 cwd 的專案（接受）。
+// ---------------------------------------------------------------------------
+const BACKLOG_PROJECT_ID_CUTOFF_MS = Date.parse('2026-09-02T22:10:00+08:00');
+export const TRANSCRIPT_CWD_SCAN_BYTES = 256 * 1024;
+
+function recordTimestampMs(record: SpoolRecord): number | null {
+  if (typeof record.timestamp !== 'string') return null;
+  const ms = Date.parse(record.timestamp);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function extractCwdFromTranscriptLine(line: string): string | null {
+  if (!line.includes('"cwd"')) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const top = (parsed as { cwd?: unknown }).cwd;
+  if (typeof top === 'string' && top.trim().length > 0) return top.trim();
+  const payload = (parsed as { payload?: unknown }).payload;
+  if (payload && typeof payload === 'object') {
+    const nested = (payload as { cwd?: unknown }).cwd;
+    if (typeof nested === 'string' && nested.trim().length > 0) return nested.trim();
+  }
+  return null;
+}
+
+/**
+ * 讀 transcript 開頭最多 maxBytes，回第一個 cwd；任何錯誤都回 null（不拋，拋了會讓整個 tick 失敗）。
+ * 只接受 regular file（lstat，不跟隨 symlink：指向 FIFO／裝置的 symlink 會讓 open 阻塞而吃掉 tick 預算）。
+ * 多讀 1 byte 判定是否真的截斷：剛好 maxBytes 且無結尾換行的完整行不會被誤丟（Codex R1 finding 3）。
+ */
+export async function readFirstTranscriptCwd(path: string, maxBytes: number): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return null;
+    handle = await open(path, 'r');
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+    const truncated = bytesRead > maxBytes;
+    const text = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8');
+    const lines = text.split('\n');
+    // 截斷時最後一段是半行，不解析；未截斷代表已到檔尾，整段都是完整行。
+    const completeCount = truncated ? lines.length - 1 : lines.length;
+    for (let i = 0; i < completeCount; i += 1) {
+      const cwd = extractCwdFromTranscriptLine(lines[i]);
+      if (cwd) return cwd;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * 決定此 snapshot 的 project_id，並視情況持久化到 state.projectId（呼叫端負責寫 state 檔）。
+ * 時代證據看**整個 spool 檔**（cursor 之前已消耗的記錄行也算，Codex R1c important 2）：
+ * 1. 任一「帶 project_id 且 timestamp >= cutoff」的 event → 新 hook 寫的＝權威來源，直接信它並寫入 state
+ *    （可覆寫先前推導值；穩定路由下值相同）。
+ * 2. 沒有任何「帶 project_id 且 timestamp 可解析且 < cutoff」的 event（整檔 sentinel-only、timestamp 缺失或異常）
+ *    → fail-safe：先用 state 已確認的 id，再退到記錄行 id，最後才是目錄名 best-effort 解碼；解碼結果**不**寫入 state。
+ * 3. 有舊時代 event → state 已確認就沿用（同一 spool 檔只推導一次，跨 tick 一致）；否則讀 transcript
+ *    第一個 cwd 推導並寫入 state；無 cwd／讀失敗 → 維持記錄行 id、不寫 state（之後 transcript 出現仍可修正）。
+ * Stop sentinel 只有 transcript_path／hwm_offset，不能當任何時代的證據（見 memory-ops-cutover §4.1）。
+ * 已知殘餘風險（Codex R1c，留使用者裁決 #c7b7974a）：舊 id == 新 id 的檔案若在 Stop 之後、worker 處理之前
+ * 改了 CLAUDE.md marker，推導會讀到新 marker（TOCTOU）；根治需 sentinel 攜帶 metadata。
+ */
+async function resolveSessionProjectId(
+  records: SpoolRecord[],
+  priorRecords: SpoolRecord[],
+  spool: SpoolSession,
+  sessionId: string,
+  state: CaptureStateV2,
+  stdout: { write(chunk: string): unknown },
+): Promise<string> {
+  const recordProjectId =
+    firstString(records, 'project_id') ??
+    firstString(priorRecords, 'project_id') ??
+    state.projectId ??
+    spool.projectIdFromPath;
+  let sawOldEra = false;
+  for (const record of [...records, ...priorRecords]) {
+    if (typeof record.project_id !== 'string' || record.project_id.length === 0) continue;
+    const ms = recordTimestampMs(record);
+    if (ms === null) continue;
+    if (ms >= BACKLOG_PROJECT_ID_CUTOFF_MS) {
+      state.projectId = record.project_id;
+      return record.project_id;
+    }
+    sawOldEra = true;
+  }
+  if (!sawOldEra) return state.projectId ?? recordProjectId;
+  if (state.projectId) return state.projectId;
+  const transcriptPath = firstString(records, 'transcript_path') ?? firstString(priorRecords, 'transcript_path');
+  const cwd = transcriptPath
+    ? await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES)
+    : null;
+  if (!cwd) return recordProjectId;
+  let resolved = recordProjectId;
+  try {
+    const derived = resolveProjectId({ cwd, cwdIsExplicit: true });
+    if (derived.length > 0) resolved = derived;
+  } catch {
+    return recordProjectId;
+  }
+  if (resolved !== recordProjectId) {
+    stdout.write(
+      `[cc-memory] auto-capture info: project-id-remapped session=${sessionId} old=${recordProjectId} new=${resolved}\n`
+    );
+  }
+  state.projectId = resolved;
+  return resolved;
 }
 
 // 注入污染防線：transcript 是 JSONL，逐行過濾——整行含 INJECTION_MARKER 即丟棄，
@@ -1797,8 +1944,13 @@ export async function runCaptureWorkerOnce(
       handledSessions += 1;
       await saveTickCursor(root, spool.path);
 
-      const projectId = firstString(snapshot.records, 'project_id') ?? spool.projectIdFromPath;
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
+      const projectIdBefore = state.projectId;
+      const priorRecords = snapshotCursor > 0 ? readSpoolBuffer(buffer, 0, snapshotCursor)?.records ?? [] : [];
+      const projectId = await resolveSessionProjectId(
+        snapshot.records, priorRecords, spool, sessionId, state, stdout,
+      );
+      if (state.projectId !== projectIdBefore) await stateWriter(statePath, state);
       const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
       const outcomeCountBefore =
         result.processed + result.skipped + result.failed + result.deadLettered +
