@@ -44,6 +44,84 @@ json_escape() {
   printf '%s' "$value"
 }
 
+json_unescape() {
+  local value="$1"
+  value="${value//\\\"/\"}"
+  value="${value//\\\//\/}"
+  value="${value//\\n/$'\n'}"
+  value="${value//\\r/$'\r'}"
+  value="${value//\\t/$'\t'}"
+  value="${value//\\\\/\\}"
+  if [[ "$value" == *'\u'* ]]; then
+    printf -v value '%b' "$value" 2>/dev/null || true
+  fi
+  printf '%s' "$value"
+}
+
+# 對齊 src/services/projects.ts findRepoRoot：`.git/HEAD` 或 `.git` 檔（gitdir: 開頭，worktree）。
+find_repo_root() {
+  local dir="${1%/}" i first
+  [[ -z "$dir" ]] && dir='/'
+  for ((i = 0; i < 64; i++)); do
+    if [[ -f "$dir/.git/HEAD" ]]; then
+      printf '%s' "$dir"
+      return 0
+    fi
+    if [[ -f "$dir/.git" ]]; then
+      IFS= read -r first <"$dir/.git" 2>/dev/null || first=''
+      first="${first#"${first%%[![:space:]]*}"}"
+      if [[ "$first" == gitdir:* ]]; then
+        printf '%s' "$dir"
+        return 0
+      fi
+    fi
+    [[ "$dir" == '/' ]] && return 1
+    dir="${dir%/*}"
+    [[ -z "$dir" ]] && dir='/'
+  done
+  return 1
+}
+
+# 對齊 tryReadClaudeMdMarker：從 cwd 往上到 repo root 為止，取最近的 CLAUDE.md marker。
+read_claude_md_marker() {
+  local dir="${1%/}" root="$2" i content
+  [[ -z "$dir" ]] && dir='/'
+  local marker_regex='<!--[[:space:]]*cc-memory:[[:space:]]*project="([^"]+)"[[:space:]]*-->'
+  for ((i = 0; i < 64; i++)); do
+    if [[ -r "$dir/CLAUDE.md" ]]; then
+      content="$(<"$dir/CLAUDE.md")" 2>/dev/null || content=''
+      if [[ "$content" =~ $marker_regex ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+      fi
+    fi
+    [[ "$dir" == "$root" || "$dir" == '/' ]] && return 1
+    dir="${dir%/*}"
+    [[ -z "$dir" ]] && dir='/'
+  done
+  return 1
+}
+
+# resolveProjectId layer 3-5：CLAUDE.md marker → repo root basename → cwd basename。
+# 回傳原始字串（含非 ASCII）；spool 目錄名另外經 sanitize_segment。
+resolve_project_id() {
+  local cwd="${1%/}" root marker base
+  if [[ -n "$cwd" ]] && root="$(find_repo_root "$cwd")"; then
+    if marker="$(read_claude_md_marker "$cwd" "$root")" && [[ -n "$marker" ]]; then
+      printf '%s' "$marker"
+      return 0
+    fi
+    base="${root##*/}"
+  else
+    base="${cwd##*/}"
+  fi
+  if [[ -z "$base" ]]; then
+    printf 'unknown'
+  else
+    printf '%s' "$base"
+  fi
+}
+
 file_size() {
   local path="$1"
   stat -c '%s' "$path" 2>/dev/null || stat -f '%z' "$path" 2>/dev/null || printf '0'
@@ -79,7 +157,7 @@ should_skip_tool() {
 main() {
   umask 077
 
-  local tool_name session_id transcript_path cwd project_base project_id spool_root project_dir spool_file
+  local tool_name session_id transcript_path cwd project_id project_dir_name spool_root project_dir spool_file
   tool_name="$(json_get_string 'tool_name')"
   if [[ -z "$tool_name" ]] || should_skip_tool "$tool_name"; then
     return 0
@@ -91,16 +169,15 @@ main() {
   if [[ -z "$session_id" || -z "$transcript_path" ]]; then
     return 0
   fi
-  project_base="${cwd%/}"
-  project_base="${project_base##*/}"
-  project_id="$(sanitize_segment "$project_base")"
+  project_id="$(resolve_project_id "$(json_unescape "$cwd")")"
+  project_dir_name="$(sanitize_segment "$project_id")"
   session_id="$(sanitize_segment "$session_id")"
 
   if [[ -z "${CC_MEMORY_SPOOL_DIR:-}" && -z "${HOME:-}" ]]; then
     return 0
   fi
   spool_root="${CC_MEMORY_SPOOL_DIR:-${HOME}/.cache/cc-memory/spool}"
-  project_dir="${spool_root}/${project_id}"
+  project_dir="${spool_root}/${project_dir_name}"
   spool_file="${project_dir}/${session_id}.jsonl"
 
   mkdir -p "$project_dir" 2>/dev/null || return 0

@@ -135,7 +135,7 @@ describe('embedding egress redaction', () => {
 
     await expect(generateEmbedding('safe input', { apiKey: 'test-key' })).resolves.toBeNull();
 
-    expect(consoleError).toHaveBeenCalledWith('Failed to generate embedding');
+    expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/^Failed to generate embedding \(Error\)$/));
     expect(consoleError.mock.calls.flat().join(' ')).not.toContain('private request body');
     consoleError.mockRestore();
   });

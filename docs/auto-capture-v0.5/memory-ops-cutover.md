@@ -283,6 +283,12 @@ Stop hook 也必須在 Claude Code 與 Codex 都指向 `hooks/stop-capture-senti
 
 auto-capture service 不 enable（設為開機常駐啟用），也不觀察五分鐘週期；它只由 Stop／SessionStart hooks 啟動。Hermes memory job 只保留為 paused 備援，不再承擔執行或告警。
 
+### 4.1 hook 的 project_id 解析（2026-09-02 起）
+
+兩支 capture hook（`hooks/post-tool-use-capture.sh`、`hooks/stop-capture-sentinel.sh`）的 `project_id` 對齊 `src/services/projects.ts` `resolveProjectId` 的第 3–5 層：從 hook payload 的 `cwd` 往上找 git 根目錄（`.git/HEAD` 或 worktree 的 `.git` 檔），沿途最近的 `CLAUDE.md` `<!-- cc-memory: project="…" -->` marker 優先，沒有 marker 就用根目錄名；不在 git 內的目錄用 `cwd` 本身的目錄名。`project_id` 以原始字串（含中文）寫進 spool 記錄行，只有 spool 目錄名經 sanitize（非 `[A-Za-z0-9._-]` 換成 `_`）；worker 以記錄行的 `project_id` 為準。
+
+背景：2026-09-02 Phase 8 第 4 天檢查發現舊邏輯取 `cwd` 目錄名再把非 ASCII 換成 `_`，中文子目錄全部崩塌成 `__`／`___`／`_raw` 等 id（觀察窗內 1,206/1,206 筆新 observation 全落在底線 id；`__` 混入 recycling-recognition、recycling-recognition-tender-pmo、ops-ten-year-v4、AI_Copilot 四個 repo 的 session；72 個 session 中 9 個因換目錄被拆到多個 id）。只影響新對話：切換當下仍在進行的 session 會一次性換 id（舊 spool 檔不再收到 Stop sentinel）；已在 spool 內的 backlog 記錄行仍帶舊 id，重新歸屬另案處理。hook 耗時 p95 維持 14 ms（門檻 20 ms）。
+
 ## 5. 封存歷史 capture backlog，再按需回放
 
 ### 5.0 未處理 backlog 的 copy-live 異地備份（canary 前的硬性 gate）

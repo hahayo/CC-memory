@@ -187,8 +187,14 @@ export async function generateEmbedding(
     }
 
     return normalizeVector(embedding);
-  } catch {
-    console.error('Failed to generate embedding');
+  } catch (error) {
+    // 刻意不記錄 error.message（provider 可能回吐請求內容，見 tests/utils/embedding.test.ts
+    // 「egress redaction」）。只記錯誤類別與 HTTP status，讓 supervisor journal 能分辨
+    // 配額（429）／驗證（401/403）／網路（無 status）——2026-09-01 事故因此不可考。
+    const name = error instanceof Error ? error.name : 'UnknownError';
+    const status = (error as { status?: unknown } | null)?.status;
+    const statusText = typeof status === 'number' ? ` status=${status}` : '';
+    console.error(`Failed to generate embedding (${name}${statusText})`);
     return null;
   }
 }
