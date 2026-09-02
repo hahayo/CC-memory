@@ -70,22 +70,18 @@ export function sanitizeSpoolSegment(value: string): string {
 }
 
 /**
- * sanitizeSpoolSegment 的反函數（Codex R1 finding 2）：把 spool 目錄名還原成原始 project_id。
- * 編碼端 `_uXXXX` 不定長（至少 4 位十六進位、無分隔），BMP 外字元後面若剛好接十六進位字元會有歧義；
- * 這裡採「最長合法讀法優先」：6 位（0x100000–0x10FFFF）→ 5 位（0x10000–0xFFFFF）→ 4 位。
- * 4 位若落在 surrogate 區（D800–DFFF）不是合法 code point，原樣保留。`unknown` 原樣回傳。
+ * spool 目錄名 → 原始 project_id 的 best-effort 解碼（Codex R1 finding 2／R1b high 1）。
+ * 編碼端 `_uXXXX` 不定長且無分隔，本質上不是單射：`中a` → `_u4e2da`、`😀` → `_u1f600`、
+ * `U+1000`+`00` 與 `U+100000` 同為 `_u100000`——所以這不是反函數，只是啟發式：固定取 4 位十六進位
+ * （BMP 字元後面接 `[0-9a-f]` 的情況遠多於 BMP 外字元）。4 位落在 surrogate 區（D800–DFFF）不是合法
+ * code point，原樣保留。`unknown` 原樣回傳。worker 只在「spool 檔第一個 snapshot 就是 sentinel-only、
+ * state 還沒記到 projectId」時才用它；之後一律用 state 持久化的原始 id。
  */
 export function decodeSpoolSegment(value: string): string {
-  return value.replace(/_u([0-9a-f]{4,6})/g, (whole, hex: string) => {
-    for (const width of [6, 5, 4]) {
-      if (hex.length < width) continue;
-      const code = Number.parseInt(hex.slice(0, width), 16);
-      const minForWidth = width === 6 ? 0x100000 : width === 5 ? 0x10000 : 0;
-      if (code < minForWidth || code > 0x10ffff) continue;
-      if (code >= 0xd800 && code <= 0xdfff) return whole;
-      return String.fromCodePoint(code) + hex.slice(width);
-    }
-    return whole;
+  return value.replace(/_u([0-9a-f]{4})/g, (whole, hex: string) => {
+    const code = Number.parseInt(hex, 16);
+    if (code >= 0xd800 && code <= 0xdfff) return whole;
+    return String.fromCodePoint(code);
   });
 }
 

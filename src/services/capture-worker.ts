@@ -209,6 +209,12 @@ export interface CaptureStateV2 {
   transcripts: Record<string, TranscriptCheckpoint>;
   retries: Record<string, CaptureRetryEntry>;
   splitHints: Record<string, CaptureSplitHint>;
+  /**
+   * 此 spool 檔已確認的 project_id（2026-09-03 T1）：第一個含 event 的 snapshot 決定後持久化，
+   * 之後的 snapshot（尤其 sentinel-only，沒有 project_id／timestamp）直接沿用，不再靠目錄名解碼
+   * 或重讀 transcript。舊 state 檔沒有此欄位 → undefined。
+   */
+  projectId?: string;
 }
 
 export type CaptureStateWriter = (path: string, state: CaptureStateV2) => Promise<void>;
@@ -436,8 +442,17 @@ function parseCaptureState(raw: string, path: string): CaptureStateV2 {
     }
   }
 
+  let projectId: string | undefined;
+  if (record.projectId !== undefined) {
+    if (typeof record.projectId !== 'string' || record.projectId.length === 0) {
+      throw new Error(`CAPTURE_STATE_CORRUPT: invalid projectId at ${basename(path)}`);
+    }
+    projectId = record.projectId;
+  }
+
   return {
     version: 2,
+    ...(projectId === undefined ? {} : { projectId }),
     spool: {
       generation: record.spool.generation,
       cursor: record.spool.cursor,
@@ -840,42 +855,56 @@ export async function readFirstTranscriptCwd(path: string, maxBytes: number): Pr
   }
 }
 
+/**
+ * 決定此 snapshot 的 project_id，並把結果持久化到 state.projectId（呼叫端負責寫 state 檔）。
+ * 1. 任一「帶 project_id 且 timestamp >= cutoff」的 event → 新 hook 寫的，直接信它。
+ * 2. 沒有任何「帶 project_id 且 timestamp 可解析且 < cutoff」的 event（sentinel-only、timestamp 缺失或異常）
+ *    → fail-safe：先用 state 已確認的 id，再退到記錄行 id，最後才是目錄名解碼。
+ * 3. 有舊時代 event → state 已確認就沿用（同一 spool 檔只推導一次，跨 tick 一致）；否則讀 transcript
+ *    第一個 cwd 推導；無 cwd／讀失敗 → 維持記錄行 id。
+ * Stop sentinel 只有 transcript_path／hwm_offset，不能當任何時代的證據（見 memory-ops-cutover §4.1）。
+ */
 async function resolveSessionProjectId(
   records: SpoolRecord[],
   spool: SpoolSession,
   sessionId: string,
+  state: CaptureStateV2,
   stdout: { write(chunk: string): unknown },
 ): Promise<string> {
-  const recordProjectId = firstString(records, 'project_id') ?? spool.projectIdFromPath;
-  // 只看帶 project_id 的記錄行（event）；Stop sentinel 只有 transcript_path／hwm_offset，不能當時代證據。
-  // 任一 event timestamp >= cutoff → 新 hook 寫的，直接信它；
-  // 沒有任何可解析且 < cutoff 的 event（sentinel-only、timestamp 缺失或格式異常）→ fail-safe 維持既有 id。
+  const recordProjectId = firstString(records, 'project_id') ?? state.projectId ?? spool.projectIdFromPath;
   let sawOldEra = false;
   for (const record of records) {
     if (typeof record.project_id !== 'string' || record.project_id.length === 0) continue;
     const ms = recordTimestampMs(record);
     if (ms === null) continue;
-    if (ms >= BACKLOG_PROJECT_ID_CUTOFF_MS) return record.project_id;
+    if (ms >= BACKLOG_PROJECT_ID_CUTOFF_MS) {
+      state.projectId = record.project_id;
+      return record.project_id;
+    }
     sawOldEra = true;
   }
-  if (!sawOldEra) return recordProjectId;
+  if (!sawOldEra) return state.projectId ?? recordProjectId;
+  if (state.projectId) return state.projectId;
+  let resolved = recordProjectId;
   const transcriptPath = firstString(records, 'transcript_path');
-  if (!transcriptPath) return recordProjectId;
-  const cwd = await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES);
-  if (!cwd) return recordProjectId;
-  let derived: string;
-  try {
-    derived = resolveProjectId({ cwd, cwdIsExplicit: true });
-  } catch {
-    return recordProjectId;
+  const cwd = transcriptPath
+    ? await readFirstTranscriptCwd(transcriptPath, TRANSCRIPT_CWD_SCAN_BYTES)
+    : null;
+  if (cwd) {
+    try {
+      const derived = resolveProjectId({ cwd, cwdIsExplicit: true });
+      if (derived.length > 0) resolved = derived;
+    } catch {
+      // resolver 失敗 → 維持記錄行 id
+    }
   }
-  if (derived.length === 0) return recordProjectId;
-  if (derived !== recordProjectId) {
+  if (resolved !== recordProjectId) {
     stdout.write(
-      `[cc-memory] auto-capture info: project-id-remapped session=${sessionId} old=${recordProjectId} new=${derived}\n`
+      `[cc-memory] auto-capture info: project-id-remapped session=${sessionId} old=${recordProjectId} new=${resolved}\n`
     );
   }
-  return derived;
+  state.projectId = resolved;
+  return resolved;
 }
 
 // 注入污染防線：transcript 是 JSONL，逐行過濾——整行含 INJECTION_MARKER 即丟棄，
@@ -1908,7 +1937,9 @@ export async function runCaptureWorkerOnce(
       await saveTickCursor(root, spool.path);
 
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
-      const projectId = await resolveSessionProjectId(snapshot.records, spool, sessionId, stdout);
+      const projectIdBefore = state.projectId;
+      const projectId = await resolveSessionProjectId(snapshot.records, spool, sessionId, state, stdout);
+      if (state.projectId !== projectIdBefore) await stateWriter(statePath, state);
       const hasStopSentinel = isNonNegativeInteger(snapshot.records.at(-1)?.hwm_offset);
       const outcomeCountBefore =
         result.processed + result.skipped + result.failed + result.deadLettered +

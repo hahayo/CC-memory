@@ -294,20 +294,30 @@ describe('capture-spool append', () => {
   });
 });
 
-describe('decodeSpoolSegment (inverse of sanitizeSpoolSegment; Codex R1 finding 2)', () => {
-  it('round-trips ASCII, CJK, literal _u, leading dot, spaces and astral code points', () => {
-    for (const id of ['CC-memory', '手機遠端控制', '回收辨識_u測試', '.claude', 'a b/😀', '_plain', '__', '_14_raw']) {
+describe('decodeSpoolSegment (best-effort, 4-hex-digit heuristic; Codex R1b high 1)', () => {
+  it('round-trips ASCII, CJK, literal _u, leading dot, spaces (all BMP)', () => {
+    for (const id of ['CC-memory', '手機遠端控制', '回收辨識_u測試', '.claude', 'a b/c', '_plain', '__', '_14_raw']) {
       expect(decodeSpoolSegment(sanitizeSpoolSegment(id))).toBe(id);
     }
   });
 
-  it('leaves unknown and already-plain segments untouched', () => {
+  it('prefers BMP char + trailing hex letter over an astral reading (中a is far more common than U+4E2DA)', () => {
+    expect(sanitizeSpoolSegment('中a')).toBe('_u4e2da');
+    expect(decodeSpoolSegment('_u4e2da')).toBe('中a');
+    expect(decodeSpoolSegment(sanitizeSpoolSegment('回收demo'))).toBe('回收demo');
+  });
+
+  it('documents the non-injective cases: astral code points and U+1000+"00" vs U+100000 decode to the BMP reading', () => {
+    expect(sanitizeSpoolSegment('😀')).toBe('_u1f600');
+    expect(decodeSpoolSegment('_u1f600')).toBe('\u1f600');
+    expect(sanitizeSpoolSegment('\u{1000}00')).toBe(sanitizeSpoolSegment('\u{100000}'));
+    expect(decodeSpoolSegment('_u100000')).toBe('\u{1000}00');
+  });
+
+  it('leaves unknown, plain segments and lone surrogate escapes untouched', () => {
     expect(decodeSpoolSegment('unknown')).toBe('unknown');
     expect(decodeSpoolSegment('CC-memory')).toBe('CC-memory');
     expect(decodeSpoolSegment('__')).toBe('__');
-  });
-
-  it('does not decode a lone surrogate escape into an invalid code point', () => {
     expect(decodeSpoolSegment('_ud800')).toBe('_ud800');
   });
 });
