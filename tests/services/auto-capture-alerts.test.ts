@@ -80,6 +80,36 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.blockedCount).toBe(0)
   })
 
+  it('treats worker info lines (project-id-remapped) as healthy when all counts are zero', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture info: project-id-remapped session=e78efa99-f321-42f2-83fb-59802cd3c885 old=_____2026Q3 new=AI_Copilot\n' +
+        '[cc-memory] auto-capture summary: processed=1 skipped=1 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=0 transcript-missing=0 parked=0 yielded=1 held=0 embedding-failed=0 primary-provider=codex-cli primary-success=1 fallback-success=0 fallback-failed=0 fatal=0 spool-bytes=59189557 spool-cap-pct=11 windows=1\n',
+      stderr: '',
+    })
+
+    expect(assessment.ok).toBe(true)
+    expect(assessment.nonSummaryLines).toEqual([])
+    expect(assessment.problemLine).toBeNull()
+    expect(assessment.fingerprint).toBeNull()
+  })
+
+  it('still flags warning lines as alertable even when counts are zero', () => {
+    const assessment = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture info: project-id-remapped session=abc old=__ new=AI_Copilot\n' +
+        '[cc-memory] auto-capture warning: transcript-source-unavailable session=abc source=deadbeef:1-2 attempts=3/5\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=1 dead-letter=0 failed=0 fatal=0\n',
+      stderr: '',
+    })
+
+    expect(assessment.ok).toBe(false)
+    expect(assessment.nonSummaryLines).toHaveLength(1)
+    expect(assessment.problemLine).toContain('transcript-source-unavailable')
+  })
+
   it('flags non-summary stdout and dead-letter as alertable', () => {
     const assessment = assessAutoCaptureExecution({
       exitCode: 0,
