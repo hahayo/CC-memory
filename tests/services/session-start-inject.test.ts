@@ -4,15 +4,15 @@
 // 鎖住：render 含污染防線 marker、每列吐輕索引欄位、不含 narrative 全文、
 // rows 空回空字串；buildSessionStartOutput 空內容回 null、有內容為合法
 // SessionStart hook protocol JSON。
+// projectId 解析已改走 src/services/projects.ts resolveProjectIdDetailed（2026-09-03 inject-fix），
+// 舊 cwd basename mirror 測試一併移除；接線證明見 tests/scripts/session-start-inject-node.test.ts。
 
 import { describe, expect, it } from 'vitest';
 import {
   INJECT_SOURCE_MARKER,
   buildSessionStartOutput,
-  projectIdFromCwd,
   renderRecentActivityContext,
   resolveInjectTokenBudget,
-  sanitizeSegmentBashMirror,
 } from '../../src/services/session-start-inject.js';
 import type {
   RecentActivityResult,
@@ -110,37 +110,6 @@ describe('buildSessionStartOutput', () => {
     expect(parsed.hookSpecificOutput?.hookEventName).toBe('SessionStart');
     expect(typeof parsed.hookSpecificOutput?.additionalContext).toBe('string');
     expect(parsed.hookSpecificOutput?.additionalContext).toContain('source=cc-memory-inject');
-  });
-});
-
-describe('sanitizeSegmentBashMirror（bash sanitize_segment 逐字元 mirror，對審 P2）', () => {
-  it('連續不安全字各自換底線，不塌縮（bash ${v//[^...]/_} 語義）', () => {
-    expect(sanitizeSegmentBashMirror('我的專案')).toBe('____');
-    expect(sanitizeSegmentBashMirror('my  project')).toBe('my__project');
-    expect(sanitizeSegmentBashMirror('foo!!bar')).toBe('foo__bar');
-  });
-
-  it('安全字元原樣保留', () => {
-    expect(sanitizeSegmentBashMirror('CC-memory')).toBe('CC-memory');
-    expect(sanitizeSegmentBashMirror('a_b.c-d')).toBe('a_b.c-d');
-  });
-
-  it('前導點：全數剝除後補單一底線（bash while 迴圈語義）', () => {
-    expect(sanitizeSegmentBashMirror('.hidden')).toBe('_hidden');
-    expect(sanitizeSegmentBashMirror('..config')).toBe('_config');
-    expect(sanitizeSegmentBashMirror('..')).toBe('_');
-  });
-
-  it('空字串 → unknown', () => {
-    expect(sanitizeSegmentBashMirror('')).toBe('unknown');
-  });
-});
-
-describe('projectIdFromCwd（cwd 處理逐步 mirror bash）', () => {
-  it('取 basename 並 sanitize；只去單一尾斜線', () => {
-    expect(projectIdFromCwd('/home/user/CC-memory')).toBe('CC-memory');
-    expect(projectIdFromCwd('/home/user/我的專案')).toBe('____');
-    expect(projectIdFromCwd('/home/user/proj/')).toBe('proj');
   });
 });
 

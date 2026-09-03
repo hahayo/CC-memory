@@ -119,12 +119,24 @@ function basenameOf(cwd: string): string {
   return basename(normalized);
 }
 
+/** resolveProjectIdDetailed 回報「哪一層命中」；呼叫端可據此做政策決定（如 SessionStart 注入只認 marker/git-root）。 */
+export type ProjectIdSource = 'explicit' | 'env' | 'marker' | 'git-root' | 'cwd-basename';
+
+export interface ResolvedProjectId {
+  projectId: string;
+  source: ProjectIdSource;
+}
+
 /**
- * 同步 5 層解析。故意做 sync 版本：
+ * 同步 5 層解析（帶命中層）。故意做 sync 版本：
  *   - MCP handler 裡好 call，不要逼每個呼叫者 await
  *   - readFile / git 都是本地 I/O，< 10ms，不值得 async
+ *
+ * 2026-09-03 inject-fix：SessionStart injector 需要知道是否真的解析到 repo（marker / git-root），
+ * 才能拒絕「非 git 目錄靠 basename 撞名」把別的專案近期活動注進來；故拆出帶 source 的版本，
+ * resolveProjectId 維持原簽名薄包一層。
  */
-export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
+export function resolveProjectIdDetailed(input: ResolveProjectIdInput = {}): ResolvedProjectId {
   const {
     explicit,
     cwd = process.cwd(),
@@ -136,28 +148,33 @@ export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
 
   // layer 1: explicit
   const lvl1 = nonEmpty(explicit);
-  if (lvl1) return lvl1;
+  if (lvl1) return { projectId: lvl1, source: 'explicit' };
 
   // layer 2: env（caller 送明示 path 時跳過；codex review round 20 P1）
   if (!cwdIsExplicit) {
     const envSource = envOverride !== undefined ? envOverride : process.env.CC_MEMORY_PROJECT_ID;
     const lvl2 = nonEmpty(envSource);
-    if (lvl2) return lvl2;
+    if (lvl2) return { projectId: lvl2, source: 'env' };
   }
 
   // layer 3: CLAUDE.md marker
   const lvl3 = nonEmpty(tryReadClaudeMdMarker(cwd, readFileSyncFn, existsSyncFn));
-  if (lvl3) return lvl3;
+  if (lvl3) return { projectId: lvl3, source: 'marker' };
 
   // layer 4: git repo root basename（2026-09-02 使用者拍板：取代舊的 git origin owner/repo 層，
   // 與 hooks/capture-common.sh resolve_project_id 一致——無 marker 時 repo 內任何子目錄都解析成同一 id；
   // 跨裝置一致性改靠 CLAUDE.md marker 或相同 clone 目錄名）
   const repoRoot = findRepoRoot(cwd, existsSyncFn, readFileSyncFn);
   const lvl4 = repoRoot === null ? null : nonEmpty(basenameOf(repoRoot));
-  if (lvl4) return lvl4;
+  if (lvl4) return { projectId: lvl4, source: 'git-root' };
 
   // layer 5: basename(cwd)
-  return basenameOf(cwd);
+  return { projectId: basenameOf(cwd), source: 'cwd-basename' };
+}
+
+/** 同步 5 層解析，只回 id（既有簽名；細節見 resolveProjectIdDetailed）。 */
+export function resolveProjectId(input: ResolveProjectIdInput = {}): string {
+  return resolveProjectIdDetailed(input).projectId;
 }
 
 // ---------------------------------------------------------------------------

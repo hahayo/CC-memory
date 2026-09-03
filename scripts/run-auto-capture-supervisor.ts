@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process'
-import { constants as fsConstants } from 'node:fs'
-import { access, open, readFile } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { homedir, hostname as resolveHostname } from 'node:os'
 import path from 'node:path'
 import {
@@ -19,6 +18,7 @@ import {
   type AutoCaptureAlertTarget,
   type AutoCaptureExecutionResult,
 } from '../src/services/auto-capture-alerts.js'
+import { readSecureMode0600RegularFile } from '../src/utils/secure-file.js'
 
 const DEFAULT_REPO_ROOT = path.resolve(__dirname, '..')
 const DEFAULT_PROJECT_URL_FILE = path.join(homedir(), '.ccm-project-url')
@@ -197,33 +197,6 @@ export function databaseTargetIdentity(databaseUrl: string): string {
     : rawHostname
   const port = parsed.port || '5432'
   return `${hostname}:${port}${parsed.pathname}`
-}
-
-async function readSecureMode0600RegularFile(filePath: string, label: string): Promise<string> {
-  let handle: Awaited<ReturnType<typeof open>>
-  try {
-    handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
-      throw new Error(`${label} must be a regular file (symlinks are not accepted)`)
-    }
-    throw error
-  }
-  try {
-    const metadata = await handle.stat()
-    if (!metadata.isFile()) {
-      throw new Error(`${label} must be a regular file (symlinks are not accepted)`)
-    }
-    const mode = metadata.mode & 0o777
-    if (mode !== 0o600) {
-      throw new Error(
-        `${label} must have mode 0600 (actual: ${mode.toString(8).padStart(4, '0')})`
-      )
-    }
-    return handle.readFile('utf8')
-  } finally {
-    await handle.close()
-  }
 }
 
 export async function loadSecureProductionApprovalDocument(filePath: string): Promise<string> {
