@@ -15,10 +15,72 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import {
   resolveProjectId,
+  resolveProjectIdDetailed,
   listProjects,
   projectExists,
 } from '../../src/services/projects.js';
 import { connectTestDb, type Sql } from '../helpers/db.js';
+
+describe('resolveProjectIdDetailed (reports which layer resolved; 2026-09-03 inject-fix)', () => {
+  const originalEnv = process.env.CC_MEMORY_PROJECT_ID;
+
+  beforeEach(() => {
+    delete process.env.CC_MEMORY_PROJECT_ID;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.CC_MEMORY_PROJECT_ID;
+    else process.env.CC_MEMORY_PROJECT_ID = originalEnv;
+  });
+
+  it('explicit / env sources', () => {
+    expect(resolveProjectIdDetailed({ explicit: 'x', cwd: '/nowhere/foo' })).toEqual({
+      projectId: 'x',
+      source: 'explicit',
+    });
+    expect(resolveProjectIdDetailed({ envOverride: 'from-env', cwd: '/nowhere/foo' })).toEqual({
+      projectId: 'from-env',
+      source: 'env',
+    });
+    // cwdIsExplicit 跳過 env 層
+    expect(
+      resolveProjectIdDetailed({ envOverride: 'from-env', cwd: '/nowhere/foo', cwdIsExplicit: true })
+    ).toEqual({ projectId: 'foo', source: 'cwd-basename' });
+  });
+
+  it('marker / git-root / cwd-basename sources', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cc-memory-detailed-'));
+    try {
+      const repo = join(dir, 'my-repo');
+      const sub = join(repo, 'src');
+      mkdirSync(join(repo, '.git'), { recursive: true });
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      expect(resolveProjectIdDetailed({ cwd: sub, cwdIsExplicit: true })).toEqual({
+        projectId: 'my-repo',
+        source: 'git-root',
+      });
+
+      writeFileSync(join(repo, 'CLAUDE.md'), '<!-- cc-memory: project="marked" -->\n');
+      expect(resolveProjectIdDetailed({ cwd: sub, cwdIsExplicit: true })).toEqual({
+        projectId: 'marked',
+        source: 'marker',
+      });
+
+      const plain = join(dir, 'CC-memory');
+      mkdirSync(plain);
+      expect(resolveProjectIdDetailed({ cwd: plain, cwdIsExplicit: true })).toEqual({
+        projectId: 'CC-memory',
+        source: 'cwd-basename',
+      });
+      // resolveProjectId 與 detailed 版一致
+      expect(resolveProjectId({ cwd: plain, cwdIsExplicit: true })).toBe('CC-memory');
+      expect(resolveProjectId({ cwd: sub, cwdIsExplicit: true })).toBe('marked');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('resolveProjectId (5-layer priority)', () => {
   const originalEnv = process.env.CC_MEMORY_PROJECT_ID;
