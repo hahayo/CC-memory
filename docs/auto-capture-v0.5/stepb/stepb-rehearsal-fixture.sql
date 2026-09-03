@@ -1,5 +1,5 @@
 -- Step B 彩排 fixture（只在本機測試 PG 5438 跑）
-DELETE FROM observations WHERE session_id IN ('sess-rehearsal-1','sess-rehearsal-2');
+DELETE FROM observations WHERE session_id LIKE 'sess-rehearsal-%';
 DELETE FROM project_memories WHERE idempotency_key LIKE 'capture:v05:%:sess-rehearsal-%';
 INSERT INTO project_memories (id, project_id, type, status, summary, idempotency_key)
 VALUES
@@ -10,6 +10,7 @@ INSERT INTO observations (id, project_id, session_id, rollup_memory_id, type, ti
 VALUES
   ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1', '__', 'sess-rehearsal-1', '11111111-1111-1111-1111-111111111111', 'decision', 'o1', 'n1', now(), 'active', 1, 'rehearsal', 'hash-o1', 'rehearsal'),
   ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2', '__', 'sess-rehearsal-2', '22222222-2222-2222-2222-222222222222', 'decision', 'o2', 'n2', now(), 'active', 1, 'rehearsal', 'hash-o2', 'rehearsal'),
-  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3', '__', 'sess-rehearsal-2', '22222222-2222-2222-2222-222222222222', 'decision', 'o3', 'n3', now(), 'active', 1, 'rehearsal', 'hash-o3', 'rehearsal');
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3', '__', 'sess-rehearsal-2', '22222222-2222-2222-2222-222222222222', 'decision', 'o3', 'n3', now(), 'active', 1, 'rehearsal', 'hash-o3', 'rehearsal'),
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa9', '__', 'sess-rehearsal-9', NULL, 'decision', 'o9', 'n9', now(), 'active', 1, 'rehearsal', 'hash-o9', 'rehearsal');
 SELECT 'before' AS phase, id, project_id, idempotency_key, status FROM project_memories WHERE idempotency_key LIKE 'capture:v05:%:sess-rehearsal-%' ORDER BY id;
 SELECT 'before' AS phase, id, project_id, rollup_memory_id FROM observations WHERE session_id LIKE 'sess-rehearsal-%' ORDER BY id;
