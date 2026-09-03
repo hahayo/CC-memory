@@ -1786,6 +1786,10 @@ export function rotateSessionsAfterCursor(sessions: SpoolSession[], cursorPath: 
  *      幾分鐘到一小時內就進記憶，不必等 12k 筆舊 backlog 輪完；
  *   2. stale：其餘依 path 輪流（round-robin cursor 只在這一層推進）。
  * freshWindowMs=0 → 全部視為 stale（舊行為）。
+ *
+ * 刻意的取捨（reviewer 2026-09-04 提出、使用者拍板時已接受）：fresh 層永遠先走，正式 unit
+ * cap=1 時只要有任一 fresh session 有待處理內容，stale 層該 tick 就輪不到——7 月舊 backlog
+ * 可能永遠消不完，其去留另議（封存／重歸屬）。若日後要保底，在此加「每 N tick 先跑 stale」。
  */
 export function orderSessionsForTick(
   sessions: SpoolSession[],
