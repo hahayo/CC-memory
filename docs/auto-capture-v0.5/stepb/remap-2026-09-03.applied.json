@@ -1,0 +1,9 @@
+{
+  "remap_sha256": "d6aaad999aeb5a5a619dc2930d9f3197dded49d56dfb4e213d12195e982a6475",
+  "db": "cc_memory_project",
+  "system_id": "7656209034643652651",
+  "identity": "cc_memory_project addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-03 12:16:10.26692+00",
+  "executed_at": "2026-09-03 12:37:21.947238+00",
+  "rows_updated": 578,
+  "rollback_note": "automatic rollback only valid while no known application writer (capture worker / MCP) touched moved rollups; ad-hoc SQL writers that do not bump updated_at are not detected — forbidden during the rollback window; otherwise manual reversal via the committed table"
+}

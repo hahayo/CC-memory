@@ -1,0 +1,70 @@
+test DB system_identifier=7678371346194731046
+== scenario 1: happy path (single transaction) + rollback
+mode=--preflight rehearsal=True rows=6 actionable=2 skipped=4 remap_sha256=f7d99295e53beea565ec4685bcc9b37eee03fbcbc68114a87249147ad77ba0d1
+preflight: {"db": "cc_memory_test", "ro": "on", "system_id": "7678371346194731046", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+PREFLIGHT OK
+mode=--execute rehearsal=True rows=6 actionable=2 skipped=4 remap_sha256=f7d99295e53beea565ec4685bcc9b37eee03fbcbc68114a87249147ad77ba0d1
+preflight: {"db": "cc_memory_test", "ro": "on", "system_id": "7678371346194731046", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:36:37+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:41: NOTICE:  in-txn precheck: collapsed set == expected (6 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:56: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:67: NOTICE:  block rows 1-2 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:80: NOTICE:  postcheck ok: cross_project_fk_now=0 obs_collapsed_remaining=3 pm_collapsed_remaining=1
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:98: NOTICE:  postcheck: collapsed set == expected (4 rows)
+COMMITTED at 2026-09-03 12:36:37.434618+00 UTC; identity: cc_memory_test addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-02 13:25:58.475906+00
+wrote stepb-rehearsal-remap.applied.json
+assert ok: 3 rows now under AI_Copilot (pm1 + existing pm3 + obs1)
+assert ok: 4 needs_human/unmapped rows untouched (pm2, obs2, obs3, obs9)
+assert ok: pm1 idempotency_key rewritten
+assert ok: applied.json written
+assert ok: re-execute refused (applied.json exists)
+mode=--rollback rehearsal=True rows=6 actionable=2 skipped=4 remap_sha256=f7d99295e53beea565ec4685bcc9b37eee03fbcbc68114a87249147ad77ba0d1
+preflight: {"db": "cc_memory_test", "ro": "on", "system_id": "7678371346194731046", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:36:37+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:39: NOTICE:  in-txn precheck: collapsed set == expected (4 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:54: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:73: NOTICE:  rollback refusal checks ok: outside_obs=0 touched_rollups=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:84: NOTICE:  block rows 1-2 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:97: NOTICE:  postcheck ok: cross_project_fk_now=0 obs_collapsed_remaining=4 pm_collapsed_remaining=2
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:117: NOTICE:  postcheck: collapsed set == expected (6 rows)
+COMMITTED at 2026-09-03 12:36:37.564038+00 UTC; identity: cc_memory_test addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-02 13:25:58.475906+00
+renamed stepb-rehearsal-remap.applied.json → stepb-rehearsal-remap.rolled-back.json
+assert ok: rollback restores exact snapshot
+assert ok: applied.json renamed to rolled-back
+== scenario 2: in-transaction guard (tampered map row) → whole transaction rolled back, nothing applied
+assert ok: advisory preflight catches tampered row
+assert ok: failure reason is ROW_COUNT=0 on the tampered row
+assert ok: all-or-nothing: snapshot unchanged (pm1 update rolled back with the rest)
+assert ok: no applied.json after failed transaction
+== scenario 3: writer intervention after execute → automatic rollback refused
+mode=--execute rehearsal=True rows=6 actionable=2 skipped=4 remap_sha256=f7d99295e53beea565ec4685bcc9b37eee03fbcbc68114a87249147ad77ba0d1
+preflight: {"db": "cc_memory_test", "ro": "on", "system_id": "7678371346194731046", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:36:37+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:41: NOTICE:  in-txn precheck: collapsed set == expected (6 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:56: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:67: NOTICE:  block rows 1-2 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:80: NOTICE:  postcheck ok: cross_project_fk_now=0 obs_collapsed_remaining=3 pm_collapsed_remaining=1
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.execute.txn.sql:98: NOTICE:  postcheck: collapsed set == expected (4 rows)
+COMMITTED at 2026-09-03 12:36:37.986419+00 UTC; identity: cc_memory_test addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-02 13:25:58.475906+00
+wrote stepb-rehearsal-remap.applied.json
+assert ok: rollback refused (outside observation)
+assert ok: DB unchanged after refused rollback (a)
+assert ok: rollback refused (rollup touched after execute)
+assert ok: DB unchanged after refused rollback (b)
+mode=--rollback rehearsal=True rows=6 actionable=2 skipped=4 remap_sha256=f7d99295e53beea565ec4685bcc9b37eee03fbcbc68114a87249147ad77ba0d1
+preflight: {"db": "cc_memory_test", "ro": "on", "system_id": "7678371346194731046", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:36:38+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:39: NOTICE:  in-txn precheck: collapsed set == expected (4 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:54: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:73: NOTICE:  rollback refusal checks ok: outside_obs=0 touched_rollups=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:84: NOTICE:  block rows 1-2 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:97: NOTICE:  postcheck ok: cross_project_fk_now=0 obs_collapsed_remaining=4 pm_collapsed_remaining=2
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/stepb-rehearsal-remap.rollback.txn.sql:117: NOTICE:  postcheck: collapsed set == expected (6 rows)
+COMMITTED at 2026-09-03 12:36:38.385222+00 UTC; identity: cc_memory_test addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-02 13:25:58.475906+00
+renamed stepb-rehearsal-remap.applied.json → stepb-rehearsal-remap.rolled-back.json
+assert ok: rollback succeeds once no writer intervention remains
+== scenario 4: within-map duplicate target → refused before touching DB
+assert ok: within-map duplicate refused before any DB access
+assert ok: DB unchanged
+== cleanup
+REHEARSAL PASSED

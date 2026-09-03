@@ -1,0 +1,42 @@
+[stepb-run] preconditions ok: builder=fd4ccb0e00a5d4338b7959bec7033065fa7c1f825ba9ae264bf96bbd872b2c46 head=1b337c59daf20cc7880f72ad05a880efa3c1fcc5
+[stepb-run] lock held since 2026-09-03T20:37:10+08:00
+{
+  "rows": 1690,
+  "mapped_obs": 543,
+  "mapped_pm_update": 35,
+  "mapped_pm_archive": 38,
+  "unmapped": 1074,
+  "reasons": {
+    "transcript 已刪且目錄名對不到唯一真實路徑": 119,
+    "needs_human": 106,
+    "needs_human（rollup 合併）": 747,
+    "needs_human（表內自撞 rollup）": 6,
+    "needs_human（表內自撞 observation）": 96
+  },
+  "new_ids": {
+    "AI_Copilot": 66,
+    "recycling-recognition": 6,
+    ".claude": 1,
+    "recycling-recognition-county-admin-20260817": 2,
+    "ops-db-master": 2,
+    "finetune-eval": 1,
+    "AI_Teacher": 1
+  },
+  "encoded_index_size": 51469
+}
+mode=--preflight rehearsal=False rows=1690 actionable=578 skipped=1112 remap_sha256=d6aaad999aeb5a5a619dc2930d9f3197dded49d56dfb4e213d12195e982a6475
+preflight: {"db": "cc_memory_project", "ro": "on", "system_id": "7656209034643652651", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+PREFLIGHT OK
+3076964 docs(auto-capture): Step B 對照表最終版（execute 前 2026-09-03T20:37:15+08:00 於 flock 內重建）
+[stepb-run] committed map sha256=d6aaad999aeb5a5a619dc2930d9f3197dded49d56dfb4e213d12195e982a6475
+mode=--execute rehearsal=False rows=1690 actionable=578 skipped=1112 remap_sha256=d6aaad999aeb5a5a619dc2930d9f3197dded49d56dfb4e213d12195e982a6475
+preflight: {"db": "cc_memory_project", "ro": "on", "system_id": "7656209034643652651", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:37:16+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:1725: NOTICE:  in-txn precheck: collapsed set == expected (1690 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:2316: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:3323: NOTICE:  block rows 1-500 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:3485: NOTICE:  block rows 501-578 ok
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:3498: NOTICE:  postcheck ok: cross_project_fk_now=0 obs_collapsed_remaining=1055 pm_collapsed_remaining=57
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:4624: NOTICE:  postcheck: collapsed set == expected (1112 rows)
+COMMITTED at 2026-09-03 12:37:21.947238+00 UTC; identity: cc_memory_project addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-03 12:16:10.26692+00
+wrote remap-2026-09-03.applied.json
