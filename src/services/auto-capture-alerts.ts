@@ -3,6 +3,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 const SUMMARY_PREFIX = '[cc-memory] auto-capture summary:'
+// 2026-09-03：worker 的純資訊行（例如 PR #23 的 project-id-remapped）不代表故障；
+// 若計入 nonSummaryLines 會讓每次 remap 都判成失敗、exit 1、且 problemLine 含 session id → 每次新 fingerprint 各發一則 Telegram 告警。
+export const INFO_PREFIX = '[cc-memory] auto-capture info:'
 const DEFAULT_TELEGRAM_API_BASE = 'https://api.telegram.org'
 export const DEFAULT_ALERT_TIMEOUT_MS = 10_000
 export const DEFAULT_RENOTIFY_MS = 6 * 60 * 60 * 1000
@@ -210,7 +213,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const stdoutLines = normalizeLines(result.stdout)
   const stderrLines = normalizeLines(result.stderr)
   const summaryLine = stdoutLines.find((line) => line.startsWith(SUMMARY_PREFIX)) ?? null
-  const nonSummaryLines = stdoutLines.filter((line) => line !== summaryLine)
+  // info 行只是紀錄，不影響健康判定（warning／skipped／其他任何非 summary 行仍算問題）
+  const nonSummaryLines = stdoutLines.filter((line) => line !== summaryLine && !line.startsWith(INFO_PREFIX))
   const deadLetterCount = parseDeadLetterCount(summaryLine)
   const failedCount = parseFailedCount(summaryLine)
   const rateLimitedCount = parseRateLimitedCount(summaryLine)
