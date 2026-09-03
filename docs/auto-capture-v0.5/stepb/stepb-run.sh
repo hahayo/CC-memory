@@ -15,6 +15,18 @@ STAMP="$(date +%H%M%S)"
 # builder 只需要 src/config.ts 不要 throw；這個 DSN 指向本機埠 1，不會連線（拆兩段是避開 secret-scan hook）
 FAKE_DSN='postgres://x:y'; FAKE_DSN="${FAKE_DSN}@127.0.0.1:1/nope"
 
+# 0) fail-closed 前提核對（Codex R2c fix 2）：builder 版本＝已審版本、兩個 worktree 乾淨且在預期分支
+BUILDER_SHA_EXPECTED='905194f01eb4779a9f4a217cb9b3a99004ea6853e6157b00a2ec399d33ccfe06'   # R2c 審過的 stepb-build-remap.ts
+BUILDER_HEAD_EXPECTED='1b337c59daf20cc7880f72ad05a880efa3c1fcc5'                         # worktree ccm-remap HEAD（= PR #23 最後 commit）
+BUILDER_WT="$(realpath "$BUILDER_WT")"; TABLE_WT="$(realpath "$TABLE_WT")"
+[ "$(sha256sum "$BUILDER_WT/.scratch/stepb-build-remap.ts" | cut -c1-64)" = "$BUILDER_SHA_EXPECTED" ] || { echo "refuse: builder sha256 != reviewed"; exit 5; }
+[ "$(git -C "$BUILDER_WT" rev-parse HEAD)" = "$BUILDER_HEAD_EXPECTED" ] || { echo "refuse: builder worktree HEAD != expected"; exit 5; }
+[ -z "$(git -C "$BUILDER_WT" status --porcelain --untracked-files=no)" ] || { echo "refuse: builder worktree has tracked changes"; exit 5; }
+[ "$(git -C "$TABLE_WT" rev-parse --abbrev-ref HEAD)" = "feature/stepb-remap-table" ] || { echo "refuse: table worktree not on feature/stepb-remap-table"; exit 5; }
+[ -z "$(git -C "$TABLE_WT" status --porcelain --untracked-files=no)" ] || { echo "refuse: table worktree dirty"; exit 5; }
+[ "$(sha256sum "$D/stepb-apply.py" | cut -c1-64)" = "$(sha256sum "$TABLE_WT/docs/auto-capture-v0.5/stepb/stepb-apply.py" | cut -c1-64)" ] || { echo "refuse: stepb-apply.py differs from committed copy"; exit 5; }
+echo "[stepb-run] preconditions ok: builder=$BUILDER_SHA_EXPECTED head=$BUILDER_HEAD_EXPECTED"
+
 exec 9>"$LOCK"
 if ! flock -n 9; then echo "worker tick in progress (lock held); abort, retry later"; exit 4; fi
 echo "[stepb-run] lock held since $(date -Is)"
@@ -36,7 +48,10 @@ sha256=$(sha256sum "$MAP" | cut -c1-64)
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_012tCjQsDWEhBzGdsbR4S2W8" && git log --oneline -1 )
+# committed blob 必須＝實際要執行的 $MAP（Codex R2c fix 2）
+[ "$(git -C "$TABLE_WT" show HEAD:docs/auto-capture-v0.5/remap-2026-09-03.jsonl | sha256sum | cut -c1-64)" = "$(sha256sum "$MAP" | cut -c1-64)" ] || { echo "refuse: committed map != \$MAP"; exit 5; }
+echo "[stepb-run] committed map sha256=$(sha256sum "$MAP" | cut -c1-64)"
 
-# 4) 釋放本腳本的鎖，立刻交給 apply.py（它自己再拿同一把鎖；中間空窗以毫秒計，且交易內有完整檢查兜底）
+# 4) 釋放本腳本的鎖，交給 apply.py（它先跑唯讀 preflight 再拿同一把鎖，空窗約數秒；交易內有集合相等＋目標鍵衝突檢查兜底，tick 擠進來只會讓交易 RAISE、DB 不變）
 flock -u 9
 python3 "$D/stepb-apply.py" "$MAP" --execute | tee "$D/execute.$STAMP.out"

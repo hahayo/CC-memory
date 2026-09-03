@@ -10,6 +10,9 @@ SP=/home/haha/.cache/cc-memory/stepb-2026-09-03
 export STEPB_DATABASE_URL="${TEST_DATABASE_URL:?export TEST_DATABASE_URL first}"
 case "$STEPB_DATABASE_URL" in *localhost:5438/cc_memory_test*) ;; *) echo "refuse: not the local test DB"; exit 1;; esac
 APPLY="$SP/stepb-apply.py"
+printf '%s\n' "SELECT system_identifier FROM pg_control_system();" > "$SP/stepb-rehearsal-sysid.sql"
+export STEPB_EXPECTED_SYSTEM_ID="$(psql "$STEPB_DATABASE_URL" -X -q -A -t -f "$SP/stepb-rehearsal-sysid.sql")"
+echo "test DB system_identifier=$STEPB_EXPECTED_SYSTEM_ID"
 REMAP="$SP/stepb-rehearsal-remap.jsonl"
 SNAP="$SP/stepb-rehearsal-snapshot.sql"
 cat > "$SNAP" <<'SQL'

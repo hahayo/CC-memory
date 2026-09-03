@@ -11,6 +11,9 @@
   stepb-apply.py <remap.jsonl> --rollback                   同樣單一交易反向套用；交易內另加兩個拒絕條件（任一成立 → RAISE，DB 不變，交人工）：
                                                               (a) 對照表以外的 observation 指向本次搬動過的 rollup（worker 在 execute 後寫了新列）
                                                               (b) 搬動過的 rollup 的 updated_at > executed_at（worker 在 execute 後 by-id 更新過該 rollup）
+                                                            保證範圍（Codex R2c fix 4）：只涵蓋已知的應用程式 writer（capture worker、MCP cc_memory_save／refine／archive，
+                                                            它們新增列或把 updated_at 設為 now()）。操作前提：回滾判斷窗內禁止臨時 SQL 直接改這兩張表；
+                                                            不更新 updated_at 的臨時 SQL 修改不會被察覺。
   加 --rehearsal：允許 STEPB_DATABASE_URL（必須是 localhost:5438/cc_memory_test）；正式模式忽略該環境變數，只讀 ~/.ccm-project-url，且 current_database() 必須精確 = cc_memory_project。
 
 守衛（每條 UPDATE 的 WHERE）：
@@ -30,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROD_DB_NAME = 'cc_memory_project'
+PROD_SYSTEM_ID = '7656209034643652651'  # pg_control_system().system_identifier，證據 t5-result.txt（2026-09-03 唯讀查得）；Codex R2c fix 1
 TEST_DB_NAME = 'cc_memory_test'
 LOCK_PATH = Path.home() / '.cache/cc-memory/auto-capture-run.lock'
 DO_BLOCK_ROWS = 500  # 只是把 UPDATE 切成多個 DO 區塊方便 psql 輸出定位，仍在同一交易內
@@ -102,14 +106,21 @@ END $chk$;
 """
 
 
-def identity_check_sql(expected_db: str) -> str:
+def identity_check_sql(expected_db: str, expected_system_id: str) -> str:
+    """交易內：current_database() 與 pg_control_system().system_identifier 都必須精確相等（Codex R2c fix 1）。"""
     return f"""
 DO $id$
+DECLARE sysid text;
 BEGIN
   IF current_database() <> {q(expected_db)} THEN
     RAISE EXCEPTION 'wrong database: % (expected {expected_db})', current_database();
   END IF;
+  SELECT system_identifier::text INTO sysid FROM pg_control_system();
+  IF sysid <> {q(expected_system_id)} THEN
+    RAISE EXCEPTION 'wrong PostgreSQL instance: system_identifier=% (expected {expected_system_id})', sysid;
+  END IF;
 END $id$;
+SELECT 'system_id' AS k, system_identifier::text AS v FROM pg_control_system();
 SELECT 'identity' AS k, current_database() || ' addr=' || coalesce(inet_server_addr()::text, 'unix') || ' port=' || coalesce(inet_server_port()::text, '-')
        || ' postmaster_start=' || pg_postmaster_start_time()::text AS v;
 """
@@ -213,6 +224,7 @@ def preflight_sql(rows: list[dict], reverse: bool, expected_db: str) -> str:
     parts = ["\\set ON_ERROR_STOP 1",
              "SELECT 'db' AS check, current_database() AS n;",
              "SELECT 'ro' AS check, current_setting('default_transaction_read_only') AS n;",
+             "SELECT 'system_id' AS check, system_identifier::text AS n FROM pg_control_system();",
              collapsed_set_check_sql(expected_collapsed, 'preflight'),
              "SELECT 'collapsed_set_equal' AS check, 0 AS n;"]
     pm = [r for r in work if r['table'] == 'project_memories']
@@ -253,7 +265,7 @@ SELECT 'ob_rollup_project_mismatch_after' AS check, count(*) AS n FROM e JOIN pr
 
 
 # ---------------------------------------------------------------- 單一交易（execute／rollback 共用）
-def transaction_sql(rows: list[dict], reverse: bool, expected_db: str, executed_at_utc: str | None) -> str:
+def transaction_sql(rows: list[dict], reverse: bool, expected_db: str, expected_system_id: str, executed_at_utc: str | None) -> str:
     work = actionable(rows)
     before_collapsed = rows if not reverse else skipped(rows)
     after_collapsed = skipped(rows) if not reverse else rows
@@ -263,7 +275,7 @@ def transaction_sql(rows: list[dict], reverse: bool, expected_db: str, executed_
              "SET LOCAL statement_timeout = '300s';",
              # 讀不擋、寫全擋（含 MCP 的 INSERT／UPDATE／archive）；worker 另有 flock
              "LOCK TABLE project_memories, observations IN SHARE ROW EXCLUSIVE MODE;",
-             identity_check_sql(expected_db),
+             identity_check_sql(expected_db, expected_system_id),
              collapsed_set_check_sql(before_collapsed, 'in-txn precheck')]
     parts.append(target_conflict_check_sql(work, reverse))
     if reverse:
@@ -312,9 +324,13 @@ def main() -> int:
         if f'localhost:5438/{TEST_DB_NAME}' not in url:
             raise SystemExit(f'rehearsal requires STEPB_DATABASE_URL pointing at localhost:5438/{TEST_DB_NAME}')
         expected_db = TEST_DB_NAME
+        expected_system_id = os.environ.get('STEPB_EXPECTED_SYSTEM_ID', '')
+        if not expected_system_id:
+            raise SystemExit('rehearsal requires STEPB_EXPECTED_SYSTEM_ID (query pg_control_system() on the test DB first)')
     else:
         url = (Path.home() / '.ccm-project-url').read_text(encoding='utf-8').strip()
         expected_db = PROD_DB_NAME
+        expected_system_id = PROD_SYSTEM_ID
     print(f'mode={mode} rehearsal={rehearsal} rows={len(rows)} actionable={len(work)} skipped={len(rows) - len(work)} remap_sha256={remap_sha}')
 
     applied = path.with_name(f'{path.stem}.applied.json')
@@ -328,6 +344,8 @@ def main() -> int:
             raise SystemExit(f'remap sha256 mismatch: applied={meta.get("remap_sha256")} now={remap_sha}; refuse')
         if meta.get('db') != expected_db:
             raise SystemExit(f'applied.json db={meta.get("db")} != {expected_db}; refuse')
+        if meta.get('system_id') != expected_system_id:
+            raise SystemExit(f'applied.json system_id={meta.get("system_id")} != {expected_system_id}; refuse')
 
     if not work:
         print('nothing to do'); return 0
@@ -339,7 +357,8 @@ def main() -> int:
     checks = parse_kv(out)
     print('preflight:', json.dumps(checks, ensure_ascii=False))
     ok = code == 0 and checks.get('db') == expected_db and checks.get('ro') == 'on' and \
-        all(checks.get(k, 'x') == '0' for k in checks if k not in ('db', 'ro'))
+        checks.get('system_id') == expected_system_id and \
+        all(checks.get(k, 'x') == '0' for k in checks if k not in ('db', 'ro', 'system_id'))
     if not ok and not (rehearsal and os.environ.get('STEPB_REHEARSAL_SKIP_PREFLIGHT') == '1' and mode != '--preflight'):
         print('PREFLIGHT FAILED'); print(out[-2000:]); return 3
     if mode == '--preflight':
@@ -357,21 +376,30 @@ def main() -> int:
             print('worker tick in progress (lock held); try again in ~30 s'); return 4
         print(f'flock acquired {LOCK_PATH}; started {datetime.now(timezone.utc).isoformat(timespec="seconds")}')
         sql_file = path.with_name(f'{path.stem}.{mode.strip("-")}.txn.sql')
-        sql_file.write_text(transaction_sql(rows, reverse, expected_db, meta.get('executed_at') if meta else None), encoding='utf-8')
+        sql_file.write_text(transaction_sql(rows, reverse, expected_db, expected_system_id, meta.get('executed_at') if meta else None), encoding='utf-8')
         code, out = run_psql(url, sql_file, read_only=False)
         kv = parse_kv(out)
         notices = [l for l in out.splitlines() if l.startswith('psql:') or 'NOTICE' in l or 'ERROR' in l]
         print('\n'.join(notices[-12:]))
-        if code != 0 or kv.get('committed') != 'yes':
-            print(f'TRANSACTION ROLLED BACK (exit={code}); DB unchanged.')
+        if kv.get('committed') != 'yes':
+            server_error = any(('ERROR:' in l) for l in out.splitlines())
+            if server_error:
+                # 伺服器端 RAISE／錯誤 → psql 在 ON_ERROR_STOP 下不會送 COMMIT，交易被 ROLLBACK
+                print(f'TRANSACTION ROLLED BACK by server error (exit={code}); DB unchanged.')
+            else:
+                # 沒看到伺服器錯誤卻也沒收到 committed|yes：可能 COMMIT 已完成但回傳中斷（Codex R2c fix 3）
+                print(f'COMMIT OUTCOME INDETERMINATE (exit={code}, no server ERROR, no committed marker). DO NOT RETRY.')
+                print('Determine state read-only first: `--preflight` passing == still before-state (nothing applied);')
+                print('a rollback-direction preflight passing == after-state (commit happened; write applied.json by hand from this output).')
+                print('Mixed state is impossible for a single transaction; if both preflights fail, stop and hand over to a human.')
             print(out[-2000:])
             return 2
         print(f"COMMITTED at {kv.get('executed_at')} UTC; identity: {kv.get('identity')}")
         if mode == '--execute':
             applied.write_text(json.dumps({
-                'remap_sha256': remap_sha, 'db': expected_db, 'identity': kv.get('identity'),
+                'remap_sha256': remap_sha, 'db': expected_db, 'system_id': kv.get('system_id'), 'identity': kv.get('identity'),
                 'executed_at': kv.get('executed_at'), 'rows_updated': len(work),
-                'rollback_note': 'automatic rollback only valid while no writer touched moved rollups; otherwise manual reversal via the committed table',
+                'rollback_note': 'automatic rollback only valid while no known application writer (capture worker / MCP) touched moved rollups; ad-hoc SQL writers that do not bump updated_at are not detected — forbidden during the rollback window; otherwise manual reversal via the committed table',
             }, ensure_ascii=False, indent=2), encoding='utf-8')
             print(f'wrote {applied.name}')
         else:
