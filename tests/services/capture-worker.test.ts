@@ -127,7 +127,8 @@ function makeHarness(overrides: Partial<Pick<TestHarness, 'projectId' | 'session
   return {
     root,
     spoolDir,
-    env: { CC_MEMORY_SPOOL_DIR: spoolDir, CC_CAPTURE_RETRY_MIN_INTERVAL_MS: '0' },
+    // 既有測試以 path 順序推理；fresh-first（2026-09-04）預設關閉，需要的測試自行打開。
+    env: { CC_MEMORY_SPOOL_DIR: spoolDir, CC_CAPTURE_RETRY_MIN_INTERVAL_MS: '0', CC_CAPTURE_FRESH_WINDOW_MS: '0' },
     projectId,
     sessionId,
     transcriptPath,
@@ -4486,5 +4487,106 @@ describe('T1: backlog project_id remap from transcript cwd', () => {
 
     expect(llm.calls).toHaveLength(1);
     expect(llm.calls[0].projectId).toBe(goneName);
+  });
+});
+
+describe('fresh-first ordering and cursor fallback (2026-09-04, no DB)', () => {
+  const TEN_DAYS_AGO = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+  const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+
+  function sibling(base: TestHarness, tag: string): TestHarness {
+    const next: TestHarness = {
+      ...base,
+      projectId: `capture-worker-order-${tag}-${randomUUID()}`,
+      sessionId: `session-${tag}-${randomUUID()}`,
+      transcriptPath: join(base.root, `${tag}.transcript.jsonl`),
+    };
+    writeFileSync(next.transcriptPath, '', { mode: 0o600 });
+    return next;
+  }
+
+  async function seedPending(harness: TestHarness, text: string, timestamp: string): Promise<void> {
+    const end = appendTranscriptEntries(harness.transcriptPath, [{ message: text }]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: end, timestamp });
+  }
+
+  function age(harness: TestHarness): void {
+    utimesSync(spoolPath(harness), TEN_DAYS_AGO, TEN_DAYS_AGO);
+  }
+
+  function extraction(label: string) {
+    return rawExtraction({ summary: `${label} processed`, observations: [] });
+  }
+
+  it('processes a fresh session before a stale one that sorts first, without moving the stale cursor', async () => {
+    const stale = makeHarness({
+      projectId: `capture-worker-order-a-${randomUUID()}`,
+      sessionId: `session-a-${randomUUID()}`,
+    });
+    stale.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    stale.env.CC_CAPTURE_FRESH_WINDOW_MS = String(72 * 60 * 60 * 1000);
+    const fresh = sibling(stale, 'z');
+    await seedPending(stale, 'stale A', '2026-07-06T10:00:00.000Z');
+    age(stale);
+    await seedPending(fresh, 'fresh Z', '2026-07-06T10:01:00.000Z');
+    const cursorFile = join(stale.spoolDir, '.tick-cursor.json');
+    const llm = mockLlm([extraction('Z'), extraction('A')]);
+
+    const tick1 = await runWorker(stale, { db: fakeDb, llm });
+    expect(tick1.processed).toBe(1);
+    expect(llm.calls.map((c) => c.sessionId)).toEqual([fresh.sessionId]);
+    // fresh 層不推進 round-robin cursor
+    expect(existsSync(cursorFile)).toBe(false);
+
+    const tick2 = await runWorker(stale, { db: fakeDb, llm });
+    expect(tick2.processed).toBe(1);
+    expect(llm.calls.map((c) => c.sessionId)).toEqual([fresh.sessionId, stale.sessionId]);
+    expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({ lastSessionPath: spoolPath(stale) });
+  });
+
+  it('CC_CAPTURE_FRESH_WINDOW_MS=0 restores pure path order', async () => {
+    const stale = makeHarness({
+      projectId: `capture-worker-order-a-${randomUUID()}`,
+      sessionId: `session-a-${randomUUID()}`,
+    });
+    stale.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    stale.env.CC_CAPTURE_FRESH_WINDOW_MS = '0';
+    const fresh = sibling(stale, 'z');
+    await seedPending(stale, 'stale A', '2026-07-06T10:00:00.000Z');
+    age(stale);
+    await seedPending(fresh, 'fresh Z', '2026-07-06T10:01:00.000Z');
+    const llm = mockLlm([extraction('A')]);
+
+    await runWorker(stale, { db: fakeDb, llm });
+    expect(llm.calls.map((c) => c.sessionId)).toEqual([stale.sessionId]);
+  });
+
+  it('resumes after a sealed cursor session instead of restarting from the head', async () => {
+    const a = makeHarness({
+      projectId: `capture-worker-order-a-${randomUUID()}`,
+      sessionId: `session-a-${randomUUID()}`,
+    });
+    a.env.CC_CAPTURE_MAX_SESSIONS_PER_TICK = '1';
+    a.env.CC_CAPTURE_FRESH_WINDOW_MS = String(72 * 60 * 60 * 1000);
+    const b = sibling(a, 'b');
+    const c = sibling(a, 'c');
+    for (const [h, label] of [[a, 'A'], [b, 'B'], [c, 'C']] as const) {
+      await seedPending(h, `stale ${label}`, '2026-07-06T10:00:00.000Z');
+      age(h);
+    }
+    const cursorFile = join(a.spoolDir, '.tick-cursor.json');
+    const llm = mockLlm([extraction('A'), extraction('B'), extraction('C')]);
+
+    await runWorker(a, { db: fakeDb, llm }); // A（aged + stop sentinel → 處理完即 seal）
+    await runWorker(a, { db: fakeDb, llm }); // B（同上；cursor 指向 B，但 B 的 spool 已改名）
+    expect(llm.calls.map((x) => x.sessionId)).toEqual([a.sessionId, b.sessionId]);
+    expect(JSON.parse(readFileSync(cursorFile, 'utf8'))).toMatchObject({ lastSessionPath: spoolPath(b) });
+    expect(existsSync(spoolPath(b))).toBe(false);
+
+    // A 又有新東西（新 spool 檔）且已老化：舊行為會從頭回到 A，正確行為是接續到 C。
+    await seedPending(a, 'stale A again', '2026-07-06T10:02:00.000Z');
+    age(a);
+    await runWorker(a, { db: fakeDb, llm });
+    expect(llm.calls.map((x) => x.sessionId)).toEqual([a.sessionId, b.sessionId, c.sessionId]);
   });
 });

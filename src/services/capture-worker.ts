@@ -105,11 +105,13 @@ export interface CaptureWorkerOptions {
   stateWriter?: CaptureStateWriter;
 }
 
-interface SpoolSession {
+export interface SpoolSession {
   projectDir: string;
   projectIdFromPath: string;
   sessionIdFromPath: string;
   path: string;
+  /** spool 檔 mtime（毫秒）；fresh-first 排序依據。 */
+  mtimeMs: number;
 }
 
 interface SpoolRecord {
@@ -167,6 +169,8 @@ interface WriteWindowResult {
 
 const DEFAULT_TICK_BUDGET_MS = 240_000;
 const DEFAULT_RETRY_MIN_INTERVAL_MS = 1_800_000;
+/** fresh-first：spool 檔在此窗口內有動的 session 優先處理（新到舊）；0 = 停用、回到純路徑輪流。 */
+const DEFAULT_FRESH_WINDOW_MS = 72 * 60 * 60 * 1000;
 const RETRY_MAX_ATTEMPTS = 5;
 
 export interface RetryEntry {
@@ -688,6 +692,12 @@ function captureMaxWindowsPerTick(env: Record<string, string | undefined>): numb
   return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_WINDOWS_PER_TICK, Number.MAX_SAFE_INTEGER);
 }
 
+function captureFreshWindowMs(env: Record<string, string | undefined>): number {
+  const raw = env.CC_CAPTURE_FRESH_WINDOW_MS?.trim();
+  if (raw === '0') return 0;
+  return parsePositiveIntegerEnv(raw, DEFAULT_FRESH_WINDOW_MS);
+}
+
 export function isCaptureRetryHeld(
   entry: Pick<RetryEntry, 'attempts' | 'lastAttemptIso'> &
     Partial<Pick<CaptureRetryEntry, 'blockedAttempts' | 'lastBlockedAtIso'>> | undefined,
@@ -740,11 +750,19 @@ async function listSpoolSessions(root: string): Promise<SpoolSession[]> {
     const files = await readdir(projectDir, { withFileTypes: true }).catch(() => []);
     for (const file of files) {
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
+      const path = join(projectDir, file.name);
+      let mtimeMs = 0;
+      try {
+        mtimeMs = (await stat(path)).mtimeMs;
+      } catch {
+        continue; // 列目錄與 stat 之間被 rotate／刪除 → 本 tick 略過
+      }
       sessions.push({
         projectDir,
         projectIdFromPath: decodeSpoolSegment(projectEntry.name),
         sessionIdFromPath: basename(file.name, '.jsonl'),
-        path: join(projectDir, file.name),
+        path,
+        mtimeMs,
       });
     }
   }
@@ -1743,11 +1761,53 @@ async function saveTickCursor(root: string, sessionPath: string): Promise<void> 
   await rename(tmp, cPath).catch(() => undefined);
 }
 
-function rotateSessionsAfterCursor(sessions: SpoolSession[], cursorPath: string | null): SpoolSession[] {
+/**
+ * 從 cursor 的下一個 session 開始輪流。sessions 必須已依 path localeCompare 排序。
+ * cursor 路徑不在清單時（剛處理完的 session 被 seal／rotate 改名、或已進 .dead）
+ * 不可從頭重來——否則清單前段永遠佔住每 tick 唯一的處理名額，後段 session 餓死
+ * （2026-09-04 事故：8 月起 CC-memory 等排在後段的專案零 rollup）。改從「第一個排在
+ * cursor 之後的路徑」接續。
+ */
+export function rotateSessionsAfterCursor(sessions: SpoolSession[], cursorPath: string | null): SpoolSession[] {
   if (!cursorPath || sessions.length <= 1) return sessions;
-  const idx = sessions.findIndex((s) => s.path === cursorPath);
-  if (idx < 0 || idx >= sessions.length - 1) return sessions;
+  let idx = sessions.findIndex((s) => s.path === cursorPath);
+  if (idx < 0) {
+    const next = sessions.findIndex((s) => s.path.localeCompare(cursorPath) > 0);
+    if (next <= 0) return sessions; // cursor 在最後一個之後或最前面 → 從頭
+    idx = next - 1;
+  }
+  if (idx >= sessions.length - 1) return sessions;
   return [...sessions.slice(idx + 1), ...sessions.slice(0, idx + 1)];
+}
+
+/**
+ * 每 tick 的處理順序（2026-09-04 使用者拍板「新的先做」）：
+ *   1. fresh：spool 檔 mtime 在 freshWindowMs 內的 session，新到舊——今天在用的 session
+ *      幾分鐘到一小時內就進記憶，不必等 12k 筆舊 backlog 輪完；
+ *   2. stale：其餘依 path 輪流（round-robin cursor 只在這一層推進）。
+ * freshWindowMs=0 → 全部視為 stale（舊行為）。
+ *
+ * 刻意的取捨（reviewer 2026-09-04 提出、使用者拍板時已接受）：fresh 層永遠先走，正式 unit
+ * cap=1 時只要有任一 fresh session 有待處理內容，stale 層該 tick 就輪不到——7 月舊 backlog
+ * 可能永遠消不完，其去留另議（封存／重歸屬）。若日後要保底，在此加「每 N tick 先跑 stale」。
+ */
+export function orderSessionsForTick(
+  sessions: SpoolSession[],
+  cursorPath: string | null,
+  nowMs: number,
+  freshWindowMs: number,
+): { ordered: SpoolSession[]; freshPaths: Set<string> } {
+  const fresh: SpoolSession[] = [];
+  const stale: SpoolSession[] = [];
+  for (const session of sessions) {
+    if (freshWindowMs > 0 && nowMs - session.mtimeMs <= freshWindowMs) fresh.push(session);
+    else stale.push(session);
+  }
+  fresh.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+  return {
+    ordered: [...fresh, ...rotateSessionsAfterCursor(stale, cursorPath)],
+    freshPaths: new Set(fresh.map((s) => s.path)),
+  };
 }
 
 async function spoolEndsWithStopSentinel(spoolPath: string): Promise<boolean> {
@@ -1839,7 +1899,14 @@ export async function runCaptureWorkerOnce(
   if (rawSessions.length === 0) return result;
   await archiveLegacySidecars(root, getNowMs());
   const cursor = await loadTickCursor(root);
-  const sessions = rotateSessionsAfterCursor(rawSessions, cursor);
+  const { ordered: sessions, freshPaths } = orderSessionsForTick(
+    rawSessions, cursor, getNowMs(), captureFreshWindowMs(env),
+  );
+  // fresh 層不推進 round-robin cursor，否則舊 backlog 的輪流位置會被今天的 session 帶著跑。
+  const persistCursor = async (spool: SpoolSession): Promise<void> => {
+    if (freshPaths.has(spool.path)) return;
+    await saveTickCursor(root, spool.path);
+  };
   const writerHost = options.writerHost ?? resolveWriterHost();
   const generateEmbedding = options.generateEmbedding ?? defaultGenerateEmbedding;
   const maxSessionsPerTick = captureMaxSessionsPerTick(env);
@@ -1946,7 +2013,7 @@ export async function runCaptureWorkerOnce(
         result.skipped += 1;
         state.spool.cursor = snapshot.safeEnd;
         await stateWriter(statePath, state);
-        await saveTickCursor(root, spool.path);
+        await persistCursor(spool);
         await maybeRotateCaptureSpool(
           spool,
           state,
@@ -1958,7 +2025,7 @@ export async function runCaptureWorkerOnce(
 
       if (handledSessions >= maxSessionsPerTick) break;
       handledSessions += 1;
-      await saveTickCursor(root, spool.path);
+      await persistCursor(spool);
 
       const sessionId = firstString(snapshot.records, 'session_id') ?? spool.sessionIdFromPath;
       const projectIdBefore = state.projectId;
