@@ -1,6 +1,6 @@
 # T1 Step B：既有崩塌列 project_id 重歸屬（2026-09-03）
 
-對照表：`../remap-2026-09-03.jsonl`（1,690 列；action=`update` 959 列、`skip` 731 列）。
+對照表：`../remap-2026-09-03.jsonl`（最終版，2026-09-03 20:37 於 flock 內重建並執行；1,690 列＝action=`update` 578 列（543 obs＋35 rollup，已 COMMIT）、`skip` 1,112 列（1,055 obs＋57 rollup））。
 工作目錄（執行時的 journal／SQL 產物都落在這裡）：`~/.cache/cc-memory/stepb-2026-09-03/`。
 
 ## 檔案
@@ -18,8 +18,9 @@ cd ~/.cache/cc-memory/stepb-2026-09-03 && python3 stepb-apply.py remap-2026-09-0
 只在「execute 後沒有任何 worker tick 碰過搬動的 rollup」時會成功（通常是幾分鐘內）；之後工具會拒絕，需依本對照表人工反向（每列的 old_project_id／old_idempotency_key 都在表內）。
 
 ## 本版不做的事（留人工）
-- 同 session 在新 id 已有 active rollup 者（27 個 rollup＋479 筆 observations）：不 archive、不 repoint，需先定義 metadata 合併規則。
-- 只有 encoded-dir 證據者（7 個 session、106 列）：目錄名編碼不可逆，需人工核准候選 id。
-- transcript 已刪且目錄名對不到者（119 列、3 個 session，皆屬已刪除的 recycling-recognition-tender-pmo）。
+- 同 session 在新 id 已有 active rollup 者（30 個 session：38 個 rollup＋747 筆 observations）：不 archive、不 repoint，需先定義 metadata 合併規則。
+- 表內自撞（同 session 被舊 hook 拆在多個崩塌 id 下，3 個 session：6 個 rollup＋96 筆 observations）：合併後會撞 rollup 唯一鍵，同上需合併規則。**此過濾在 Codex R2c 之後才加，未經 Codex 審（只會把列改成 needs_human，不會新增 update）。**
+- 只有 encoded-dir 證據者（7 個 session：8 個 rollup＋98 筆 observations）：目錄名編碼不可逆，需人工核准候選 id。
+- transcript 已刪且目錄名對不到者（3 個 session：5 個 rollup＋114 筆 observations，皆屬已刪除的 recycling-recognition-tender-pmo）。
 
-沿革與 Codex 對審：`../memory-ops-cutover.md` §4.1；R2／R2b 原文在工作目錄 `codex-r2-out.md`、`codex-r2b-out.md`。
+沿革與 Codex 對審：`../memory-ops-cutover.md` §4.1；R2／R2b／R2c 原文在本目錄 `codex-r2-out.md`、`codex-r2b-out.md`、`codex-r2c-out.md`；執行紀錄 `remap-2026-09-03.applied.json`、`stepb-run-2034{30,710}.txt`。
