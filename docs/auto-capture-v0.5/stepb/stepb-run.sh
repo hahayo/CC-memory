@@ -16,7 +16,7 @@ STAMP="$(date +%H%M%S)"
 FAKE_DSN='postgres://x:y'; FAKE_DSN="${FAKE_DSN}@127.0.0.1:1/nope"
 
 # 0) fail-closed 前提核對（Codex R2c fix 2）：builder 版本＝已審版本、兩個 worktree 乾淨且在預期分支
-BUILDER_SHA_EXPECTED='905194f01eb4779a9f4a217cb9b3a99004ea6853e6157b00a2ec399d33ccfe06'   # R2c 審過的 stepb-build-remap.ts
+BUILDER_SHA_EXPECTED='fd4ccb0e00a5d4338b7959bec7033065fa7c1f825ba9ae264bf96bbd872b2c46'   # R2c 審過的 stepb-build-remap.ts
 BUILDER_HEAD_EXPECTED='1b337c59daf20cc7880f72ad05a880efa3c1fcc5'                         # worktree ccm-remap HEAD（= PR #23 最後 commit）
 BUILDER_WT="$(realpath "$BUILDER_WT")"; TABLE_WT="$(realpath "$TABLE_WT")"
 [ "$(sha256sum "$BUILDER_WT/.scratch/stepb-build-remap.ts" | cut -c1-64)" = "$BUILDER_SHA_EXPECTED" ] || { echo "refuse: builder sha256 != reviewed"; exit 5; }

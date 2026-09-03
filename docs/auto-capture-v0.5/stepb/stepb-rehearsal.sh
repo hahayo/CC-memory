@@ -85,6 +85,23 @@ sql "UPDATE project_memories SET updated_at = '2020-01-01' WHERE id='11111111-11
 python3 "$APPLY" "$REMAP" --rollback --rehearsal
 assert_eq "$(snap)" "$BEFORE" "rollback succeeds once no writer intervention remains"
 
+echo "== scenario 4: within-map duplicate target → refused before touching DB"
+reset_fixture
+BEFORE="$(snap)"
+DUP="$SP/stepb-rehearsal-remap-dup.jsonl"
+python3 - "$REMAP" "$DUP" <<'PY'
+import sys, json
+rows=[json.loads(l) for l in open(sys.argv[1],encoding='utf-8') if l.strip()]
+pm=[r for r in rows if r['table']=='project_memories' and r.get('action')=='update'][0]
+# 同 session 的第二個舊 rollup（假 id）也對到同一個新 key
+rows.append({**pm, 'id': '44444444-4444-4444-4444-444444444444', 'old_project_id': '___', 'old_idempotency_key': 'capture:v05:___:sess-rehearsal-1'})
+open(sys.argv[2],'w',encoding='utf-8').write('\n'.join(json.dumps(r,ensure_ascii=False) for r in rows)+'\n')
+PY
+must_fail python3 "$APPLY" "$DUP" --execute --rehearsal
+grep -q "WITHIN-MAP DUPLICATE TARGETS" "$SP/stepb-rehearsal-lastfail.txt" && echo "assert ok: within-map duplicate refused before any DB access" || { echo "ASSERT FAIL: wrong reason"; cat "$SP/stepb-rehearsal-lastfail.txt"; exit 1; }
+assert_eq "$(snap)" "$BEFORE" "DB unchanged"
+rm -f "$DUP"
+
 echo "== cleanup"
 sql "DELETE FROM observations WHERE session_id LIKE 'sess-rehearsal-%'; DELETE FROM project_memories WHERE idempotency_key LIKE 'capture:v05:%:sess-rehearsal-%';"
 rm -f "$SP"/stepb-rehearsal-remap*.applied.json "$SP"/stepb-rehearsal-remap*.rolled-back.json "$SP"/stepb-rehearsal-remap*.txn.sql "$SP"/stepb-rehearsal-remap*.preflight.sql "$BAD"

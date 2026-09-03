@@ -172,6 +172,37 @@ async function main(): Promise<void> {
       rollup_project_id: rollupProject, evidence: res.evidence });
     summary.mapped_obs += 1;
   }
+  // --- 5. 表內自撞（2026-09-03 20:34 正式執行撞 project_memories_idempotency_idx 後補）：
+  // 同一 session 被舊 hook 拆在 ≥2 個崩塌 id 下（各有一個 rollup），全部對到同一個新 key → 第二條 UPDATE 撞 partial unique index。
+  // 本版不合併 → 這些 rollup 與指向它們的 observations 一律 needs_human。observation 亦檢查 (new_project_id, session_id, content_hash)。
+  const pmTargets = new Map<string, number>();
+  for (const o of out) if (o.table === 'project_memories' && o.action === 'update') {
+    const k = `${o.new_project_id}|${o.new_idempotency_key}`; pmTargets.set(k, (pmTargets.get(k) ?? 0) + 1);
+  }
+  const dupPmIds = new Set<string>();
+  for (const o of out) if (o.table === 'project_memories' && o.action === 'update' && (pmTargets.get(`${o.new_project_id}|${o.new_idempotency_key}`) ?? 0) > 1) dupPmIds.add(o.id as string);
+  const obsTargets = new Map<string, number>();
+  for (const o of out) if (o.table === 'observations' && o.action === 'update') {
+    const k = `${o.new_project_id}|${o.session_id}|${o.content_hash}`; obsTargets.set(k, (obsTargets.get(k) ?? 0) + 1);
+  }
+  let dupPm = 0, dupObs = 0;
+  for (const o of out) {
+    if (o.action !== 'update') continue;
+    if (o.table === 'project_memories' && dupPmIds.has(o.id as string)) {
+      Object.assign(o, { action: 'skip', reason: `needs_human：同 session 拆在多個崩塌 id，合併到 ${o.new_project_id} 會撞 rollup 唯一鍵（表內自撞）` });
+      delete o.new_project_id; delete o.new_idempotency_key; delete o.old_status; delete o.old_idempotency_key;
+      summary.mapped_pm_update -= 1; dupPm += 1;
+    } else if (o.table === 'observations' && (dupPmIds.has(String(o.old_rollup_memory_id)) || (obsTargets.get(`${o.new_project_id}|${o.session_id}|${o.content_hash}`) ?? 0) > 1)) {
+      Object.assign(o, { action: 'skip', reason: dupPmIds.has(String(o.old_rollup_memory_id))
+        ? `needs_human：其 rollup ${o.old_rollup_memory_id} 屬表內自撞的 session`
+        : `needs_human：observation 唯一鍵 (${o.new_project_id}, session, content_hash) 表內自撞` });
+      delete o.new_project_id; delete o.old_status; delete o.content_hash; delete o.old_rollup_memory_id; delete o.rollup_project_id;
+      summary.mapped_obs -= 1; dupObs += 1;
+    }
+  }
+  summary.unmapped += dupPm + dupObs;
+  if (dupPm) summary.reasons['needs_human（表內自撞 rollup）'] = dupPm;
+  if (dupObs) summary.reasons['needs_human（表內自撞 observation）'] = dupObs;
   writeFileSync(outPath, out.map((o) => JSON.stringify(o)).join('\n') + '\n');
   console.log(JSON.stringify({ rows: rows.length, ...summary, encoded_index_size: encodedIndex.size }, null, 2));
 

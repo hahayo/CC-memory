@@ -350,6 +350,20 @@ def main() -> int:
     if not work:
         print('nothing to do'); return 0
 
+    # 0) 表內自撞（2026-09-03 20:34 撞 project_memories_idempotency_idx 後補）：同一目標唯一鍵在對照表內出現 ≥2 次 → 拒絕
+    from collections import Counter
+    pm_t = Counter((r['old_project_id'] if reverse else r['new_project_id'], r['old_idempotency_key'] if reverse else r['new_idempotency_key'])
+                   for r in work if r['table'] == 'project_memories')
+    ob_t = Counter((r['old_project_id'] if reverse else r['new_project_id'], r['session_id'], r['content_hash'])
+                   for r in work if r['table'] == 'observations')
+    dup_pm = {k: v for k, v in pm_t.items() if v > 1}
+    dup_ob = {k: v for k, v in ob_t.items() if v > 1}
+    if dup_pm or dup_ob:
+        print(f'WITHIN-MAP DUPLICATE TARGETS: rollup keys={len(dup_pm)} observation keys={len(dup_ob)} — rebuild the map (builder marks these needs_human)')
+        for k in list(dup_pm)[:5]: print('  pm', k)
+        for k in list(dup_ob)[:5]: print('  obs', k)
+        return 3
+
     # 1) 唯讀 preflight（諮詢性；execute／rollback 也一律先跑，早失敗早知道）
     pf_file = path.with_name(f'{path.stem}.{mode.strip("-")}.preflight.sql')
     pf_file.write_text(preflight_sql(rows, reverse, expected_db), encoding='utf-8')
