@@ -254,6 +254,7 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 | `CC_CAPTURE_CODEX_MODEL` | `gpt-5.6-sol` | capture LLM（codex-cli provider） | parse 失敗／缺值用預設 |
 | `CC_CAPTURE_CODEX_TIMEOUT_MS` | `90000` | capture LLM（codex-cli provider） | parse 失敗用預設 |
 | `CC_CAPTURE_MAX_WINDOWS_PER_TICK` | 無上限（`Number.MAX_SAFE_INTEGER`；正式 unit 設為 `1`） | capture worker | parse 失敗或小於 1 用預設 |
+| `CC_CAPTURE_FRESH_WINDOW_MS` | `259200000`（72 小時；2026-09-04 fresh-first） | capture worker | spool 檔 mtime 在窗口內的 session 先處理、新到舊；其餘依路徑輪流（cursor 只在這層推進）。`0` = 純路徑輪流；parse 失敗用預設 |
 | `CC_CAPTURE_GEMINI_TIMEOUT_MS` | 未記錄（實作預設） | capture LLM（gemini-flash provider） | parse 失敗用預設 |
 | `CC_CAPTURE_CLAUDE_MODEL` | `haiku` | capture LLM（claude-cli provider） | parse 失敗／缺值用預設；tier 別名交給 claude CLI 解析 |
 | `GEMINI_API_KEY` | 無 | capture LLM（僅 gemini-flash provider）/ embedding | gemini-flash 下缺值時 capture 靜默停用並 stdout 告警；claude-cli 下不需要；既有 search 降級沿用 `embedding.ts` |

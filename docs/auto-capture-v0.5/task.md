@@ -214,6 +214,7 @@
 - [x] 每次真實 terminal retry 輸出去識別 `retry-pending` warning，第一次就由 supervisor 視為異常；budget yield 維持正常進度
 - [x] retry hold 僅為資訊狀態，不製造 failure／recovery 告警乒乓；跨 tick `held → ok → held` 已有回歸測試（2026-08-12）
 - [x] cap=1 時純 held session 仍推進 round-robin cursor，但不消耗本 tick 唯一處理名額；同 tick 可繼續處理下一個 ready session（2026-08-12）
+- [x] fresh-first（2026-09-04 使用者拍板「新的先做」）：spool 檔 mtime 在 `CC_CAPTURE_FRESH_WINDOW_MS`（預設 72h）內的 session 先處理、新到舊；其餘依路徑輪流。round-robin cursor 只在 stale 層推進（fresh 層任何結果都不寫 cursor，上一條「held 推進 cursor」僅適用 stale 層）。cursor 路徑被 seal／rotate 改名時改從「第一個排在 cursor 之後」接續，不再從頭重來（8 月起後段專案零 rollup 的根因）
 - [x] supervisor 新增 `--test-alert`，只測 memory 專用 Telegram bot，不讀 DB、不跑 worker、不改 alert state
 - [x] supervisor 直接呼叫時告警缺失預設 soft-disable（軟停用）；repo 正式 systemd service 固定設定 `CC_MEMORY_REQUIRE_ALERTS=1`，缺少或無效告警設定會在 worker 前 hard gate（硬性阻擋）（2026-08-12）
 - [x] production approval guard 改以實際 DB identity 對 canonical production URL，比對時忽略密碼與非 routing query parameters 並正規化 loopback；顯式 URL、自訂 URL 檔或常見等值複本皆須 marker，multihost／encoded hostname／空 database path／`?database=` override fail-closed。marker 同 descriptor 驗 regular file／`0600`／`O_NOFOLLOW`；supervisor 移除 inherited `CC_FORCE_PROJECT_ID`／`DATABASE_URL_PERSONAL` 與 PG 連線目標環境，避免 worker 改走未經 gate 的 DB。focused tests 39/39 PASS（2026-08-12）

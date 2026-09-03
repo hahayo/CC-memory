@@ -123,6 +123,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 32 KiB、其他 provider 256 KiB
 - `CC_CAPTURE_MAX_SESSIONS_PER_TICK` - worker 每次 tick（執行輪次）最多處理幾個 session
 - `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
+- `CC_CAPTURE_FRESH_WINDOW_MS` - fresh-first（新鮮優先）窗口毫秒（預設 259200000＝72 小時；2026-09-04 起）：spool 檔在窗口內有動的 session 先處理、新到舊；其餘依路徑輪流（round-robin cursor 只在這層推進）。設 `0` 回到純路徑輪流
 - `CC_MEMORY_SPOOL_LOCK_STALE_MS` - spool 檔案鎖過期毫秒數
 - `CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR` - 只供離線 archive/drain 讀取固定 transcript snapshot；live supervisor 會主動移除，避免誤讀封存資料
 - `CC_MEMORY_ALERT_BOT_TOKEN` - Telegram 告警 bot token
