@@ -63,6 +63,8 @@ database_url="${database_url%"${database_url##*[![:space:]]}"}"
 if [[ -z "$database_url" ]]; then
   exit 0
 fi
+# 注意：Node 端不讀這個 DATABASE_URL（它自己以 O_NOFOLLOW+fstat 重讀 URL 檔）；這裡覆蓋只是
+# 保證子程序環境不殘留舊 DSN。日後若 injector 重新 import src/config.ts，仍不得改成信任此值。
 export DATABASE_URL="$database_url"
 unset CC_FORCE_PROJECT_ID DATABASE_URL_PERSONAL CC_MEMORY_PROJECT_ID
 
