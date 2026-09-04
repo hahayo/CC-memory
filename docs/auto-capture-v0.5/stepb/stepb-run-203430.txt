@@ -1,0 +1,45 @@
+[stepb-run] preconditions ok: builder=905194f01eb4779a9f4a217cb9b3a99004ea6853e6157b00a2ec399d33ccfe06 head=1b337c59daf20cc7880f72ad05a880efa3c1fcc5
+[stepb-run] lock held since 2026-09-03T20:34:30+08:00
+{
+  "rows": 1690,
+  "mapped_obs": 639,
+  "mapped_pm_update": 41,
+  "mapped_pm_archive": 38,
+  "unmapped": 972,
+  "reasons": {
+    "transcript 已刪且目錄名對不到唯一真實路徑": 119,
+    "needs_human": 106,
+    "needs_human（rollup 合併）": 747
+  },
+  "new_ids": {
+    "AI_Copilot": 66,
+    "recycling-recognition": 6,
+    ".claude": 1,
+    "recycling-recognition-county-admin-20260817": 2,
+    "ops-db-master": 2,
+    "finetune-eval": 1,
+    "AI_Teacher": 1
+  },
+  "encoded_index_size": 51469
+}
+mode=--preflight rehearsal=False rows=1690 actionable=680 skipped=1010 remap_sha256=94dda7906e4d6ccb551a6ed31b7573c5caf0b32c8181211bded3bfa31ae44b3e
+preflight: {"db": "cc_memory_project", "ro": "on", "system_id": "7656209034643652651", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+PREFLIGHT OK
+e0317e6 docs(auto-capture): Step B 對照表最終版（execute 前 2026-09-03T20:34:34+08:00 於 flock 內重建）
+[stepb-run] committed map sha256=94dda7906e4d6ccb551a6ed31b7573c5caf0b32c8181211bded3bfa31ae44b3e
+mode=--execute rehearsal=False rows=1690 actionable=680 skipped=1010 remap_sha256=94dda7906e4d6ccb551a6ed31b7573c5caf0b32c8181211bded3bfa31ae44b3e
+preflight: {"db": "cc_memory_project", "ro": "on", "system_id": "7656209034643652651", "collapsed_set_equal": "0", "pm_state_mismatch": "0", "pm_target_key_conflict": "0", "ob_state_mismatch": "0", "ob_target_unique_conflict": "0", "ob_rollup_project_mismatch_after": "0", "cross_project_fk_now": "0"}
+flock acquired /home/haha/.cache/cc-memory/auto-capture-run.lock; started 2026-09-03T12:34:38+00:00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:1725: NOTICE:  in-txn precheck: collapsed set == expected (1690 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:2418: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:3425: ERROR:  duplicate key value violates unique constraint "project_memories_idempotency_idx"
+TRANSACTION ROLLED BACK by server error (exit=3); DB unchanged.
+system_id|7656209034643652651
+identity|cc_memory_project addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-03 12:16:10.26692+00
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:1725: NOTICE:  in-txn precheck: collapsed set == expected (1690 rows)
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:2418: NOTICE:  in-txn precheck: target key conflicts pm=0 obs=0
+psql:/home/haha/.cache/cc-memory/stepb-2026-09-03/remap-2026-09-03.execute.txn.sql:3425: ERROR:  duplicate key value violates unique constraint "project_memories_idempotency_idx"
+DETAIL:  Key (project_id, idempotency_key)=(AI_Copilot, capture:v05:AI_Copilot:6b27bb0c-a010-4e86-ab66-daec406582d6) already exists.
+CONTEXT:  SQL statement "UPDATE project_memories SET project_id='AI_Copilot', idempotency_key='capture:v05:AI_Copilot:6b27bb0c-a010-4e86-ab66-daec406582d6' WHERE id='532a545e-d8b5-4153-b212-1f5c35e17af9'::uuid AND project_id='____' AND idempotency_key='capture:v05:____:6b27bb0c-a010-4e86-ab66-daec406582d6' AND status='active'"
+PL/pgSQL function inline_code_block line 66 at SQL statement
+
