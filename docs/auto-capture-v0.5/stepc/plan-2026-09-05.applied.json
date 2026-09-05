@@ -1,0 +1,12 @@
+{
+  "plan_sha256": "7dac462050097280347dfd34c8637a00aceaeb88a1ef241c58ec488e9d3e64cd",
+  "remap_sha256": "d6aaad999aeb5a5a619dc2930d9f3197dded49d56dfb4e213d12195e982a6475",
+  "db": "cc_memory_project",
+  "system_id": "7656209034643652651",
+  "identity": "cc_memory_project addr=172.17.0.3/32 port=5432 postmaster_start=2026-09-04 00:36:49.656764+00",
+  "executed_at": "2026-09-05 14:09:36.374719+00",
+  "merge_sessions": 33,
+  "rollup_rows": 74,
+  "observation_rows": 843,
+  "rollback_note": "automatic rollback only while no known application writer touched the targets (new linked observation / updated_at / metadata.capture); ad-hoc SQL not detected — forbidden in the rollback window; otherwise manual reversal via the plan"
+}
