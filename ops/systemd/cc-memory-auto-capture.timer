@@ -1,0 +1,12 @@
+[Unit]
+Description=CC-memory auto-capture idle continuation (2026-09-06; Stop/SessionStart kick 仍保留)
+Documentation=file:%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cutover.md
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=cc-memory-auto-capture.service
+
+[Install]
+WantedBy=timers.target
