@@ -14,11 +14,11 @@ Environment=CC_CAPTURE_LLM=codex-cli
 Environment=CC_CAPTURE_LLM_FALLBACK=claude-cli
 Environment=CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol
 Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
-Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=1
+Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=4
 Environment=CC_CAPTURE_CLAUDE_MODEL=haiku
 # codex 90 s + claude 75 s + 2×1 s killGrace + 15 s settle = 182 s reserve < tick 240 s < supervisor 270 s < TimeoutStartSec 300 s
 Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=75000
-Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=1
+Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=4
 Environment=CC_MEMORY_PROJECT_URL_FILE=%h/.ccm-project-url
 Environment=CC_MEMORY_ALERT_ENV_FILE=%h/.ccm-memory-alert.env
 Environment=CC_MEMORY_ALERT_STATE_FILE=%h/.local/state/cc-memory/auto-capture-alert-state.json

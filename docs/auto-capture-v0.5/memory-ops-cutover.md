@@ -476,3 +476,12 @@ exit code：`0` 只保留給所有 gate 都能由機器證明通過的情況；`
 ### 9.1 相依套件安全基線
 
 Node.js 支援下限已提升為 20，CI 與本機驗證採 Node.js 22。2026-08-12 的 `npm audit --omit=dev` 為 0 vulnerabilities（漏洞）；完整 `npm audit` 尚有 4 個 moderate（中等）且全屬 dev-only（僅開發期）鏈：`drizzle-kit@0.31.10` → `@esbuild-kit/esm-loader` → `@esbuild-kit/core-utils` → 舊版 `esbuild`。`drizzle-kit@0.31.10` 已是當時最新版，npm 提示降至 `0.18.1` 不是可接受修正；正式 runtime 不安裝 dev dependencies（開發相依套件），也不得把 migration／Vitest 開發服務暴露到網路。此項是有記錄的 upstream constraint（上游限制），不是 production 漏洞豁免；上游釋出安全版本後應升級並重跑 audit、typecheck、lint 與完整測試。
+
+## 10. 2026-09-06 吞吐量調整（A 閒置續跑 timer ＋ B 每 tick 上限 4）
+
+背景：Phase 8 健康面全過，但近 72 小時 transcript 265 MB 只覆蓋 5%；每日新增約 50–110 MB（≈1,300–2,700 窗）對每日約 120 窗。使用者拍板選項一（先 A＋B，3 天後看數字再議 C 壓縮／D 暫緩）。Codex 兩輪對審（AGREE-WITH-CHANGES→口徑修正）已收斂。
+
+- **A**：新增 `ops/systemd/cc-memory-auto-capture.timer`（`OnBootSec=2min`、`OnUnitInactiveSec=2min`、`AccuracySec=15s`）；Stop／SessionStart 的 kick 保留。oneshot＋`SuccessExitStatus=75` 相容：exit 75（沒拿到鎖）視為成功結束，timer 照常續排，但該次沒有 summary。`enable --now` 當下若開機已超過 2 分鐘會立即跑一次。
+- **B**：`CC_CAPTURE_MAX_WINDOWS_PER_TICK=4`、`CC_CAPTURE_MAX_SESSIONS_PER_TICK=4`。第 4 窗必須在 tick 第 58 秒前開始（准入檢查：已耗時＋182 s reserve ≤ 240 s），實際多為 3–4 窗；reserve／budget／timeout 不動。
+- **驗收口徑**：成功窗看 journal `processed=`（`windows=` 是開窗嘗試數，失敗也算）；`yielded` 只有合計、無法拆原因；容量比較用「成功提交的來源區間 bytes」對「每日新增 boundary bytes」；各專案另記最老未完成 boundary 的等待時間。
+- **canary 期「不加 timer／不提高每 tick 數」限制自本日解除**（使用者拍板）。回滾：`systemctl --user disable --now cc-memory-auto-capture.timer`，service 復原 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260906`，`daemon-reload`。
