@@ -48,8 +48,11 @@ describe('CC-memory systemd scheduling contracts', () => {
     expect(wrapper).not.toContain('.hermes');
   });
 
-  it('keeps auto-capture hook-driven with a oneshot service and no timer', () => {
+  // 2026-09-06 起（memory-ops-cutover.md §10）：service 仍是 hook-kicked oneshot，另加閒置續跑 timer；
+  // timer 只在 service 非活動後計時（OnUnitInactiveSec），不用 OnCalendar／Persistent，避免與 Stop kick 疊跑。
+  it('keeps auto-capture a hook-kicked oneshot service plus an idle-continuation timer', () => {
     const service = readUnit('cc-memory-auto-capture.service');
+    const timerPath = join(SYSTEMD_DIR, 'cc-memory-auto-capture.timer');
 
     expect(service).toContain('Type=oneshot');
     expect(service).toContain('ConditionPathExists=%h/.ccm-project-url');
@@ -58,8 +61,18 @@ describe('CC-memory systemd scheduling contracts', () => {
     );
     expect(service).not.toContain('ConditionPathExists=%h/.ccm-memory-alert.env');
     expect(service).toContain('Environment=CC_MEMORY_REQUIRE_ALERTS=1');
+    expect(service).toContain('Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=4');
+    expect(service).toContain('Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=4');
     expect(service).not.toContain('[Install]');
-    expect(existsSync(join(SYSTEMD_DIR, 'cc-memory-auto-capture.timer'))).toBe(false);
+
+    expect(existsSync(timerPath)).toBe(true);
+    const timer = readUnit('cc-memory-auto-capture.timer');
+    expect(timer).toContain('OnBootSec=2min');
+    expect(timer).toContain('OnUnitInactiveSec=2min');
+    expect(timer).toContain('Unit=cc-memory-auto-capture.service');
+    expect(timer).not.toContain('OnCalendar=');
+    expect(timer).not.toContain('Persistent=true');
+    expect(timer).not.toContain('/home/haha');
   });
 
   it('runs reminders from an independent personal DB and Telegram env', () => {
