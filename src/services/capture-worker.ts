@@ -171,6 +171,8 @@ const DEFAULT_TICK_BUDGET_MS = 240_000;
 const DEFAULT_RETRY_MIN_INTERVAL_MS = 1_800_000;
 /** fresh-first：spool 檔在此窗口內有動的 session 優先處理（新到舊）；0 = 停用、回到純路徑輪流。 */
 const DEFAULT_FRESH_WINDOW_MS = 72 * 60 * 60 * 1000;
+/** quiet period 預設關閉（0）；正式 unit 另設（2026-09-12 使用者拍板 2 小時）。 */
+const DEFAULT_QUIET_PERIOD_MS = 0;
 const RETRY_MAX_ATTEMPTS = 5;
 
 export interface RetryEntry {
@@ -696,6 +698,17 @@ function captureFreshWindowMs(env: Record<string, string | undefined>): number {
   const raw = env.CC_CAPTURE_FRESH_WINDOW_MS?.trim();
   if (raw === '0') return 0;
   return parsePositiveIntegerEnv(raw, DEFAULT_FRESH_WINDOW_MS);
+}
+
+/**
+ * quiet period（靜默期）：spool 檔在這段時間內還有動的 session 視為「還在聊」，本 tick 不處理。
+ * 目的：邊聊邊抓會把 transcript 切成很多小窗（近 6 天平均 39 KB／窗，上限 256 KB），
+ * 等 session 停下來再抓，窗口塞滿、LLM 呼叫次數降 3–5 倍。0 = 關閉（舊行為）。
+ */
+export function captureQuietPeriodMs(env: Record<string, string | undefined>): number {
+  const raw = env.CC_CAPTURE_QUIET_PERIOD_MS?.trim();
+  if (raw === '0') return 0;
+  return parsePositiveIntegerEnv(raw, DEFAULT_QUIET_PERIOD_MS);
 }
 
 export function isCaptureRetryHeld(
@@ -1796,10 +1809,18 @@ export function orderSessionsForTick(
   cursorPath: string | null,
   nowMs: number,
   freshWindowMs: number,
-): { ordered: SpoolSession[]; freshPaths: Set<string> } {
+  quietPeriodMs = 0,
+): { ordered: SpoolSession[]; freshPaths: Set<string>; quietHeld: SpoolSession[] } {
   const fresh: SpoolSession[] = [];
   const stale: SpoolSession[] = [];
+  const quietHeld: SpoolSession[] = [];
   for (const session of sessions) {
+    // quiet period：mtime 太新（含時鐘跳動造成的未來 mtime）＝還在聊，本 tick 整個略過；
+    // 不動 cursor，等它安靜下來自然落入 fresh 層。
+    if (quietPeriodMs > 0 && nowMs - session.mtimeMs < quietPeriodMs) {
+      quietHeld.push(session);
+      continue;
+    }
     if (freshWindowMs > 0 && nowMs - session.mtimeMs <= freshWindowMs) fresh.push(session);
     else stale.push(session);
   }
@@ -1807,6 +1828,7 @@ export function orderSessionsForTick(
   return {
     ordered: [...fresh, ...rotateSessionsAfterCursor(stale, cursorPath)],
     freshPaths: new Set(fresh.map((s) => s.path)),
+    quietHeld,
   };
 }
 
@@ -1899,9 +1921,13 @@ export async function runCaptureWorkerOnce(
   if (rawSessions.length === 0) return result;
   await archiveLegacySidecars(root, getNowMs());
   const cursor = await loadTickCursor(root);
-  const { ordered: sessions, freshPaths } = orderSessionsForTick(
-    rawSessions, cursor, getNowMs(), captureFreshWindowMs(env),
+  const { ordered: sessions, freshPaths, quietHeld } = orderSessionsForTick(
+    rawSessions, cursor, getNowMs(), captureFreshWindowMs(env), captureQuietPeriodMs(env),
   );
+  if (quietHeld.length > 0) {
+    stdout.write(`[cc-memory] auto-capture info: quiet-held=${quietHeld.length}\n`);
+  }
+  if (sessions.length === 0) return result;
   // fresh 層不推進 round-robin cursor，否則舊 backlog 的輪流位置會被今天的 session 帶著跑。
   const persistCursor = async (spool: SpoolSession): Promise<void> => {
     if (freshPaths.has(spool.path)) return;
