@@ -121,7 +121,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_GEMINI_TIMEOUT_MS` - gemini-flash provider 的 timeout（逾時）毫秒數
 - `CC_MEMORY_SPOOL_DIR` - spool（本地緩衝）根目錄（預設 `~/.cache/cc-memory/spool`）
 - `CC_MEMORY_SPOOL_MAX_MB` - spool 總大小上限（MB）；超過停止 capture 並告警
-- `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 32 KiB、其他 provider 256 KiB
+- `CC_CAPTURE_MAX_WINDOW_BYTES` - transcript（對話紀錄）窗口位元組上限；未設時 claude-cli provider 預設 32 KiB、其他 provider 256 KiB。只算 transcript bytes，不含 2026-09-12 起附帶的 `<prior_summary>`（最多約 13 KB），不可拿它當單次呼叫總量上限
 - `CC_CAPTURE_MAX_SESSIONS_PER_TICK` - worker 每次 tick（執行輪次）最多處理幾個 session
 - `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
 - `CC_CAPTURE_FRESH_WINDOW_MS` - fresh-first（新鮮優先）窗口毫秒（預設 259200000＝72 小時；2026-09-04 起）：spool 檔在窗口內有動的 session 先處理、新到舊；其餘依路徑輪流（round-robin cursor 只在這層推進）。設 `0` 回到純路徑輪流

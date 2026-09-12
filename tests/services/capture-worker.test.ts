@@ -2172,6 +2172,9 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     // Second window transcript should be smallEnd..bigEnd range
     expect(llm.calls[1].hwmOffsetStart).toBe(smallEnd);
     expect(llm.calls[1].hwmOffsetEnd).toBe(bigEnd);
+    // fake DB 撈不到 rollup（executeRows 拋錯）→ 接力摘要 best-effort 不帶，抽取照常
+    expect(llm.calls[0]).not.toHaveProperty('priorSummary');
+    expect(llm.calls[1]).not.toHaveProperty('priorSummary');
   });
 
   it('session round-robin cursor prevents starvation under cap=1', async () => {
