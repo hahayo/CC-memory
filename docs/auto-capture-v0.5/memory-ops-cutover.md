@@ -487,3 +487,24 @@ Node.js 支援下限已提升為 20，CI 與本機驗證採 Node.js 22。2026-08
 - **B**：`CC_CAPTURE_MAX_WINDOWS_PER_TICK=4`、`CC_CAPTURE_MAX_SESSIONS_PER_TICK=4`。第 4 窗必須在 tick 第 58 秒前開始（准入檢查：已耗時＋182 s reserve ≤ 240 s），實際多為 3–4 窗；reserve／budget／timeout 不動。
 - **驗收口徑**：成功窗看 journal `processed=`（`windows=` 是開窗嘗試數，失敗也算）；`yielded` 只有合計、無法拆原因；容量比較用「成功提交的來源區間 bytes」對「每日新增 boundary bytes」；各專案另記最老未完成 boundary 的等待時間。
 - **canary 期「不加 timer／不提高每 tick 數」限制自本日解除**（使用者拍板）。回滾：`systemctl --user disable --now cc-memory-auto-capture.timer`，service 復原 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260906`，`daemon-reload`。
+
+## 11. 2026-09-12 死信重跑（dead-letter replay）
+
+背景：codex-cli 主力 provider 以 `gpt-5.6-sol` 跑時 90 s timeout 頻繁（9/11–9/12 上午失敗率約 40%），同一窗口連續 6 次 blocked 即 park：worker 寫一張 `spool/.dead/<hash>.json`（只有 transcript 位置與 content hash，沒有原文），checkpoint 越過該區間，**之後永遠不會回頭**。`drain:capture` 只把它們計為 `parkedDead`，不重跑。切 `gpt-5.6-luna`＋effort high 後失敗率歸零，故補做一次性重跑工具。
+
+```bash
+# 只列清單（不連 DB、不呼叫 LLM）；會印出目前 shell 生效的 provider/model
+npm run replay:dead-letters
+
+# 實跑：必須明確帶 codex-cli／luna env；大窗（>150 KB）建議放寬 timeout
+CC_CAPTURE_LLM=codex-cli CC_CAPTURE_CODEX_MODEL=gpt-5.6-luna \
+CC_CAPTURE_CODEX_REASONING_EFFORT=high CC_CAPTURE_CODEX_TIMEOUT_MS=300000 \
+CC_CAPTURE_LLM_FALLBACK= \
+npm run replay:dead-letters -- --apply [--limit N] [--expect-model gpt-5.6-luna] [--error-code LLM_EXTRACT_FAILED]
+```
+
+- **候選分類**：`READABLE`（transcript 仍在且長度夠）／`path-unresolved`（spool live＋sealed 檔都找不到 path_hash）／`transcript-deleted`／`transcript-truncated`／`no-source`（7 月 haiku 舊格式）／`error-code-filtered`（預設只重跑 `LLM_EXTRACT_FAILED`；`transcript-source-unavailable` 那類本來就無源可讀）。
+- **守衛**：apply 走與 live worker 相同的 `auto-capture-run.lock`（flock 等最多 300 s；live tick 撞鎖 exit 75 讓路）；過 §1.5 production approval marker；provider 必須 `codex-cli` 且 model 等於 `--expect-model`（預設 `gpt-5.6-luna`），避免 shell 預設 `claude-cli/haiku` 或 `gpt-5.6-sol` 偷偷生效。讀回的位元組先比對死信裡的 `content_hash`，不符即 skip。
+- **寫入**：呼叫 `replayCaptureWindow()`（`src/services/capture-worker.ts`）＝ 抽取 → `writeCaptureWindow` 同一條路，rollup／observation 沿用既有 idempotency key 與 content hash 防重；**不碰 capture-state 檔**（checkpoint 已越過、retry entry 已清）。
+- **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`。exit `0` 全成功、`2` 有失敗、`1` preflight 失敗、`3` 鎖忙。
+- **2026-09-12 實跑**：103 張死信中 15 張 `READABLE`（全部 sol timeout，7–252 KB）；canary 1 窗 37 s 寫 4 observations；其餘 14 窗全部成功（24–77 s／窗，共 95 observations，failed=0）。15 張死信已改名 `.json.replayed`；剩 88 張為 7 月 haiku 舊格式（無 source）與 transcript 已刪者，無源可讀。
