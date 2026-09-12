@@ -2172,6 +2172,9 @@ describe('capture worker v0.5 wave-2 contracts (no DB)', () => {
     // Second window transcript should be smallEnd..bigEnd range
     expect(llm.calls[1].hwmOffsetStart).toBe(smallEnd);
     expect(llm.calls[1].hwmOffsetEnd).toBe(bigEnd);
+    // fake DB 撈不到 rollup（executeRows 拋錯）→ 接力摘要 best-effort 不帶，抽取照常
+    expect(llm.calls[0]).not.toHaveProperty('priorSummary');
+    expect(llm.calls[1]).not.toHaveProperty('priorSummary');
   });
 
   it('session round-robin cursor prevents starvation under cap=1', async () => {
@@ -3539,6 +3542,69 @@ describe('capture worker DB-backed RED contracts', () => {
       observations: 0,
       rollups: 0,
     });
+  });
+
+  it('relays the stored rollup summary into every window after the first (prior_summary)', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, cap } = makeChunkedTranscript(harness, { lineCount: 3, messageBytes: 80 });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:30.000Z',
+    });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'chunk one summary', observations: [observation('chunk one', 'n1')] }),
+      rawExtraction({ summary: 'chunk two summary', observations: [observation('chunk two', 'n2')] }),
+      rawExtraction({ summary: 'chunk three summary', observations: [observation('chunk three', 'n3')] }),
+    ]);
+
+    await expect(
+      runWorker(harness, { db, llm, now: new Date('2026-07-06T10:01:40.000Z') })
+    ).resolves.toMatchObject({ deadLettered: 0, observationsWritten: 3 });
+
+    expect(llm.calls).toHaveLength(3);
+    // 第一窗沒有既有 rollup → 不帶；之後每窗帶前一窗剛寫進 rollup 的摘要（同 tick 也要接到）。
+    expect(llm.calls[0].priorSummary).toBeUndefined();
+    expect(llm.calls[1].priorSummary).toEqual({
+      summary: 'chunk one summary',
+      decisions: ['persist capture output'],
+      next_steps: ['verify retrieval layer'],
+    });
+    expect(llm.calls[2].priorSummary?.summary).toBe('chunk two summary');
+    expect(await rollups(sql, harness.projectId, harness.sessionId)).toHaveLength(1);
+  });
+
+  it('fails closed when the session rollup was merged away by Step C (archived + merged_into): no LLM, no new rollup, checkpoint untouched', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'old backlog for a merged session' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    // Step C 的結果形狀：目標 survivor 在新專案 active；舊專案同鍵列 archived＋merged_into 指向它。
+    const targetProject = `${harness.projectId}-target`;
+    const [{ id: targetId }] = await sql<{ id: string }[]>`
+      INSERT INTO project_memories (project_id, type, summary, status, idempotency_key)
+      VALUES (${targetProject}, 'session', 'survivor summary', 'active', ${`capture:v05:${targetProject}:${harness.sessionId}`})
+      RETURNING id`;
+    await sql`
+      INSERT INTO project_memories (project_id, type, summary, status, merged_into, idempotency_key)
+      VALUES (${harness.projectId}, 'session', 'old summary', 'archived', ${targetId}::uuid, ${`capture:v05:${harness.projectId}:${harness.sessionId}`})`;
+    const llm = mockLlm([rawExtraction({ summary: 'must not be called', observations: [] })]);
+    const chunks: string[] = [];
+
+    const result = await runWorker(harness, { db, llm, stdout: { write: (c: string) => chunks.push(c) } });
+
+    expect(llm.calls).toHaveLength(0);
+    expect(result.processed).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(chunks.join('')).toContain(`auto-capture info: merged-rollup-skip session=${harness.sessionId}`);
+    // 舊專案不得重建 active rollup；checkpoint 不推進
+    const oldActive = await sql`SELECT id FROM project_memories WHERE project_id = ${harness.projectId} AND status = 'active'`;
+    expect(oldActive).toHaveLength(0);
+    const checkpoints = existsSync(statePath(harness)) ? Object.values(readState(harness).transcripts) : [];
+    expect(checkpoints.every((entry) => entry.checkpoint === 0)).toBe(true);
   });
 
   it('splits large transcript windows into chunks that write observations under one rollup with monotonic observed_at', async () => {
