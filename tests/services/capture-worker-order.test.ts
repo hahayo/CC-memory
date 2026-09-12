@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  captureQuietPeriodMs,
   orderSessionsForTick,
   rotateSessionsAfterCursor,
   type SpoolSession,
@@ -84,5 +85,38 @@ describe('orderSessionsForTick', () => {
     expect(paths(orderSessionsForTick(tie, null, NOW, HOUR).ordered)).toEqual([
       '/s/x/1.jsonl', '/s/y/1.jsonl',
     ]);
+  });
+
+  it('holds sessions still active within the quiet period (including future mtimes) and keeps the rest', () => {
+    // quiet=2h：d（1h 前）與 e（未來 mtime）還在聊 → 本 tick 不碰；b（剛好 2h）不算 quiet。
+    const { ordered, freshPaths, quietHeld } = orderSessionsForTick(list, '/s/a/1.jsonl', NOW, 72 * HOUR, 2 * HOUR);
+    expect(paths(quietHeld).sort()).toEqual(['/s/d/1.jsonl', '/s/e/1.jsonl']);
+    expect(paths(ordered)).toEqual(['/s/b/1.jsonl', '/s/c/1.jsonl', '/s/a/1.jsonl']);
+    expect([...freshPaths]).toEqual(['/s/b/1.jsonl']);
+  });
+
+  it('quiet period 0 (default) changes nothing', () => {
+    const withDefault = orderSessionsForTick(list, '/s/a/1.jsonl', NOW, 72 * HOUR);
+    const withZero = orderSessionsForTick(list, '/s/a/1.jsonl', NOW, 72 * HOUR, 0);
+    expect(paths(withZero.ordered)).toEqual(paths(withDefault.ordered));
+    expect(withDefault.quietHeld).toEqual([]);
+    expect(withZero.quietHeld).toEqual([]);
+  });
+
+  it('quiet period does not touch the stale layer', () => {
+    // quiet 比 fresh 窗口還長是設定錯誤，但不能把 stale 吃掉：a（100h）仍在 stale 層。
+    const { ordered, quietHeld } = orderSessionsForTick(list, null, NOW, 72 * HOUR, 50 * HOUR);
+    expect(paths(quietHeld).sort()).toEqual(['/s/b/1.jsonl', '/s/d/1.jsonl', '/s/e/1.jsonl']);
+    expect(paths(ordered)).toEqual(['/s/a/1.jsonl', '/s/c/1.jsonl']);
+  });
+});
+
+describe('captureQuietPeriodMs', () => {
+  it('defaults to 0 (off) and honors CC_CAPTURE_QUIET_PERIOD_MS', () => {
+    expect(captureQuietPeriodMs({})).toBe(0);
+    expect(captureQuietPeriodMs({ CC_CAPTURE_QUIET_PERIOD_MS: '0' })).toBe(0);
+    expect(captureQuietPeriodMs({ CC_CAPTURE_QUIET_PERIOD_MS: '7200000' })).toBe(7_200_000);
+    expect(captureQuietPeriodMs({ CC_CAPTURE_QUIET_PERIOD_MS: 'abc' })).toBe(0);
+    expect(captureQuietPeriodMs({ CC_CAPTURE_QUIET_PERIOD_MS: '-5' })).toBe(0);
   });
 });
