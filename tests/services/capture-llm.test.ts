@@ -2063,6 +2063,19 @@ describe('sanitizePriorSummary byte bound', () => {
     expect(block.truncated).toBe(true);
   });
 
+  it('stays within the byte cap for every tail-item length (the truncated flag itself is budgeted)', () => {
+    // 尾端 item 長度掃 1..500 字，讓砍完後的大小落在上限附近各個位置——包含離上限不到 17 bytes 的那些。
+    for (let m = 1; m <= 500; m += 1) {
+      const block = sanitizePriorSummary({
+        summary: '記'.repeat(1_500),
+        decisions: Array.from({ length: 12 }, () => '決'.repeat(500)),
+        next_steps: [...Array.from({ length: 11 }, () => '步'.repeat(500)), '步'.repeat(m)],
+      });
+      expect(bytes(block)).toBeLessThanOrEqual(PRIOR_SUMMARY_MAX_BYTES);
+      expect(block.truncated).toBe(true);
+    }
+  });
+
   it('marks array tail drops as truncated even when bytes are small', () => {
     const block = sanitizePriorSummary({ summary: 's', decisions: Array.from({ length: 13 }, (_, i) => `d${i}`), next_steps: [] });
     expect(block.decisions).toHaveLength(12);

@@ -1289,20 +1289,22 @@ export function sanitizePriorSummary(prior: CapturePriorSummary): PriorSummaryPr
     next_steps: mark(prior.next_steps.length, Math.min(prior.next_steps.length, PRIOR_SUMMARY_MAX_ITEMS), prior.next_steps.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(item)),
   };
 
-  // 位元組收斂：先砍陣列尾端，最後縮 summary。
-  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.next_steps.length > 0) {
-    block.next_steps = block.next_steps.slice(0, -1);
-    truncated = true;
-  }
-  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.decisions.length > 0) {
-    block.decisions = block.decisions.slice(0, -1);
-    truncated = true;
-  }
-  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.summary.length > 1) {
-    block.summary = clampText(block.summary, Math.max(1, Math.floor(block.summary.length / 2)));
-    truncated = true;
-  }
+  // 位元組收斂：先砍陣列尾端，最後縮 summary。旗標一旦成立就立刻放進 block，
+  // 讓每次量測都含它（Codex R3：旗標本身 17 bytes，事後才加會重新超標）。
   if (truncated) block.truncated = true;
+  const over = (): boolean => serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES;
+  while (over() && block.next_steps.length > 0) {
+    block.next_steps = block.next_steps.slice(0, -1);
+    block.truncated = true;
+  }
+  while (over() && block.decisions.length > 0) {
+    block.decisions = block.decisions.slice(0, -1);
+    block.truncated = true;
+  }
+  while (over() && block.summary.length > 1) {
+    block.summary = clampText(block.summary, Math.max(1, Math.floor(block.summary.length / 2)));
+    block.truncated = true;
+  }
   return block;
 }
 

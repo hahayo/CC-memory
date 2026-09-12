@@ -1274,38 +1274,57 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+export type PriorSummaryLookup =
+  | { kind: 'active'; summary: CapturePriorSummary }
+  /** 同鍵只剩 Step C 併掉的 archived 列：這條 spool 的目的地已搬走，不得在舊專案重建 rollup。 */
+  | { kind: 'merged'; mergedInto: string }
+  | { kind: 'none' };
+
 /**
  * 接力摘要（2026-09-12）：抽取前撈同 session 既有 canonical rollup 的 summary／decisions／next_steps
- * 餵給 LLM（見 capture-llm.ts CapturePriorSummary）。best-effort：撈不到或 DB 出錯就不帶，不擋抽取——
- * 沒有它只是退回舊行為（摘要只反映本段）。
+ * 餵給 LLM（見 capture-llm.ts CapturePriorSummary）。
+ * - active 命中 → 帶摘要；
+ * - 沒有 active 但有 archived＋merged_into（Step C 2026-09-05 合併殘留）→ 回 'merged'，呼叫端
+ *   fail-closed：不叫 LLM、不推進 checkpoint（Codex R3 #1 止血；完整路由屬 Step C 後續項）；
+ * - 其餘（含 DB 出錯）→ 'none'，退回舊行為（摘要只反映本段），不擋抽取。
  */
 async function loadPriorSessionSummary(
   db: DbClient,
   projectId: string,
   sessionId: string
-): Promise<CapturePriorSummary | undefined> {
+): Promise<PriorSummaryLookup> {
   const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
   try {
-    const rows = await executeRows<{ summary: unknown; decisions: unknown; next_steps: unknown }>(
+    const rows = await executeRows<{
+      status: unknown; merged_into: unknown; summary: unknown; decisions: unknown; next_steps: unknown;
+    }>(
       db,
       sql`
-        SELECT summary, decisions, next_steps
+        SELECT status, merged_into, summary, decisions, next_steps
         FROM project_memories
         WHERE project_id = ${projectId}
           AND idempotency_key = ${idempotencyKey}
-          AND status = 'active'
+          AND (status = 'active' OR (status = 'archived' AND merged_into IS NOT NULL))
+        ORDER BY (status = 'active') DESC
         LIMIT 1
       `
     );
     const row = rows[0];
-    if (!row || typeof row.summary !== 'string' || row.summary.length === 0) return undefined;
+    if (!row) return { kind: 'none' };
+    if (row.status !== 'active') {
+      return { kind: 'merged', mergedInto: typeof row.merged_into === 'string' ? row.merged_into : 'unknown' };
+    }
+    if (typeof row.summary !== 'string' || row.summary.length === 0) return { kind: 'none' };
     return {
-      summary: row.summary,
-      decisions: stringArray(row.decisions),
-      next_steps: stringArray(row.next_steps),
+      kind: 'active',
+      summary: {
+        summary: row.summary,
+        decisions: stringArray(row.decisions),
+        next_steps: stringArray(row.next_steps),
+      },
     };
   } catch {
-    return undefined;
+    return { kind: 'none' };
   }
 }
 
@@ -2346,9 +2365,21 @@ export async function runCaptureWorkerOnce(
           let retryProvider: string | undefined =
             state.retries[retryKey]?.pendingRetryProvider ?? undefined;
           // 接力摘要：每個窗口抽取前撈一次（同 tick 前一窗剛寫的 rollup 也要接到）。
-          const priorSummary = await loadPriorSessionSummary(
+          const priorLookup = await loadPriorSessionSummary(
             options.db, chunkWindow.projectId, chunkWindow.sessionId
           );
+          if (priorLookup.kind === 'merged') {
+            // 同鍵 rollup 已被 Step C 併到別的專案：不叫 LLM、不動 checkpoint／cursor，本 session 本 tick 到此為止。
+            // info 行（supervisor 忽略），不算失敗——舊 backlog 去留是 Step C 的既定決定。
+            stdout.write(
+              `[cc-memory] auto-capture info: merged-rollup-skip session=${chunkWindow.sessionId} project=${chunkWindow.projectId} merged_into=${priorLookup.mergedInto}\n`
+            );
+            result.skipped += 1;
+            sessionStopped = true;
+            snapshotCompleted = false;
+            break;
+          }
+          const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             // Use provider-specific budget when forcing a specific provider
             const effectiveReserveMs = retryProvider

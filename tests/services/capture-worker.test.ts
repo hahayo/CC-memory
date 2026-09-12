@@ -3575,6 +3575,38 @@ describe('capture worker DB-backed RED contracts', () => {
     expect(await rollups(sql, harness.projectId, harness.sessionId)).toHaveLength(1);
   });
 
+  it('fails closed when the session rollup was merged away by Step C (archived + merged_into): no LLM, no new rollup, checkpoint untouched', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { timestamp: '2026-01-01T00:00:00.000Z', message: 'old backlog for a merged session' },
+    ]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd, timestamp: '2026-07-06T10:00:00.000Z' });
+    // Step C 的結果形狀：目標 survivor 在新專案 active；舊專案同鍵列 archived＋merged_into 指向它。
+    const targetProject = `${harness.projectId}-target`;
+    const [{ id: targetId }] = await sql<{ id: string }[]>`
+      INSERT INTO project_memories (project_id, type, summary, status, idempotency_key)
+      VALUES (${targetProject}, 'session', 'survivor summary', 'active', ${`capture:v05:${targetProject}:${harness.sessionId}`})
+      RETURNING id`;
+    await sql`
+      INSERT INTO project_memories (project_id, type, summary, status, merged_into, idempotency_key)
+      VALUES (${harness.projectId}, 'session', 'old summary', 'archived', ${targetId}::uuid, ${`capture:v05:${harness.projectId}:${harness.sessionId}`})`;
+    const llm = mockLlm([rawExtraction({ summary: 'must not be called', observations: [] })]);
+    const chunks: string[] = [];
+
+    const result = await runWorker(harness, { db, llm, stdout: { write: (c: string) => chunks.push(c) } });
+
+    expect(llm.calls).toHaveLength(0);
+    expect(result.processed).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(chunks.join('')).toContain(`auto-capture info: merged-rollup-skip session=${harness.sessionId}`);
+    // 舊專案不得重建 active rollup；checkpoint 不推進
+    const oldActive = await sql`SELECT id FROM project_memories WHERE project_id = ${harness.projectId} AND status = 'active'`;
+    expect(oldActive).toHaveLength(0);
+    const checkpoints = existsSync(statePath(harness)) ? Object.values(readState(harness).transcripts) : [];
+    expect(checkpoints.every((entry) => entry.checkpoint === 0)).toBe(true);
+  });
+
   it('splits large transcript windows into chunks that write observations under one rollup with monotonic observed_at', async () => {
     const harness = makeHarness();
     const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {
