@@ -112,7 +112,8 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 
 - `CC_CAPTURE_LLM` - capture worker 使用的 LLM provider（預設 `claude-cli`；正式 unit 設為 `codex-cli`；可切 `gemini-flash`）
 - `CC_CAPTURE_LLM_FALLBACK` - 主 provider 失敗時的 fallback（退回）provider；正式 unit 設為 `claude-cli`
-- `CC_CAPTURE_CODEX_MODEL` - codex-cli provider 的模型字串（預設 `gpt-5.6-sol`）
+- `CC_CAPTURE_CODEX_MODEL` - codex-cli provider 的模型字串（預設 `gpt-5.6-sol`；正式 unit 2026-09-12 起設 `gpt-5.6-luna`）
+- `CC_CAPTURE_CODEX_REASONING_EFFORT` - codex-cli provider 的 reasoning effort（推理強度；`minimal|low|medium|high|xhigh|max`）。sandbox 帶 `--ignore-user-config`，`~/.codex/config.toml` 的預設不會生效，未設則用 codex 內建預設；值非法時 provider 整個 disabled（走 fallback）。正式 unit 2026-09-12 起設 `high`
 - `CC_CAPTURE_CODEX_TIMEOUT_MS` - codex-cli provider 的 timeout（逾時）毫秒數（正式 unit：90000）
 - `CC_CAPTURE_MAX_WINDOWS_PER_TICK` - worker 每 tick（執行輪次）最多開幾個 LLM 抽取窗口（正式 unit：1）
 - `CC_CAPTURE_CLAUDE_MODEL` - claude-cli provider 的模型（預設 `haiku`）

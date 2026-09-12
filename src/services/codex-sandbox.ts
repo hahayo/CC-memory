@@ -80,6 +80,14 @@ const SANDBOX_TMPFS_MAX_BYTES = 64 * 1024 * 1024; // 64 MiB
  */
 const MODEL_PATTERN = /^[A-Za-z0-9.][A-Za-z0-9._-]*$/;
 
+/** Reasoning effort levels codex accepts for `model_reasoning_effort`. */
+export const CODEX_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+export function isCodexReasoningEffort(value: string): value is CodexReasoningEffort {
+  return (CODEX_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
 /**
  * UUID v4 pattern for identifying orphaned staging directories.
  */
@@ -129,6 +137,12 @@ export interface CodexSandboxOptions {
   hostCwd: string;
   /** Model string to pass to --model. */
   model: string;
+  /**
+   * Optional reasoning effort passed as `-c model_reasoning_effort=<value>`.
+   * Needed because `--ignore-user-config` drops ~/.codex/config.toml, so the
+   * user's default effort never reaches the sandboxed codex.
+   */
+  reasoningEffort?: CodexReasoningEffort;
   /** Timeout in milliseconds (for the caller to enforce externally). */
   timeoutMs: number;
   /**
@@ -388,6 +402,7 @@ export function buildCodexSandboxCommand(opts: CodexSandboxOptions): CodexSandbo
     '-c', 'mcp_servers={}',
     '-c', 'web_search="disabled"',
     '-c', 'sandbox_permissions=[]',
+    ...(opts.reasoningEffort ? ['-c', `model_reasoning_effort="${opts.reasoningEffort}"`] : []),
     '-C', SANDBOX_CWD,
     '--output-schema', join(SANDBOX_OUT, 'schema.json'),
     '-o', join(SANDBOX_OUT, 'result.json'),

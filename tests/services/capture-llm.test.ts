@@ -1521,6 +1521,55 @@ describe('codex-cli extraction subprocess contract', () => {
     // stagingRoot = join(spoolDir, '..', 'codex-sandbox')
     expect(capturedOpts[0].stagingRoot).toBe(join('/custom/spool/dir', '..', 'codex-sandbox'));
   });
+
+  it('passes CC_CAPTURE_CODEX_REASONING_EFFORT through to the sandbox builder', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: {
+        CC_CAPTURE_LLM: 'codex-cli',
+        CC_CAPTURE_CODEX_MODEL: 'gpt-5.6-luna',
+        CC_CAPTURE_CODEX_REASONING_EFFORT: 'High',
+      },
+      stdout: stdoutSink().stdout,
+      findCodexCli: () => '/opt/codex',
+      runCodexCli: runner,
+      buildSandbox: builder,
+    }));
+
+    await adapter.extract(request());
+
+    expect(capturedOpts[0].model).toBe('gpt-5.6-luna');
+    expect(capturedOpts[0].reasoningEffort).toBe('high');
+  });
+
+  it('omits reasoningEffort when CC_CAPTURE_CODEX_REASONING_EFFORT is unset', async () => {
+    const { builder, capturedOpts } = mockSandboxBuilder();
+    const { runner } = codexRunner({ resultJson: extractionJson() });
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'codex-cli' },
+      stdout: stdoutSink().stdout,
+      findCodexCli: () => '/opt/codex',
+      runCodexCli: runner,
+      buildSandbox: builder,
+    }));
+
+    await adapter.extract(request());
+
+    expect(capturedOpts[0].reasoningEffort).toBeUndefined();
+  });
+
+  it('returns DisabledCaptureLlmAdapter on invalid CC_CAPTURE_CODEX_REASONING_EFFORT', () => {
+    const { stdout, chunks } = stdoutSink();
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'codex-cli', CC_CAPTURE_CODEX_REASONING_EFFORT: 'ultra' },
+      stdout,
+      findCodexCli: () => '/opt/codex',
+    }));
+
+    expect(isCaptureLlmDisabled(adapter)).toBe(true);
+    expect(chunks.join('')).toContain('CC_CAPTURE_CODEX_REASONING_EFFORT');
+  });
 });
 
 // ---------------------------------------------------------------------------
