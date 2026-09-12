@@ -1243,28 +1243,67 @@ export function neutralizePromptDelimiters(text: string): string {
   return text.replace(PROMPT_DELIMITER_TAG, '＜$1$2>');
 }
 
-/** 與 CAPTURE_EXTRACTION_JSON_SCHEMA 同界：summary ≤1500、decisions／next_steps ≤12×500。 */
+/** 與 CAPTURE_EXTRACTION_JSON_SCHEMA 同界：summary ≤1500、decisions／next_steps ≤12×500（字元）。 */
 const PRIOR_SUMMARY_MAX_SUMMARY_CHARS = 1_500;
 const PRIOR_SUMMARY_MAX_ITEMS = 12;
 const PRIOR_SUMMARY_MAX_ITEM_CHARS = 500;
+/**
+ * 序列化後的硬上限（位元組）。字元上限擋不住 UTF-8／JSON 跳脫膨脹（中文 3 bytes／字、控制字元
+ * `\uXXXX` 6 bytes／字，最壞 ~81 KB），所以最終以 bytes 收斂；對 256 KB 窗口與各 provider 上限都是小數。
+ */
+export const PRIOR_SUMMARY_MAX_BYTES = 16 * 1024;
+
+export interface PriorSummaryPromptBlock extends CapturePriorSummary {
+  /** 有任何內容被截掉時標 true，讓模型（與人）知道這份摘要不完整、不要當成事實全貌。 */
+  truncated?: true;
+}
 
 function clampText(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function serializedBytes(block: PriorSummaryPromptBlock): number {
+  return Buffer.byteLength(JSON.stringify(block), 'utf8');
+}
+
 /**
  * DB 端沒有長度約束、parseCaptureLlmExtraction 也不驗 maxLength（Gemini 路徑／人工列可能超界），
- * 所以在 prompt 邊界把 prior summary 夾回 schema 上限（最壞約 13.5 KB），確保它不會把窗口撐爆。
- * （Codex review 2026-09-12 finding 4）
+ * 所以在 prompt 邊界把 prior summary 夾回：先 schema 字元上限，再以 PRIOR_SUMMARY_MAX_BYTES 收斂
+ * （依序：砍 next_steps 尾端 → 砍 decisions 尾端 → 縮 summary）。任何截斷都標 `truncated: true`。
+ * （Codex review 2026-09-12 R1 #4／R2 #4）
  */
-function sanitizePriorSummary(prior: CapturePriorSummary): CapturePriorSummary {
-  const item = (text: string): string =>
-    clampText(neutralizePromptDelimiters(text), PRIOR_SUMMARY_MAX_ITEM_CHARS);
-  return {
-    summary: clampText(neutralizePromptDelimiters(prior.summary), PRIOR_SUMMARY_MAX_SUMMARY_CHARS),
-    decisions: prior.decisions.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(item),
-    next_steps: prior.next_steps.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(item),
+export function sanitizePriorSummary(prior: CapturePriorSummary): PriorSummaryPromptBlock {
+  let truncated = false;
+  const mark = <T>(before: number, after: number, value: T): T => {
+    if (after < before) truncated = true;
+    return value;
   };
+  const item = (text: string): string => {
+    const clean = neutralizePromptDelimiters(text);
+    return mark(clean.length, Math.min(clean.length, PRIOR_SUMMARY_MAX_ITEM_CHARS), clampText(clean, PRIOR_SUMMARY_MAX_ITEM_CHARS));
+  };
+  const cleanSummary = neutralizePromptDelimiters(prior.summary);
+  const block: PriorSummaryPromptBlock = {
+    summary: mark(cleanSummary.length, Math.min(cleanSummary.length, PRIOR_SUMMARY_MAX_SUMMARY_CHARS), clampText(cleanSummary, PRIOR_SUMMARY_MAX_SUMMARY_CHARS)),
+    decisions: mark(prior.decisions.length, Math.min(prior.decisions.length, PRIOR_SUMMARY_MAX_ITEMS), prior.decisions.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(item)),
+    next_steps: mark(prior.next_steps.length, Math.min(prior.next_steps.length, PRIOR_SUMMARY_MAX_ITEMS), prior.next_steps.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(item)),
+  };
+
+  // 位元組收斂：先砍陣列尾端，最後縮 summary。
+  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.next_steps.length > 0) {
+    block.next_steps = block.next_steps.slice(0, -1);
+    truncated = true;
+  }
+  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.decisions.length > 0) {
+    block.decisions = block.decisions.slice(0, -1);
+    truncated = true;
+  }
+  while (serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES && block.summary.length > 1) {
+    block.summary = clampText(block.summary, Math.max(1, Math.floor(block.summary.length / 2)));
+    truncated = true;
+  }
+  if (truncated) block.truncated = true;
+  return block;
 }
 
 function buildCapturePrompt(

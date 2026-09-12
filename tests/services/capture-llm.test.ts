@@ -3,6 +3,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CaptureLlmValidationError,
+  PRIOR_SUMMARY_MAX_BYTES,
+  sanitizePriorSummary,
   FallbackCaptureLlmAdapter,
   createCaptureLlmAdapter,
   isCaptureLlmDisabled,
@@ -288,12 +290,31 @@ describe('claude-cli extraction subprocess contract', () => {
     }));
 
     const block = calls[0].stdin.match(/<prior_summary>\n([^]*?)\n<\/prior_summary>/)?.[1] ?? '';
-    const parsed = JSON.parse(block) as { summary: string; decisions: string[]; next_steps: string[] };
+    const parsed = JSON.parse(block) as { summary: string; decisions: string[]; next_steps: string[]; truncated?: true };
     expect(parsed.summary).toHaveLength(1_500);
     expect(parsed.summary.endsWith('…')).toBe(true);
     expect(parsed.decisions).toHaveLength(12);
     expect(parsed.next_steps[0]).toHaveLength(500);
-    expect(Buffer.byteLength(block)).toBeLessThan(16 * 1024);
+    expect(parsed.truncated).toBe(true);
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it('does not mark an in-bounds prior summary as truncated', async () => {
+    const calls: MockClaudeCliCall[] = [];
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async (call) => {
+          calls.push(call);
+          return { stdout: claudeEnvelope(), exitCode: 0 };
+        },
+      })
+    );
+    await adapter.extract(request({ priorSummary: { summary: 'ok', decisions: ['a'], next_steps: ['b'] } }));
+    const block = calls[0].stdin.match(/<prior_summary>\n([^]*?)\n<\/prior_summary>/)?.[1] ?? '';
+    expect(JSON.parse(block)).toEqual({ summary: 'ok', decisions: ['a'], next_steps: ['b'] });
   });
 
   it('separates extraction instructions into system prompt while delimiting transcript in stdin', async () => {
@@ -2013,5 +2034,38 @@ describe('FallbackCaptureLlmAdapter forceProvider error handling', () => {
     expect(wrapper.worstCaseCallBudgetMsFor('claude-cli')).toBe(76000);
     expect(wrapper.worstCaseCallBudgetMsFor('primary')).toBe(91000);
     expect(wrapper.worstCaseCallBudgetMsFor('codex-cli')).toBe(91000);
+  });
+});
+
+describe('sanitizePriorSummary byte bound', () => {
+  const bytes = (block: unknown): number => Buffer.byteLength(JSON.stringify(block), 'utf8');
+
+  it('caps the serialized block at PRIOR_SUMMARY_MAX_BYTES for CJK text (3 bytes per char)', () => {
+    const block = sanitizePriorSummary({
+      summary: '記'.repeat(1_500),
+      decisions: Array.from({ length: 12 }, () => '決'.repeat(500)),
+      next_steps: Array.from({ length: 12 }, () => '步'.repeat(500)),
+    });
+    expect(bytes(block)).toBeLessThanOrEqual(PRIOR_SUMMARY_MAX_BYTES);
+    expect(block.truncated).toBe(true);
+    // 先砍 next_steps 尾端，再砍 decisions，summary 最後才縮
+    expect(block.next_steps.length).toBeLessThan(block.decisions.length + 1);
+    expect(block.summary.length).toBeGreaterThan(0);
+  });
+
+  it('caps the serialized block for control characters that JSON escapes to 6 bytes each', () => {
+    const block = sanitizePriorSummary({
+      summary: '\u0001'.repeat(1_500),
+      decisions: Array.from({ length: 12 }, () => '\u0001'.repeat(500)),
+      next_steps: Array.from({ length: 12 }, () => '\u0001'.repeat(500)),
+    });
+    expect(bytes(block)).toBeLessThanOrEqual(PRIOR_SUMMARY_MAX_BYTES);
+    expect(block.truncated).toBe(true);
+  });
+
+  it('marks array tail drops as truncated even when bytes are small', () => {
+    const block = sanitizePriorSummary({ summary: 's', decisions: Array.from({ length: 13 }, (_, i) => `d${i}`), next_steps: [] });
+    expect(block.decisions).toHaveLength(12);
+    expect(block.truncated).toBe(true);
   });
 });
