@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { sweepOrphanedSandboxStaging, _testing } from '../../src/services/codex-sandbox.js';
+import { sweepOrphanedSandboxStaging, isCodexReasoningEffort, CODEX_REASONING_EFFORTS, _testing } from '../../src/services/codex-sandbox.js';
 
 const { validateModel, validatePath, MODEL_PATTERN, UUID_PATTERN } = _testing;
 
@@ -293,5 +293,19 @@ describe('stagingRoot validation', () => {
       timeoutMs: 30000,
       stagingRoot: testRoot,
     })).toThrow('Invalid model string');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isCodexReasoningEffort
+// ---------------------------------------------------------------------------
+
+describe('isCodexReasoningEffort', () => {
+  it('accepts every listed effort level', () => {
+    for (const e of CODEX_REASONING_EFFORTS) expect(isCodexReasoningEffort(e)).toBe(true);
+  });
+
+  it('rejects unknown levels and case variants', () => {
+    for (const e of ['ultra', 'High', '', 'high ', 'none']) expect(isCodexReasoningEffort(e)).toBe(false);
   });
 });

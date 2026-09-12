@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 import { GoogleGenAI } from '@google/genai';
 import {
   buildCodexSandboxCommand,
+  CODEX_REASONING_EFFORTS,
+  isCodexReasoningEffort,
+  type CodexReasoningEffort,
   findCodexPackageRoot,
   findCodexHome,
 } from './codex-sandbox.js';
@@ -221,6 +224,7 @@ export interface CodexSandboxOptionsLike {
   hostOutputDir: string;
   hostCwd: string;
   model: string;
+  reasoningEffort?: CodexReasoningEffort;
   timeoutMs: number;
   stagingRoot: string;
 }
@@ -961,7 +965,8 @@ class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
     private readonly timeoutMs: number,
     private readonly runCodexCli: CodexCliRunner,
     private readonly buildSandboxFn: CodexSandboxBuilder,
-    private readonly spoolDir: string
+    private readonly spoolDir: string,
+    readonly reasoningEffort?: CodexReasoningEffort
   ) {
     this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
   }
@@ -991,6 +996,7 @@ class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
           hostOutputDir,
           hostCwd,
           model: this.model,
+          reasoningEffort: this.reasoningEffort,
           timeoutMs: this.timeoutMs,
           stagingRoot,
         });
@@ -1485,6 +1491,16 @@ function createSingleAdapter(
 
   if (provider === CODEX_CLI_CAPTURE_LLM_PROVIDER) {
     const model = env.CC_CAPTURE_CODEX_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL;
+    const rawEffort = env.CC_CAPTURE_CODEX_REASONING_EFFORT?.trim().toLowerCase();
+    let reasoningEffort: CodexReasoningEffort | undefined;
+    if (rawEffort) {
+      if (!isCodexReasoningEffort(rawEffort)) {
+        const reason = `invalid CC_CAPTURE_CODEX_REASONING_EFFORT="${rawEffort}" (expected one of ${CODEX_REASONING_EFFORTS.join('|')})`;
+        if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+        return new DisabledCaptureLlmAdapter(model, reason, provider);
+      }
+      reasoningEffort = rawEffort;
+    }
     const timeoutMs = parsePositiveIntegerEnv(
       env.CC_CAPTURE_CODEX_TIMEOUT_MS,
       DEFAULT_CODEX_CLI_TIMEOUT_MS
@@ -1504,7 +1520,8 @@ function createSingleAdapter(
       timeoutMs,
       options.runCodexCli ?? runCodexCliSubprocess,
       options.buildSandbox ?? buildCodexSandboxCommand,
-      spoolDir
+      spoolDir,
+      reasoningEffort
     );
   }
 

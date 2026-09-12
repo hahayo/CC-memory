@@ -255,7 +255,8 @@ journalctl --user -u cc-memory-todoist-sync.service -n 50 --no-pager
 ```
 Environment=CC_CAPTURE_LLM=codex-cli
 Environment=CC_CAPTURE_LLM_FALLBACK=claude-cli
-Environment=CC_CAPTURE_CODEX_MODEL=gpt-5.6-sol
+Environment=CC_CAPTURE_CODEX_MODEL=gpt-5.6-luna
+Environment=CC_CAPTURE_CODEX_REASONING_EFFORT=high
 Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
 Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=1
 ```
