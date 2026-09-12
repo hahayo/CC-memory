@@ -20,6 +20,7 @@ import {
   type CaptureLlmExtraction,
   type CaptureLlmObservation,
   type CaptureLlmRawResponse,
+  type CapturePriorSummary,
   type FailureCategory,
 } from './capture-llm.js';
 import type { DbClient } from './types.js';
@@ -1269,6 +1270,45 @@ async function safeEmbedding(
   }
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+/**
+ * 接力摘要（2026-09-12）：抽取前撈同 session 既有 canonical rollup 的 summary／decisions／next_steps
+ * 餵給 LLM（見 capture-llm.ts CapturePriorSummary）。best-effort：撈不到或 DB 出錯就不帶，不擋抽取——
+ * 沒有它只是退回舊行為（摘要只反映本段）。
+ */
+async function loadPriorSessionSummary(
+  db: DbClient,
+  projectId: string,
+  sessionId: string
+): Promise<CapturePriorSummary | undefined> {
+  const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
+  try {
+    const rows = await executeRows<{ summary: unknown; decisions: unknown; next_steps: unknown }>(
+      db,
+      sql`
+        SELECT summary, decisions, next_steps
+        FROM project_memories
+        WHERE project_id = ${projectId}
+          AND idempotency_key = ${idempotencyKey}
+          AND status = 'active'
+        LIMIT 1
+      `
+    );
+    const row = rows[0];
+    if (!row || typeof row.summary !== 'string' || row.summary.length === 0) return undefined;
+    return {
+      summary: row.summary,
+      decisions: stringArray(row.decisions),
+      next_steps: stringArray(row.next_steps),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function selectRollup(tx: DbClient, projectId: string, idempotencyKey: string): Promise<RollupRow | null> {
   const rows = await executeRows<RollupRow>(
     tx,
@@ -2305,6 +2345,10 @@ export async function runCaptureWorkerOnce(
           // Load pendingRetryProvider from state for cross-tick continuation
           let retryProvider: string | undefined =
             state.retries[retryKey]?.pendingRetryProvider ?? undefined;
+          // 接力摘要：每個窗口抽取前撈一次（同 tick 前一窗剛寫的 rollup 也要接到）。
+          const priorSummary = await loadPriorSessionSummary(
+            options.db, chunkWindow.projectId, chunkWindow.sessionId
+          );
           for (let attempt = 0; attempt < 2; attempt += 1) {
             // Use provider-specific budget when forcing a specific provider
             const effectiveReserveMs = retryProvider
@@ -2356,6 +2400,7 @@ export async function runCaptureWorkerOnce(
                 hwmOffsetStart: chunkWindow.hwmOffsetStart,
                 hwmOffsetEnd: chunkWindow.hwmOffsetEnd,
                 ...(retryPromptPrefix ? { retryPromptPrefix } : {}),
+                ...(priorSummary ? { priorSummary } : {}),
               }, extractOptions);
               const attemptExtraction = parseCaptureLlmExtraction(attemptRawResponse);
               rawResponse = attemptRawResponse;

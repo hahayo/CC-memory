@@ -3541,6 +3541,37 @@ describe('capture worker DB-backed RED contracts', () => {
     });
   });
 
+  it('relays the stored rollup summary into every window after the first (prior_summary)', async () => {
+    const harness = makeHarness();
+    const { transcriptEnd, cap } = makeChunkedTranscript(harness, { lineCount: 3, messageBytes: 80 });
+    harness.env.CC_CAPTURE_MAX_WINDOW_BYTES = String(cap);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:01:30.000Z',
+    });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'chunk one summary', observations: [observation('chunk one', 'n1')] }),
+      rawExtraction({ summary: 'chunk two summary', observations: [observation('chunk two', 'n2')] }),
+      rawExtraction({ summary: 'chunk three summary', observations: [observation('chunk three', 'n3')] }),
+    ]);
+
+    await expect(
+      runWorker(harness, { db, llm, now: new Date('2026-07-06T10:01:40.000Z') })
+    ).resolves.toMatchObject({ deadLettered: 0, observationsWritten: 3 });
+
+    expect(llm.calls).toHaveLength(3);
+    // 第一窗沒有既有 rollup → 不帶；之後每窗帶前一窗剛寫進 rollup 的摘要（同 tick 也要接到）。
+    expect(llm.calls[0].priorSummary).toBeUndefined();
+    expect(llm.calls[1].priorSummary).toEqual({
+      summary: 'chunk one summary',
+      decisions: ['persist capture output'],
+      next_steps: ['verify retrieval layer'],
+    });
+    expect(llm.calls[2].priorSummary?.summary).toBe('chunk two summary');
+    expect(await rollups(sql, harness.projectId, harness.sessionId)).toHaveLength(1);
+  });
+
   it('splits large transcript windows into chunks that write observations under one rollup with monotonic observed_at', async () => {
     const harness = makeHarness();
     const { transcriptEnd, lines, cap } = makeChunkedTranscript(harness, {

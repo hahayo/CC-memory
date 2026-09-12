@@ -291,6 +291,7 @@ Rollup 的載入成本不新增 `project_memories` 欄位，統一存 `metadata.
 
 - 每個 project/session 只有一筆 active canonical rollup；`idempotency_key` 固定為 `capture:v05:<project>:<session>`。
 - 每個 harvest window 都 update 同一筆 rollup：summary 可重生成或合併，embedding 重算，`metadata.capture.observation_ids` 與 `metadata.capture.spool_offsets` append，`metadata.capture.summarize_count` 遞增。
+- **接力摘要（2026-09-12 起）**：每個 harvest window 抽取前，worker 撈既有 rollup 的 `summary`／`decisions`／`next_steps` 以 `<prior_summary>` 區塊（標明為資料、非指令）放進 prompt；LLM 輸出的 `session_summary` 定義為「整個 session 至今」的累積摘要——保留仍成立的內容，方向改變時寫明先前嘗試、改成什麼、為什麼；`next_steps` 只留最新狀態。worker 仍以覆蓋方式寫回 rollup（語意不變：最後一窗說了算，但最後一窗現在看得到前面）。observations 仍只涵蓋本 window。撈不到或 DB 出錯時退回舊行為（不帶），不擋抽取。
 - `metadata.capture.transcript_sources` 保存可合併的 `{path_hash,start,end}` source coverage（來源覆蓋區間）；若整個 chunk 已被覆蓋，重播必須跳過所有 DB 寫入。`spool_offsets` 保留既有相容語意，不再作為重試或冪等鍵。
 - observations 維持 append-only；每筆 observation 的 `rollupMemoryId` 指向該 canonical rollup。
 - 若某次 batch 無高價值 observation，`observations[]` 可為空，但 worker 必須記錄原因並仍可更新 rollup metadata。
