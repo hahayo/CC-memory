@@ -18,6 +18,7 @@
     "archive:capture-backlog": "npx tsx scripts/archive-capture-backlog.ts",
     "upload:capture-backlog": "npx tsx scripts/upload-capture-backlog.ts",
     "drain:capture": "npx tsx scripts/drain-capture-backlog.ts",
+    "replay:dead-letters": "npx tsx scripts/replay-dead-letters.ts",
     "backup:freshness": "npx tsx scripts/check-backup-freshness.ts",
     "readiness:production": "npx tsx scripts/check-production-readiness.ts",
     "decisions:validate": "node --import tsx scripts/validate-decisions.ts"

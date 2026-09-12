@@ -2644,3 +2644,111 @@ export async function runCaptureWorkerOnce(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Dead-letter replay（死信重跑）
+//
+// parked window 在主迴圈裡 checkpoint 已越過該區間、retry entry 已清；這裡只重做
+// 「抽取 → 寫 DB」，不碰 capture-state 檔。呼叫端負責找到 transcript 原始位元組。
+// ---------------------------------------------------------------------------
+
+export interface ReplayCaptureWindowInput {
+  db: DbClient;
+  llm: CaptureLlmAdapter;
+  projectId: string;
+  sessionId: string;
+  transcriptPath: string;
+  /** transcript 在 [hwmOffset.start, hwmOffset.end) 的原始位元組 */
+  raw: Buffer;
+  spoolOffset: { start: number; end: number };
+  hwmOffset: { start: number; end: number };
+  source: { path_hash: string; start: number; end: number; content_hash: string | null };
+  writerHost?: string;
+  generateEmbedding?: (text: string) => Promise<number[] | null>;
+  embeddingExpected?: boolean;
+  now?: () => Date;
+}
+
+export type ReplayCaptureWindowResult =
+  | {
+      status: 'written';
+      model: string;
+      observationsWritten: number;
+      rollupsWritten: number;
+      embeddingFailed: number;
+    }
+  | { status: 'skipped'; reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' }
+  | { status: 'failed'; errorCode: string; message: string };
+
+export async function replayCaptureWindow(
+  input: ReplayCaptureWindowInput
+): Promise<ReplayCaptureWindowResult> {
+  if (input.source.content_hash && sha256(input.raw) !== input.source.content_hash) {
+    return { status: 'skipped', reason: 'content-hash-mismatch' };
+  }
+  const transcript = stripInjectionMarkerLines(input.raw.toString('utf8'));
+  if (transcript.trim().length === 0) {
+    return { status: 'skipped', reason: 'empty-transcript' };
+  }
+  const window: CaptureWindow = {
+    spool: {
+      projectDir: '',
+      projectIdFromPath: input.projectId,
+      sessionIdFromPath: input.sessionId,
+      path: '',
+      mtimeMs: 0,
+    },
+    records: [],
+    projectId: input.projectId,
+    sessionId: input.sessionId,
+    transcriptPath: input.transcriptPath,
+    transcript,
+    spoolOffsetStart: input.spoolOffset.start,
+    spoolOffsetEnd: input.spoolOffset.end,
+    hwmOffsetStart: input.hwmOffset.start,
+    hwmOffsetEnd: input.hwmOffset.end,
+    processingTime: input.now?.() ?? new Date(),
+  };
+
+  let rawResponse: CaptureLlmRawResponse;
+  let extraction: CaptureLlmExtraction;
+  try {
+    rawResponse = await input.llm.extract({
+      projectId: window.projectId,
+      sessionId: window.sessionId,
+      transcript: window.transcript,
+      spoolOffsetStart: window.spoolOffsetStart,
+      spoolOffsetEnd: window.spoolOffsetEnd,
+      hwmOffsetStart: window.hwmOffsetStart,
+      hwmOffsetEnd: window.hwmOffsetEnd,
+    });
+    extraction = parseCaptureLlmExtraction(rawResponse);
+  } catch (error) {
+    return { status: 'failed', errorCode: llmErrorCode(error), message: llmErrorMessage(error) };
+  }
+
+  const source: TranscriptSourceRange = {
+    path_hash: input.source.path_hash,
+    start: input.source.start,
+    end: input.source.end,
+  };
+  try {
+    const writeResult = await input.db.transaction((tx: DbClient) =>
+      writeCaptureWindow(tx, window, extraction, rawResponse, source, {
+        writerHost: input.writerHost ?? resolveWriterHost(),
+        generateEmbedding: input.generateEmbedding ?? defaultGenerateEmbedding,
+        embeddingExpected: input.embeddingExpected ?? false,
+      })
+    );
+    if (writeResult.replayed) return { status: 'skipped', reason: 'already-covered' };
+    return {
+      status: 'written',
+      model: rawResponse.model,
+      observationsWritten: writeResult.observationsWritten,
+      rollupsWritten: writeResult.rollupsWritten,
+      embeddingFailed: writeResult.embeddingFailed,
+    };
+  } catch (error) {
+    return { status: 'failed', errorCode: 'DB_WRITE_FAILED', message: summarizeDbWriteError(error) };
+  }
+}
