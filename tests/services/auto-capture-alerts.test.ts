@@ -95,19 +95,19 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.fingerprint).toBeNull()
   })
 
-  it('still flags warning lines as alertable even when counts are zero', () => {
+  it('still flags other warning lines as alertable even when counts are zero', () => {
     const assessment = assessAutoCaptureExecution({
       exitCode: 0,
       stdout:
         '[cc-memory] auto-capture info: project-id-remapped session=abc old=__ new=AI_Copilot\n' +
-        '[cc-memory] auto-capture warning: transcript-source-unavailable session=abc source=deadbeef:1-2 attempts=3/5\n' +
+        '[cc-memory] auto-capture warning: blocked session=abc source=deadbeef:1-2 reason=timeout blocked=1/5\n' +
         '[cc-memory] auto-capture summary: processed=0 skipped=1 dead-letter=0 failed=0 fatal=0\n',
       stderr: '',
     })
 
     expect(assessment.ok).toBe(false)
     expect(assessment.nonSummaryLines).toHaveLength(1)
-    expect(assessment.problemLine).toContain('transcript-source-unavailable')
+    expect(assessment.problemLine).toContain('reason=timeout')
   })
 
   it('flags non-summary stdout and dead-letter as alertable', () => {
@@ -159,7 +159,7 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(assessment.problemLine).toContain('CLAUDE_CLI_TIMEOUT')
   })
 
-  it('keeps summary-only transcript-missing informational but alerts on a sanitized source warning', () => {
+  it('keeps transcript-missing and its per-session source warning informational (2026-09-13)', () => {
     const informational = assessAutoCaptureExecution({
       exitCode: 0,
       stdout: '[cc-memory] auto-capture summary: processed=0 skipped=1 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=1 parked=0 yielded=0\n',
@@ -168,16 +168,31 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
     expect(informational.ok).toBe(true)
     expect(informational.transcriptMissingCount).toBe(1)
 
-    const alertable = assessAutoCaptureExecution({
+    // 對話檔已被 Claude Code 30 天清理刪除：操作人無法補救，每 session 重試 5 次都印這行；
+    // 若判成問題，problemLine 含 session id → fingerprint 去重失效 → 每次都發 Telegram。
+    const sourceWarning = assessAutoCaptureExecution({
       exitCode: 0,
       stdout:
         '[cc-memory] auto-capture warning: transcript-source-unavailable session=session-1 source=0123456789ab:0-120 attempts=1/5\n' +
         '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=1 parked=0 yielded=0\n',
       stderr: '',
     })
-    expect(alertable.ok).toBe(false)
-    expect(alertable.transcriptMissingCount).toBe(1)
-    expect(alertable.problemLine).toContain('transcript-source-unavailable')
+    expect(sourceWarning.ok).toBe(true)
+    expect(sourceWarning.transcriptMissingCount).toBe(1)
+    expect(sourceWarning.nonSummaryLines).toEqual([])
+    expect(sourceWarning.problemLine).toBeNull()
+    expect(sourceWarning.fingerprint).toBeNull()
+
+    // 第 5 次重試後進 dead-letter，dead-letter>0 仍照常告警（每 session 叫一次，不是五次）
+    const deadLettered = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: transcript-source-unavailable session=session-1 source=0123456789ab:0-120 attempts=5/5\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=1 failed=0 rate-limited=0 malformed=0 transcript-missing=1 parked=0 yielded=0\n',
+      stderr: '',
+    })
+    expect(deadLettered.ok).toBe(false)
+    expect(deadLettered.problemLine).toBe('dead-letter=1')
   })
 })
 
