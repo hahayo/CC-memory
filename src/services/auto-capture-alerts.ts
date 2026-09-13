@@ -6,6 +6,12 @@ const SUMMARY_PREFIX = '[cc-memory] auto-capture summary:'
 // 2026-09-03：worker 的純資訊行（例如 PR #23 的 project-id-remapped）不代表故障；
 // 若計入 nonSummaryLines 會讓每次 remap 都判成失敗、exit 1、且 problemLine 含 session id → 每次新 fingerprint 各發一則 Telegram 告警。
 export const INFO_PREFIX = '[cc-memory] auto-capture info:'
+// 2026-09-13：transcript-source-unavailable 是「對話檔已被 Claude Code 30 天清理刪除」的每 session 重試紀錄；
+// 操作人無法補救，且結果已由 summary 的 transcript-missing= 計數表達（該計數刻意不影響 ok）。
+// 第 5 次重試後會進 dead-letter，dead-letter>0 仍照常告警，所以每 session 只會叫一次而不是五次。
+// problemLine 含 session id 使 fingerprint 去重失效：2026-09-13 單日 81 次 exit 1 ＋ 160 則 Telegram（同 PR #26 的 info 行問題）。
+export const TRANSCRIPT_SOURCE_UNAVAILABLE_WARNING_PREFIX =
+  '[cc-memory] auto-capture warning: transcript-source-unavailable'
 const DEFAULT_TELEGRAM_API_BASE = 'https://api.telegram.org'
 export const DEFAULT_ALERT_TIMEOUT_MS = 10_000
 export const DEFAULT_RENOTIFY_MS = 6 * 60 * 60 * 1000
@@ -213,8 +219,14 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const stdoutLines = normalizeLines(result.stdout)
   const stderrLines = normalizeLines(result.stderr)
   const summaryLine = stdoutLines.find((line) => line.startsWith(SUMMARY_PREFIX)) ?? null
-  // info 行只是紀錄，不影響健康判定（warning／skipped／其他任何非 summary 行仍算問題）
-  const nonSummaryLines = stdoutLines.filter((line) => line !== summaryLine && !line.startsWith(INFO_PREFIX))
+  // info 行與 transcript-source-unavailable warning 只是紀錄，不影響健康判定
+  //（其他 warning／skipped／任何非 summary 行仍算問題）
+  const nonSummaryLines = stdoutLines.filter(
+    (line) =>
+      line !== summaryLine &&
+      !line.startsWith(INFO_PREFIX) &&
+      !line.startsWith(TRANSCRIPT_SOURCE_UNAVAILABLE_WARNING_PREFIX)
+  )
   const deadLetterCount = parseDeadLetterCount(summaryLine)
   const failedCount = parseFailedCount(summaryLine)
   const rateLimitedCount = parseRateLimitedCount(summaryLine)
