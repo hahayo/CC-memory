@@ -1681,6 +1681,35 @@ describe('codex-cli extraction subprocess contract', () => {
     expect(capturedOpts[0].reasoningEffort).toBeUndefined();
   });
 
+  it('passes CC_CAPTURE_CLAUDE_EFFORT through to the claude CLI --effort flag', async () => {
+    const calls: MockClaudeCliCall[] = [];
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'claude-cli', CC_CAPTURE_CLAUDE_EFFORT: 'Medium' },
+      stdout: stdoutSink().stdout,
+      findClaudeCli: () => 'claude',
+      runClaudeCli: async (call) => {
+        calls.push(call);
+        return { stdout: claudeEnvelope(), exitCode: 0 };
+      },
+    }));
+
+    await adapter.extract(request());
+    const effortFlagIndex = calls[0].args.indexOf('--effort');
+    expect(calls[0].args[effortFlagIndex + 1]).toBe('medium');
+  });
+
+  it('returns DisabledCaptureLlmAdapter on invalid CC_CAPTURE_CLAUDE_EFFORT', () => {
+    const { stdout, chunks } = stdoutSink();
+    const adapter = createCaptureLlmAdapter(adapterOptions({
+      env: { CC_CAPTURE_LLM: 'claude-cli', CC_CAPTURE_CLAUDE_EFFORT: 'minimal' },
+      stdout,
+      findClaudeCli: () => 'claude',
+    }));
+
+    expect(isCaptureLlmDisabled(adapter)).toBe(true);
+    expect(chunks.join('')).toContain('CC_CAPTURE_CLAUDE_EFFORT');
+  });
+
   it('returns DisabledCaptureLlmAdapter on invalid CC_CAPTURE_CODEX_REASONING_EFFORT', () => {
     const { stdout, chunks } = stdoutSink();
     const adapter = createCaptureLlmAdapter(adapterOptions({
