@@ -118,6 +118,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_MAX_WINDOWS_PER_TICK` - worker 每 tick（執行輪次）最多開幾個 LLM 抽取窗口（正式 unit：1）
 - `CC_CAPTURE_CLAUDE_MODEL` - claude-cli provider 的模型（預設 `haiku`）
 - `CC_CAPTURE_CLAUDE_TIMEOUT_MS` - claude-cli provider 的 timeout（逾時）毫秒數
+- `CC_CAPTURE_CLAUDE_EFFORT` - claude-cli provider 的 `--effort`（推理強度；`low|medium|high|xhigh|max`，預設 `low`）。值非法時 provider 整個 disabled。2026-09-16 起補舊帳 runner 設 `medium`（搭配 `claude-sonnet-4-6`）
 - `CC_CAPTURE_GEMINI_TIMEOUT_MS` - gemini-flash provider 的 timeout（逾時）毫秒數
 - `CC_MEMORY_SPOOL_DIR` - spool（本地緩衝）根目錄（預設 `~/.cache/cc-memory/spool`）
 - `CC_MEMORY_SPOOL_MAX_MB` - spool 總大小上限（MB）；超過停止 capture 並告警

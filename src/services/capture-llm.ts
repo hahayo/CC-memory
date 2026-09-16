@@ -22,6 +22,14 @@ export const CODEX_CLI_CAPTURE_LLM_PROVIDER = 'codex-cli';
 export const GEMINI_FLASH_CAPTURE_LLM_PROVIDER = 'gemini-flash';
 export const DEFAULT_CLAUDE_CLI_MODEL = 'haiku';
 export const DEFAULT_CLAUDE_CLI_TIMEOUT_MS = 120_000;
+/** claude CLI `--effort` 允許值（`claude --help`）；預設 low 維持既有行為。 */
+export const CLAUDE_CLI_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ClaudeCliEffort = (typeof CLAUDE_CLI_EFFORTS)[number];
+export const DEFAULT_CLAUDE_CLI_EFFORT: ClaudeCliEffort = 'low';
+
+function isClaudeCliEffort(value: string): value is ClaudeCliEffort {
+  return (CLAUDE_CLI_EFFORTS as readonly string[]).includes(value);
+}
 export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_CODEX_CLI_TIMEOUT_MS = 90_000;
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
@@ -731,7 +739,8 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
     readonly model: string,
     private readonly command: string,
     private readonly timeoutMs: number,
-    private readonly runClaudeCli: ClaudeCliRunner
+    private readonly runClaudeCli: ClaudeCliRunner,
+    private readonly effort: ClaudeCliEffort = DEFAULT_CLAUDE_CLI_EFFORT
   ) {
     this.worstCaseCallBudgetMs = timeoutMs + KILL_GRACE_MS;
   }
@@ -751,7 +760,7 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
           '--model',
           this.model,
           '--effort',
-          'low',
+          this.effort,
           '--output-format',
           'json',
           // safe-mode 會隔離全域 instructions/plugins/hooks，同時保留 Claude 訂閱登入。
@@ -1568,6 +1577,16 @@ function createSingleAdapter(
       env.CC_CAPTURE_CLAUDE_TIMEOUT_MS,
       DEFAULT_CLAUDE_CLI_TIMEOUT_MS
     );
+    const rawEffort = env.CC_CAPTURE_CLAUDE_EFFORT?.trim().toLowerCase();
+    let effort: ClaudeCliEffort = DEFAULT_CLAUDE_CLI_EFFORT;
+    if (rawEffort) {
+      if (!isClaudeCliEffort(rawEffort)) {
+        const reason = `invalid CC_CAPTURE_CLAUDE_EFFORT="${rawEffort}" (expected one of ${CLAUDE_CLI_EFFORTS.join('|')})`;
+        if (emitDisabledWarning) stdout.write(formatCaptureLlmDisabledWarning(provider, reason));
+        return new DisabledCaptureLlmAdapter(model, reason, provider);
+      }
+      effort = rawEffort;
+    }
     let command: string;
     try {
       command = (options.findClaudeCli ?? defaultFindClaudeCli)(env);
@@ -1583,7 +1602,8 @@ function createSingleAdapter(
       model,
       command,
       timeoutMs,
-      options.runClaudeCli ?? runClaudeCliSubprocess
+      options.runClaudeCli ?? runClaudeCliSubprocess,
+      effort
     );
   }
 
