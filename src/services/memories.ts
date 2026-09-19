@@ -773,55 +773,59 @@ async function semanticMemoryIndexCandidates(
 }
 
 /**
- * 組出 RRF（倒數排名融合）用的單一來源序列。
+ * 決定 hybrid RRF（倒數排名融合）的排名分組。
  *
- * RRF 的 rank 取自陣列位置，原本是 [memory..., observation...] 直接串接。超額撈取後若
- * 仍照這樣串，多撈的 memory 會把每一筆 observation 的 rank 往後推約 2×limit，系統性壓低
- * observation（Codex R4 P1）。這裡改為 [memory[0:limit], observation[0:limit], memory[limit:],
- * observation[limit:]]：前 limit 筆各自保有與未超額時完全相同的 rank，超額部分排在後面。
- * 未超額（兩個陣列都 ≤ limit）時輸出與原本串接完全相同。
+ * RRF 的 rank 取自「所在清單」內的位置。原本 memory 與 observation 串成一條清單，observation
+ * 的 rank 從 memory 筆數起算。超額撈取後若仍串成一條，多撈的 memory（含 keyword 路徑
+ * 「DB limit 後再文字過濾」讓 memory 從不足 limit 補滿到 limit 的情況）會把 observation 的
+ * rank 往後推，系統性壓低 observation（Codex R4 P1／R5 P1）。
+ *
+ * - 未超額：回單一串接清單，與原行為完全相同（回歸保證）。
+ * - 超額中：memory 與 observation 各自成一條清單、各自從 0 起算 rank，彼此不影響。
  */
-export function interleaveHybridSources(
+export function hybridRankLists(
   memoryCandidates: IndexSearchCandidate[],
   observationCandidates: IndexSearchCandidate[],
-  limit: number
-): IndexSearchCandidate[] {
-  return [
-    ...memoryCandidates.slice(0, limit),
-    ...observationCandidates.slice(0, limit),
-    ...memoryCandidates.slice(limit),
-    ...observationCandidates.slice(limit),
-  ];
+  overSampling: boolean
+): IndexSearchCandidate[][] {
+  if (!overSampling) return [[...memoryCandidates, ...observationCandidates]];
+  return [memoryCandidates, observationCandidates];
 }
 
+/**
+ * RRF 融合。`keywordLists`／`semanticLists` 各是一組「各自獨立排名」的清單；
+ * 每條清單內的 rank 從 0 起算（見 hybridRankLists）。
+ */
 function combineIndexHybridCandidates(
-  keywordCandidates: IndexSearchCandidate[],
-  semanticCandidates: IndexSearchCandidate[]
+  keywordLists: IndexSearchCandidate[][],
+  semanticLists: IndexSearchCandidate[][]
 ): IndexSearchCandidate[] {
   const k = 60;
   const combined = new Map<string, IndexSearchCandidate>();
 
-  keywordCandidates.forEach((candidate, rank) => {
-    combined.set(candidate.result.id, {
-      ...candidate,
-      baseScore: 1 / (k + rank + 1),
-      semanticScore: null,
+  for (const list of keywordLists) {
+    list.forEach((candidate, rank) => {
+      const rrf = 1 / (k + rank + 1);
+      const existing = combined.get(candidate.result.id);
+      if (existing) {
+        existing.baseScore += rrf;
+      } else {
+        combined.set(candidate.result.id, { ...candidate, baseScore: rrf, semanticScore: null });
+      }
     });
-  });
+  }
 
-  semanticCandidates.forEach((candidate, rank) => {
-    const rrf = 1 / (k + rank + 1);
-    const existing = combined.get(candidate.result.id);
-    if (existing) {
-      existing.baseScore += rrf;
-    } else {
-      combined.set(candidate.result.id, {
-        ...candidate,
-        baseScore: rrf,
-        semanticScore: null,
-      });
-    }
-  });
+  for (const list of semanticLists) {
+    list.forEach((candidate, rank) => {
+      const rrf = 1 / (k + rank + 1);
+      const existing = combined.get(candidate.result.id);
+      if (existing) {
+        existing.baseScore += rrf;
+      } else {
+        combined.set(candidate.result.id, { ...candidate, baseScore: rrf, semanticScore: null });
+      }
+    });
+  }
 
   return Array.from(combined.values());
 }
@@ -969,8 +973,12 @@ export async function searchMemoryIndexes(
   const excludeReserved = !isScoped && !input.includeReserved;
   const includeObservations = shouldIncludeObservations();
   const recency = readSessionRecencyConfig();
-  // observations 關閉時兩道調整都不可能生效，維持原 limit（Codex R4 P2）。
-  const fetchLimit = includeObservations ? candidateFetchLimit(limit, recency) : limit;
+  // observations 進不了候選集（旗標關閉、或 type 過濾只有 decision 會命中 observation）時，
+  // 兩道調整都不可能生效，維持原 limit（Codex R4 P2／R5 P2）。
+  const observationsEligible =
+    includeObservations && (input.type === undefined || input.type === null || input.type === 'decision');
+  const fetchLimit = observationsEligible ? candidateFetchLimit(limit, recency) : limit;
+  const overSampling = fetchLimit > limit;
 
   let candidates: IndexSearchCandidate[];
   if (effectiveMode === 'keyword') {
@@ -1006,8 +1014,8 @@ export async function searchMemoryIndexes(
         : Promise.resolve([]),
     ]);
     candidates = combineIndexHybridCandidates(
-      interleaveHybridSources(keywordMemoryCandidates, keywordObservationCandidates, limit),
-      interleaveHybridSources(semanticMemoryCandidates, semanticObservationCandidates, limit)
+      hybridRankLists(keywordMemoryCandidates, keywordObservationCandidates, overSampling),
+      hybridRankLists(semanticMemoryCandidates, semanticObservationCandidates, overSampling)
     );
   }
 

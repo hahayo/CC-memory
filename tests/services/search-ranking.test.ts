@@ -10,7 +10,7 @@ import type { IndexSearchCandidate } from '../../src/services/observations.js';
 import {
   sortWeightedIndexCandidates,
   candidateFetchLimit,
-  interleaveHybridSources,
+  hybridRankLists,
   type SourceWeights,
   type SessionRecencyConfig,
   type WeightedIndexCandidate,
@@ -627,37 +627,29 @@ describe('candidateFetchLimit — over-sample control', () => {
   });
 });
 
-describe('interleaveHybridSources — RRF rank order under over-sampling', () => {
+describe('hybridRankLists — RRF rank grouping under over-sampling', () => {
   const tag = (prefix: string, n: number): IndexSearchCandidate[] =>
     Array.from({ length: n }, (_, i) => makeCandidate({ result: { title: `${prefix}${i}` } }));
+  const titles = (lists: IndexSearchCandidate[][]): string[][] =>
+    lists.map((l) => l.map((c) => c.result.title));
 
-  it('is identical to plain concatenation when neither source exceeds limit', () => {
-    const mem = tag('m', 3);
-    const obs = tag('o', 2);
-    expect(interleaveHybridSources(mem, obs, 5).map((c) => c.result.title)).toEqual([
-      ...mem.map((c) => c.result.title),
-      ...obs.map((c) => c.result.title),
+  it('returns a single concatenated list when not over-sampling (baseline behaviour)', () => {
+    expect(titles(hybridRankLists(tag('m', 3), tag('o', 2), false))).toEqual([
+      ['m0', 'm1', 'm2', 'o0', 'o1'],
     ]);
   });
 
-  it('keeps the first `limit` observations at the same rank as without over-sampling', () => {
-    const mem = tag('m', 6); // over-sampled: limit=2 → 3× = 6
-    const obs = tag('o', 6);
-    const order = interleaveHybridSources(mem, obs, 2).map((c) => c.result.title);
-    // first observation must sit at index 2 (= limit), exactly as with no over-sampling
-    expect(order.indexOf('o0')).toBe(2);
-    expect(order.slice(0, 4)).toEqual(['m0', 'm1', 'o0', 'o1']);
-    // over-sampled extras follow, memory extras first
-    expect(order.slice(4)).toEqual(['m2', 'm3', 'm4', 'm5', 'o2', 'o3', 'o4', 'o5']);
+  it('ranks memory and observation independently when over-sampling', () => {
+    const lists = hybridRankLists(tag('m', 6), tag('o', 6), true);
+    expect(titles(lists)).toEqual([
+      ['m0', 'm1', 'm2', 'm3', 'm4', 'm5'],
+      ['o0', 'o1', 'o2', 'o3', 'o4', 'o5'],
+    ]);
+    // observation rank is independent of how many memories were fetched
+    expect(lists[1][0].result.title).toBe('o0');
   });
 
-  it('handles an empty observation list (observations disabled)', () => {
-    const mem = tag('m', 4);
-    expect(interleaveHybridSources(mem, [], 2).map((c) => c.result.title)).toEqual([
-      'm0',
-      'm1',
-      'm2',
-      'm3',
-    ]);
+  it('keeps an empty observation list as its own (empty) group when over-sampling', () => {
+    expect(titles(hybridRankLists(tag('m', 4), [], true))).toEqual([['m0', 'm1', 'm2', 'm3'], []]);
   });
 });
