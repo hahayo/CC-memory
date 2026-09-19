@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { connectTestDb, type Sql } from '../helpers/db.js';
-import { timeline, getObservations } from '../../src/services/observations.js';
+import { timeline, getObservations, getObservationsWithHints } from '../../src/services/observations.js';
 import { InvalidArgumentError, NotFoundError } from '../../src/services/errors.js';
 
 const TEST_PREFIX = `obs-${randomUUID().slice(0, 8)}`;
@@ -373,5 +373,110 @@ describe('observations retrieval service (integration, real PG)', () => {
     await expect(
       getObservations(db, [randomUUID(), 'not-a-uuid'], `${TEST_PREFIX}-bad-ids`)
     ).rejects.toBeInstanceOf(InvalidArgumentError);
+  });
+
+  // --- Issue 1: getObservationsWithHints ---
+
+  it('getObservationsWithHints returns hint when ids are memory IDs in the same project', async () => {
+    const projectId = `${TEST_PREFIX}-hints-same`;
+    const sessionId = `session-${randomUUID()}`;
+    const rollupId = await seedRollup(sql, { projectId, sessionId });
+    const obsId = await seedObservation(sql, {
+      projectId,
+      sessionId,
+      observedAt: new Date('2026-07-07T00:00:00.000Z'),
+      title: 'real-obs',
+    });
+
+    const result = await getObservationsWithHints(db, [rollupId, obsId], projectId);
+
+    expect(result.observations.map((r) => r.id)).toEqual([obsId]);
+    expect(result.memoryIdHints).toContain(rollupId);
+    expect(result.memoryIdHints).toHaveLength(1);
+  });
+
+  it('getObservationsWithHints does NOT hint for cross-project memory IDs (isolation)', async () => {
+    const projectId = `${TEST_PREFIX}-hints-cross`;
+    const otherProjectId = `${TEST_PREFIX}-hints-other`;
+    const sessionId = `session-${randomUUID()}`;
+    const otherRollupId = await seedRollup(sql, { projectId: otherProjectId, sessionId });
+
+    const result = await getObservationsWithHints(db, [otherRollupId], projectId);
+
+    expect(result.observations).toEqual([]);
+    expect(result.memoryIdHints).toEqual([]);
+  });
+
+  it('getObservationsWithHints does NOT hint for archived memory IDs', async () => {
+    const projectId = `${TEST_PREFIX}-hints-arch`;
+    const sessionId = `session-${randomUUID()}`;
+    const rollupId = await seedRollup(sql, { projectId, sessionId });
+    // Archive the rollup
+    await sql`UPDATE project_memories SET status = 'archived' WHERE id = ${rollupId}`;
+
+    const result = await getObservationsWithHints(db, [rollupId], projectId);
+
+    expect(result.observations).toEqual([]);
+    expect(result.memoryIdHints).toEqual([]);
+  });
+
+  it('getObservationsWithHints returns empty hints when all ids are valid observation IDs', async () => {
+    const projectId = `${TEST_PREFIX}-hints-none`;
+    const sessionId = `session-${randomUUID()}`;
+    const obsId = await seedObservation(sql, {
+      projectId,
+      sessionId,
+      observedAt: new Date('2026-07-07T00:00:00.000Z'),
+      title: 'all-valid',
+    });
+
+    const result = await getObservationsWithHints(db, [obsId], projectId);
+
+    expect(result.observations.map((r) => r.id)).toEqual([obsId]);
+    expect(result.memoryIdHints).toEqual([]);
+  });
+
+  it('getObservationsWithHints returns empty hints when ids do not exist at all', async () => {
+    const projectId = `${TEST_PREFIX}-hints-ghost`;
+    const ghostId = randomUUID();
+
+    const result = await getObservationsWithHints(db, [ghostId], projectId);
+
+    expect(result.observations).toEqual([]);
+    expect(result.memoryIdHints).toEqual([]);
+  });
+
+  // --- Issue 2: timeline anchor_kind ---
+
+  it('timeline returns anchor_kind "observation" for observation anchors', async () => {
+    const projectId = `${TEST_PREFIX}-kind-obs`;
+    const sessionId = `session-${randomUUID()}`;
+    const anchor = await seedObservation(sql, {
+      projectId,
+      sessionId,
+      observedAt: new Date('2026-07-07T00:00:00.000Z'),
+      title: 'obs-anchor',
+    });
+
+    const result = await timeline(db, anchor, 1, 1, projectId);
+
+    expect(result.anchorKind).toBe('observation');
+  });
+
+  it('timeline returns anchor_kind "rollup" for rollup anchors', async () => {
+    const projectId = `${TEST_PREFIX}-kind-rollup`;
+    const sessionId = `session-${randomUUID()}`;
+    const rollupId = await seedRollup(sql, { projectId, sessionId });
+    await seedObservation(sql, {
+      projectId,
+      sessionId,
+      rollupMemoryId: rollupId,
+      observedAt: new Date('2026-07-07T00:01:00.000Z'),
+      title: 'linked-obs',
+    });
+
+    const result = await timeline(db, rollupId, 1, 1, projectId);
+
+    expect(result.anchorKind).toBe('rollup');
   });
 });

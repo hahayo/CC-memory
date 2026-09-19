@@ -38,7 +38,7 @@ import {
   getProjectStats,
 } from './services/memories.js';
 import { refineDelete } from './services/refine.js';
-import { timeline, getObservations } from './services/observations.js';
+import { timeline, getObservationsWithHints } from './services/observations.js';
 import { createTask, listTasks, updateTask, getTaskStats } from './services/tasks.js';
 import { setReminder, snoozeReminder, getDueReminders } from './services/reminders.js';
 import * as todoist from './services/todoist.js';
@@ -428,7 +428,12 @@ export const BASE_TOOLS: Tool[] = [
   {
     name: 'cc_memory_timeline',
     description:
-      '依 observation 或 capture rollup ID 取得同一專案、同一 session 的前後文索引。project_id 與 project_path 擇一必填。',
+      '依 observation 或 capture rollup ID 取得同一專案、同一 session 的前後文索引。' +
+      'observation anchor：depth_before/depth_after 控制 anchor 前後各回傳幾筆。' +
+      'rollup anchor：回傳該 rollup 涵蓋的所有 observations（上限 100 筆，超過時 truncated=true），' +
+      'depth_before/depth_after 僅控制涵蓋範圍「之外」的額外前後文筆數。' +
+      '回應含 anchor_kind 欄位（"observation" 或 "rollup"）標示走哪條路徑。' +
+      'project_id 與 project_path 擇一必填。',
     inputSchema: {
       type: 'object',
       anyOf: [{ required: ['project_id'] }, { required: ['project_path'] }],
@@ -1042,6 +1047,7 @@ export async function handleToolCall(
         );
         return jsonResult({
           anchor_id: result.anchorId,
+          anchor_kind: result.anchorKind,
           depth_before: result.depthBefore,
           depth_after: result.depthAfter,
           count: result.observations.length,
@@ -1052,10 +1058,21 @@ export async function handleToolCall(
 
       case 'cc_memory_get_observations': {
         const { projectId } = resolveCwdAndProjectId(args, config);
-        const rows = await getObservations(database, args.ids as string[], projectId);
+        const result = await getObservationsWithHints(database, args.ids as string[], projectId);
         return jsonResult({
-          count: rows.length,
-          observations: rows.map(observationFullJson),
+          count: result.observations.length,
+          observations: result.observations.map(observationFullJson),
+          ...(result.memoryIdHints.length > 0
+            ? {
+                memory_id_hints: {
+                  ids: result.memoryIdHints,
+                  message:
+                    '這些 ID 是 memory ID（project_memories），不是 observation ID。' +
+                    '請改用 cc_memory_get 取得記憶全文；若該記憶是 auto-capture rollup，' +
+                    '也可用 cc_memory_timeline 取得它的 observation 時間軸（手動存的記憶沒有 observation，timeline 會回 not found）。',
+                },
+              }
+            : {}),
         });
       }
 
