@@ -52,10 +52,17 @@ export interface IndexSearchCandidate {
 
 export interface TimelineResult {
   anchorId: string;
+  anchorKind: 'observation' | 'rollup';
   depthBefore: number;
   depthAfter: number;
   observations: Observation[];
   truncated?: boolean;
+}
+
+export interface GetObservationsWithHintsResult {
+  observations: Observation[];
+  /** IDs that were not found in observations but exist as active memory IDs in the same project. */
+  memoryIdHints: string[];
 }
 
 function validateSearchInput(input: SearchMemoriesInput): {
@@ -479,6 +486,7 @@ export async function timeline(
 
     return {
       anchorId: guardedAnchorId,
+      anchorKind: 'observation' as const,
       depthBefore: beforeDepth,
       depthAfter: afterDepth,
       observations: [...beforeRows.reverse(), observationAnchor, ...afterRows],
@@ -576,6 +584,7 @@ export async function timeline(
 
   return {
     anchorId: guardedAnchorId,
+    anchorKind: 'rollup' as const,
     depthBefore: beforeDepth,
     depthAfter: afterDepth,
     observations: [...beforeRows.reverse(), ...visibleMiddleRows, ...afterRows],
@@ -607,4 +616,44 @@ export async function getObservations(
     const row = byId.get(id);
     return row ? [row] : [];
   });
+}
+
+/**
+ * getObservations + hint detection: IDs not found in the observations table
+ * are checked against project_memories (same project, active status).
+ * Matching memory IDs are returned as hints so the caller knows to use
+ * cc_memory_get or cc_memory_timeline instead.
+ *
+ * Cross-project memory IDs are never hinted (project isolation).
+ */
+export async function getObservationsWithHints(
+  db: DbClient,
+  ids: string[],
+  projectId: string
+): Promise<GetObservationsWithHintsResult> {
+  const guardedProjectId = validateProjectId(projectId, 'getObservationsWithHints');
+  const foundObservations = await getObservations(db, ids, projectId);
+  const foundIds = new Set(foundObservations.map((row) => row.id));
+  const normalizedIds = validateObservationIds(ids);
+  const missingIds = normalizedIds.filter((id) => !foundIds.has(id));
+
+  if (missingIds.length === 0) {
+    return { observations: foundObservations, memoryIdHints: [] };
+  }
+
+  const memoryRows = (await db
+    .select({ id: projectMemories.id })
+    .from(projectMemories)
+    .where(
+      and(
+        eq(projectMemories.projectId, guardedProjectId),
+        eq(projectMemories.status, 'active'),
+        inArray(projectMemories.id, missingIds)
+      )
+    )) as Array<{ id: string }>;
+
+  return {
+    observations: foundObservations,
+    memoryIdHints: memoryRows.map((row) => row.id),
+  };
 }
