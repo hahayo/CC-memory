@@ -623,6 +623,38 @@ const DEFAULT_SESSION_RECENCY: SessionRecencyConfig = {
   rollupFloor: 1,
 };
 
+/**
+ * Over-sample multiplier for candidate fetch when session-recency or
+ * rollup-floor adjustments are active. Fetching more candidates increases the
+ * chance that same-session companions (later observations, rollups) are present
+ * in the candidate set before re-ranking. This is best-effort: the companion
+ * may still fall outside the over-sampled window.
+ */
+const SESSION_RECENCY_OVERSAMPLE_K = 3;
+
+/**
+ * Hard cap on over-sampled fetch per source, matching the widest existing
+ * per-source fetch in observations.ts (limit * 4 → keywordObservationIndexCandidates).
+ */
+const SESSION_RECENCY_OVERSAMPLE_CAP = 100;
+
+/**
+ * Compute the per-source candidate fetch limit.
+ *
+ * When session-recency or rollup-floor is active, over-sample by K up to CAP
+ * to increase the likelihood that same-session companions are in the candidate
+ * set. When both are disabled, return the caller's limit unchanged (preserving
+ * byte-identical behavior with pre-feature code).
+ */
+export function candidateFetchLimit(
+  limit: number,
+  recency: SessionRecencyConfig
+): number {
+  const active = recency.recencyMin < 1 || recency.rollupFloor > 0;
+  if (!active) return limit;
+  return Math.min(limit * SESSION_RECENCY_OVERSAMPLE_K, SESSION_RECENCY_OVERSAMPLE_CAP);
+}
+
 export function readSessionRecencyConfig(): SessionRecencyConfig {
   return {
     recencyMin: parseWeightEnv(
@@ -795,6 +827,13 @@ function sourceWeight(candidate: IndexSearchCandidate, weights: SourceWeights): 
  *
  * Both passes are no-ops when their respective env value equals the identity
  * value (recencyMin=1.0, rollupFloor=0).
+ *
+ * **Best-effort caveat**: these adjustments can only operate on candidates
+ * already present in the input array. If a same-session companion (later
+ * observation, rollup) was not fetched by the upstream query (e.g. because
+ * limit was too small), neither mechanism can account for it. The caller
+ * should over-sample via `candidateFetchLimit()` to mitigate this, but it
+ * is not a hard guarantee.
  */
 export function sortWeightedIndexCandidates(
   candidates: IndexSearchCandidate[],
@@ -905,21 +944,23 @@ export async function searchMemoryIndexes(
   const isScoped = typeof input.projectId === 'string' && input.projectId.trim().length > 0;
   const excludeReserved = !isScoped && !input.includeReserved;
   const includeObservations = shouldIncludeObservations();
+  const recency = readSessionRecencyConfig();
+  const fetchLimit = candidateFetchLimit(limit, recency);
 
   let candidates: IndexSearchCandidate[];
   if (effectiveMode === 'keyword') {
     const [memoryCandidates, observationCandidates] = await Promise.all([
-      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
+      keywordMemoryIndexCandidates(db, input, fetchLimit, excludeReserved),
       includeObservations
-        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        ? keywordObservationIndexCandidates(db, input, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = [...memoryCandidates, ...observationCandidates];
   } else if (effectiveMode === 'semantic') {
     const [memoryCandidates, observationCandidates] = await Promise.all([
-      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved),
       includeObservations
-        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = [...memoryCandidates, ...observationCandidates];
@@ -930,13 +971,13 @@ export async function searchMemoryIndexes(
       keywordObservationCandidates,
       semanticObservationCandidates,
     ] = await Promise.all([
-      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
-      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      keywordMemoryIndexCandidates(db, input, fetchLimit, excludeReserved),
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved),
       includeObservations
-        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        ? keywordObservationIndexCandidates(db, input, fetchLimit, excludeReserved)
         : Promise.resolve([]),
       includeObservations
-        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = combineIndexHybridCandidates(
@@ -946,7 +987,7 @@ export async function searchMemoryIndexes(
   }
 
   const weights = readSourceWeights();
-  const sorted = sortWeightedIndexCandidates(candidates, weights).slice(0, limit);
+  const sorted = sortWeightedIndexCandidates(candidates, weights, recency).slice(0, limit);
   const results = sorted.map((candidate) => candidate.result);
   const scores =
     effectiveMode === 'semantic'

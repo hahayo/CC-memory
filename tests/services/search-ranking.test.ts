@@ -9,6 +9,7 @@ import type { MemoryIndexResult, SearchResultKind } from '../../src/services/typ
 import type { IndexSearchCandidate } from '../../src/services/observations.js';
 import {
   sortWeightedIndexCandidates,
+  candidateFetchLimit,
   type SourceWeights,
   type SessionRecencyConfig,
   type WeightedIndexCandidate,
@@ -591,5 +592,35 @@ describe('sortWeightedIndexCandidates — combined recency + rollup floor', () =
     expect(candidates[0].result.id).toBe(copy[0].result.id);
     // Input candidate object should not have weightedScore added
     expect((candidates[0] as any).weightedScore).toBeUndefined();
+  });
+});
+
+describe('candidateFetchLimit — over-sample control', () => {
+  it('returns original limit when both recency and floor are disabled', () => {
+    expect(candidateFetchLimit(5, RECENCY_OFF)).toBe(5);
+    expect(candidateFetchLimit(1, RECENCY_OFF)).toBe(1);
+    expect(candidateFetchLimit(50, RECENCY_OFF)).toBe(50);
+  });
+
+  it('over-samples by 3x when recency is enabled', () => {
+    expect(candidateFetchLimit(5, { recencyMin: 0.9, rollupFloor: 0 })).toBe(15);
+    expect(candidateFetchLimit(10, { recencyMin: 0.9, rollupFloor: 0 })).toBe(30);
+  });
+
+  it('over-samples by 3x when rollup floor is enabled', () => {
+    expect(candidateFetchLimit(5, { recencyMin: 1.0, rollupFloor: 1 })).toBe(15);
+  });
+
+  it('over-samples by 3x when both are enabled', () => {
+    expect(candidateFetchLimit(10, RECENCY_ON)).toBe(30);
+  });
+
+  it('caps at 100 regardless of limit', () => {
+    expect(candidateFetchLimit(50, RECENCY_ON)).toBe(100);
+    expect(candidateFetchLimit(200, RECENCY_ON)).toBe(100);
+  });
+
+  it('limit=1 over-samples to 3 when active', () => {
+    expect(candidateFetchLimit(1, RECENCY_ON)).toBe(3);
   });
 });
