@@ -225,7 +225,7 @@ describe('claude-cli extraction subprocess contract', () => {
 
     const systemPromptFlagIndex = calls[0].args.indexOf('--system-prompt');
     expect(calls[0].args[systemPromptFlagIndex + 1]).toContain('<prior_summary>');
-    expect(calls[0].args[systemPromptFlagIndex + 1]).toContain('what was tried first, what replaced it, and why');
+    expect(calls[0].args[systemPromptFlagIndex + 1]).toContain('cumulative state of the entire session');
   });
 
   it('neutralizes delimiter tags smuggled into the prior summary so they cannot close the block', async () => {
@@ -315,6 +315,57 @@ describe('claude-cli extraction subprocess contract', () => {
     await adapter.extract(request({ priorSummary: { summary: 'ok', decisions: ['a'], next_steps: ['b'] } }));
     const block = calls[0].stdin.match(/<prior_summary>\n([^]*?)\n<\/prior_summary>/)?.[1] ?? '';
     expect(JSON.parse(block)).toEqual({ summary: 'ok', decisions: ['a'], next_steps: ['b'] });
+  });
+
+  it('instructs cumulative summary when prior_summary is present', async () => {
+    const calls: MockClaudeCliCall[] = [];
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async (call) => {
+          calls.push(call);
+          return { stdout: claudeEnvelope(), exitCode: 0 };
+        },
+      })
+    );
+
+    await adapter.extract(request({
+      priorSummary: { summary: 'earlier work', decisions: ['d1'], next_steps: ['n1'] },
+    }));
+
+    const systemPromptFlagIndex = calls[0].args.indexOf('--system-prompt');
+    const systemPrompt = calls[0].args[systemPromptFlagIndex + 1];
+
+    // Must instruct cumulative behavior
+    expect(systemPrompt).toContain('cumulative state of the entire session');
+    expect(systemPrompt).toContain('retain conclusions');
+    expect(systemPrompt).toContain('Do not write a summary that only describes the current segment');
+  });
+
+  it('does not include prior_summary block in stdin when no priorSummary is provided', async () => {
+    const calls: MockClaudeCliCall[] = [];
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        stdout: stdoutSink().stdout,
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async (call) => {
+          calls.push(call);
+          return { stdout: claudeEnvelope(), exitCode: 0 };
+        },
+      })
+    );
+
+    await adapter.extract(request());
+
+    // Without priorSummary, stdin must not contain the prior_summary block
+    expect(calls[0].stdin).not.toContain('<prior_summary>');
+    // But system prompt still has the conditional instructions (they are gated by "If a <prior_summary> block is present")
+    const systemPromptFlagIndex = calls[0].args.indexOf('--system-prompt');
+    const systemPrompt = calls[0].args[systemPromptFlagIndex + 1];
+    expect(systemPrompt).toContain('If a <prior_summary> block is present');
   });
 
   it('separates extraction instructions into system prompt while delimiting transcript in stdin', async () => {

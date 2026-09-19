@@ -36,6 +36,7 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
+import { isSummaryDegraded } from './summary-guard.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -154,6 +155,8 @@ interface CaptureMetadata {
     end: number;
     reason: 'no_high_value_observations';
   }>;
+  /** Number of windows where the summary guard kept the prior summary due to degradation. */
+  summary_guard_kept?: number;
 }
 
 interface RollupRow {
@@ -1202,6 +1205,9 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
             (entry as { reason?: unknown }).reason === 'no_high_value_observations'
         )
       : [],
+    ...(typeof record.summary_guard_kept === 'number' && Number.isFinite(record.summary_guard_kept)
+      ? { summary_guard_kept: record.summary_guard_kept }
+      : {}),
   };
 }
 
@@ -1423,6 +1429,28 @@ async function updateRollup(
   `);
 }
 
+/**
+ * Update only the metadata (and updated_at) of an existing rollup, without touching
+ * summary, keywords, decisions, next_steps, or embedding.  Used when the summary
+ * degradation guard fires: observations are still persisted, metadata (including the
+ * guard counter) is written, but the accumulated summary is kept intact.
+ */
+async function updateRollupMetadataOnly(
+  tx: DbClient,
+  input: {
+    rollupId: string;
+    metadata: Record<string, unknown>;
+  }
+): Promise<void> {
+  await tx.execute(sql`
+    UPDATE project_memories
+    SET
+      metadata = ${JSON.stringify(input.metadata)}::jsonb,
+      updated_at = NOW()
+    WHERE id = ${input.rollupId}
+  `);
+}
+
 // drizzle raw sql template 對 JS array 參數會綁成 record（PG 報 cannot cast type
 // record to text[]）——以 PG array literal 文字綁定再 ::text[] cast。
 function pgTextArrayLiteral(values: string[]): string {
@@ -1548,6 +1576,9 @@ async function writeCaptureWindow(
   source: TranscriptSourceRange,
   options: Required<Pick<CaptureWorkerOptions, 'writerHost' | 'generateEmbedding'>> & {
     embeddingExpected: boolean;
+    summaryGuardEnabled?: boolean;
+    priorSummaryText?: string | null;
+    stdout?: { write(chunk: string): unknown };
   }
 ): Promise<WriteWindowResult> {
   const summary = extraction.session_summary;
@@ -1649,23 +1680,44 @@ async function writeCaptureWindow(
     if (insertedId) insertedObservationIds.push(insertedId);
   }
 
+  // Summary degradation guard: if the new summary is a degraded version of the prior,
+  // keep the prior summary and only update metadata (observations are still written above).
+  const guardTriggered =
+    options.summaryGuardEnabled !== false &&
+    existing !== null &&
+    isSummaryDegraded(options.priorSummaryText, summary.summary);
+
   const finalCapture: CaptureMetadata = {
     ...baseCapture,
     observation_ids: [...baseCapture.observation_ids, ...insertedObservationIds],
+    ...(guardTriggered
+      ? { summary_guard_kept: (baseCapture.summary_guard_kept ?? 0) + 1 }
+      : {}),
   };
   const captureMetadata = mergeMetadata(existing?.metadata, finalCapture);
   const finalMetadata = rollupEmbedding.policy
     ? mergeEmbeddingPolicyMetadata(captureMetadata, rollupEmbedding.policy)
     : captureMetadata;
-  await updateRollup(tx, {
-    rollupId,
-    window,
-    extraction,
-    contentHash: rollupContentHash,
-    writerHost: options.writerHost,
-    embedding: rollupEmbedding.value,
-    metadata: finalMetadata,
-  });
+
+  if (guardTriggered) {
+    options.stdout?.write(
+      `[cc-memory] auto-capture info: summary-guard-kept session=${window.sessionId} project=${window.projectId} prior_len=${options.priorSummaryText?.length ?? 0} new_len=${summary.summary.length}\n`
+    );
+    await updateRollupMetadataOnly(tx, {
+      rollupId,
+      metadata: finalMetadata,
+    });
+  } else {
+    await updateRollup(tx, {
+      rollupId,
+      window,
+      extraction,
+      contentHash: rollupContentHash,
+      writerHost: options.writerHost,
+      embedding: rollupEmbedding.value,
+      metadata: finalMetadata,
+    });
+  }
 
   return {
     observationsWritten: insertedObservationIds.length,
@@ -2649,6 +2701,8 @@ export async function runCaptureWorkerOnce(
           }
 
           try {
+            const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
+            const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
             const writeResult = await options.db.transaction((tx: DbClient) =>
               writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {
                 path_hash: chunk.pathHash,
@@ -2658,6 +2712,9 @@ export async function runCaptureWorkerOnce(
                 writerHost,
                 generateEmbedding,
                 embeddingExpected,
+                summaryGuardEnabled,
+                priorSummaryText: priorSummary?.summary ?? null,
+                stdout,
               })
             );
             result.processed += 1;
