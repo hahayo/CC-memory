@@ -4703,7 +4703,7 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
         llmCalls.push(req);
         return {
           model: 'test-model',
-          raw: JSON.stringify({
+          text: JSON.stringify({
             session_summary: { summary: 'replayed cumulative', keywords: ['auth'], decisions: ['use SSO'], next_steps: [] },
             observations: [],
           }),
