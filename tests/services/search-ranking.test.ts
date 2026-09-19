@@ -615,10 +615,10 @@ describe('candidateFetchLimit — over-sample control', () => {
     expect(candidateFetchLimit(10, RECENCY_ON)).toBe(30);
   });
 
-  it('caps the over-sampled portion at 100 but never below the requested limit', () => {
-    expect(candidateFetchLimit(50, RECENCY_ON)).toBe(100);
-    expect(candidateFetchLimit(100, RECENCY_ON)).toBe(100);
-    expect(candidateFetchLimit(200, RECENCY_ON)).toBe(200);
+  it('caps only the over-sampled excess at 100; requested limit is always fetched in full', () => {
+    expect(candidateFetchLimit(50, RECENCY_ON)).toBe(150); // 50 + min(100, 100)
+    expect(candidateFetchLimit(100, RECENCY_ON)).toBe(200); // 100 + min(200, 100)
+    expect(candidateFetchLimit(200, RECENCY_ON)).toBe(300); // 200 + min(400, 100)
   });
 
   it('limit=1 over-samples to 3 when active', () => {
