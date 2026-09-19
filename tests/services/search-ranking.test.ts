@@ -10,6 +10,7 @@ import type { IndexSearchCandidate } from '../../src/services/observations.js';
 import {
   sortWeightedIndexCandidates,
   candidateFetchLimit,
+  interleaveHybridSources,
   type SourceWeights,
   type SessionRecencyConfig,
   type WeightedIndexCandidate,
@@ -623,5 +624,40 @@ describe('candidateFetchLimit — over-sample control', () => {
 
   it('limit=1 over-samples to 3 when active', () => {
     expect(candidateFetchLimit(1, RECENCY_ON)).toBe(3);
+  });
+});
+
+describe('interleaveHybridSources — RRF rank order under over-sampling', () => {
+  const tag = (prefix: string, n: number): IndexSearchCandidate[] =>
+    Array.from({ length: n }, (_, i) => makeCandidate({ result: { title: `${prefix}${i}` } }));
+
+  it('is identical to plain concatenation when neither source exceeds limit', () => {
+    const mem = tag('m', 3);
+    const obs = tag('o', 2);
+    expect(interleaveHybridSources(mem, obs, 5).map((c) => c.result.title)).toEqual([
+      ...mem.map((c) => c.result.title),
+      ...obs.map((c) => c.result.title),
+    ]);
+  });
+
+  it('keeps the first `limit` observations at the same rank as without over-sampling', () => {
+    const mem = tag('m', 6); // over-sampled: limit=2 → 3× = 6
+    const obs = tag('o', 6);
+    const order = interleaveHybridSources(mem, obs, 2).map((c) => c.result.title);
+    // first observation must sit at index 2 (= limit), exactly as with no over-sampling
+    expect(order.indexOf('o0')).toBe(2);
+    expect(order.slice(0, 4)).toEqual(['m0', 'm1', 'o0', 'o1']);
+    // over-sampled extras follow, memory extras first
+    expect(order.slice(4)).toEqual(['m2', 'm3', 'm4', 'm5', 'o2', 'o3', 'o4', 'o5']);
+  });
+
+  it('handles an empty observation list (observations disabled)', () => {
+    const mem = tag('m', 4);
+    expect(interleaveHybridSources(mem, [], 2).map((c) => c.result.title)).toEqual([
+      'm0',
+      'm1',
+      'm2',
+      'm3',
+    ]);
   });
 });

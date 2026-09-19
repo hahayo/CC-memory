@@ -772,6 +772,28 @@ async function semanticMemoryIndexCandidates(
   }));
 }
 
+/**
+ * 組出 RRF（倒數排名融合）用的單一來源序列。
+ *
+ * RRF 的 rank 取自陣列位置，原本是 [memory..., observation...] 直接串接。超額撈取後若
+ * 仍照這樣串，多撈的 memory 會把每一筆 observation 的 rank 往後推約 2×limit，系統性壓低
+ * observation（Codex R4 P1）。這裡改為 [memory[0:limit], observation[0:limit], memory[limit:],
+ * observation[limit:]]：前 limit 筆各自保有與未超額時完全相同的 rank，超額部分排在後面。
+ * 未超額（兩個陣列都 ≤ limit）時輸出與原本串接完全相同。
+ */
+export function interleaveHybridSources(
+  memoryCandidates: IndexSearchCandidate[],
+  observationCandidates: IndexSearchCandidate[],
+  limit: number
+): IndexSearchCandidate[] {
+  return [
+    ...memoryCandidates.slice(0, limit),
+    ...observationCandidates.slice(0, limit),
+    ...memoryCandidates.slice(limit),
+    ...observationCandidates.slice(limit),
+  ];
+}
+
 function combineIndexHybridCandidates(
   keywordCandidates: IndexSearchCandidate[],
   semanticCandidates: IndexSearchCandidate[]
@@ -947,7 +969,8 @@ export async function searchMemoryIndexes(
   const excludeReserved = !isScoped && !input.includeReserved;
   const includeObservations = shouldIncludeObservations();
   const recency = readSessionRecencyConfig();
-  const fetchLimit = candidateFetchLimit(limit, recency);
+  // observations 關閉時兩道調整都不可能生效，維持原 limit（Codex R4 P2）。
+  const fetchLimit = includeObservations ? candidateFetchLimit(limit, recency) : limit;
 
   let candidates: IndexSearchCandidate[];
   if (effectiveMode === 'keyword') {
@@ -983,8 +1006,8 @@ export async function searchMemoryIndexes(
         : Promise.resolve([]),
     ]);
     candidates = combineIndexHybridCandidates(
-      [...keywordMemoryCandidates, ...keywordObservationCandidates],
-      [...semanticMemoryCandidates, ...semanticObservationCandidates]
+      interleaveHybridSources(keywordMemoryCandidates, keywordObservationCandidates, limit),
+      interleaveHybridSources(semanticMemoryCandidates, semanticObservationCandidates, limit)
     );
   }
 
