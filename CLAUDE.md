@@ -141,8 +141,8 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_MEMORY_WEIGHT_ROLLUP` - search ranking source weight：rollup 摘要（預設 `0.85`）；parse 失敗用預設
 - `CC_MEMORY_WEIGHT_OBSERVATION_DECISION` - search ranking source weight：decision observation（預設 `0.80`）；parse 失敗用預設
 - `CC_MEMORY_WEIGHT_OBSERVATION_AUTO` - search ranking source weight：auto observation（預設 `0.65`）；parse 失敗用預設
-- `CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN` - 同 session 內 observation 的時序加權（session recency weighting）最低乘數（預設 `0.90`）：最早 observation 得此乘數、最晚得 `1.0`、中間線性內插（dense-rank）；設 `1.0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（上限 100）
-- `CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR` - rollup 的加權分數下限保護（rollup session floor）：同 session 的 rollup 不低於該 session 內最高 observation 加權分數（預設 `1`＝啟用）；設 `0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（上限 100）
+- `CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN` - 同 session 內 observation 的時序加權（session recency weighting）最低乘數（預設 `0.90`）：最早 observation 得此乘數、最晚得 `1.0`、中間線性內插（dense-rank）；設 `1.0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（超額部分上限 100，不低於原 limit）
+- `CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR` - rollup 的加權分數下限保護（rollup session floor）：同 session 的 rollup 不低於該 session 內最高 observation 加權分數（預設 `1`＝啟用）；設 `0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（超額部分上限 100，不低於原 limit）
 - `CC_MEMORY_CAPTURE_CHILD` - 遞迴採集斷路器：worker spawn 的子程序設為 1，hooks（掛鉤）偵測到即 exit 0
 - `CC_CAPTURE_TICK_BUDGET_MS` - worker 每 tick（執行輪次）的時間預算毫秒（預設 240000；0=停用；預算耗盡則不開新窗優雅收尾）
 - `EMBEDDING_MODEL` - embedding（嵌入向量）模型名稱（預設 `gemini-embedding-001`）

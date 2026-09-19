@@ -652,7 +652,8 @@ export function candidateFetchLimit(
 ): number {
   const active = recency.recencyMin < 1 || recency.rollupFloor > 0;
   if (!active) return limit;
-  return Math.min(limit * SESSION_RECENCY_OVERSAMPLE_K, SESSION_RECENCY_OVERSAMPLE_CAP);
+  // CAP 只限制超額的部分；呼叫端要求的 limit 本身永遠不被砍（Codex R2 P2）。
+  return Math.max(limit, Math.min(limit * SESSION_RECENCY_OVERSAMPLE_K, SESSION_RECENCY_OVERSAMPLE_CAP));
 }
 
 export function readSessionRecencyConfig(): SessionRecencyConfig {
