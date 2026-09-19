@@ -158,6 +158,8 @@ interface CaptureMetadata {
   }>;
   /** Number of windows where the summary guard kept the prior summary due to degradation. */
   summary_guard_kept?: number;
+  /** Rejected summary text from the most recent guarded window, awaiting merge into the next successful cumulative summary. Cleared on a non-guarded write. */
+  summary_guard_pending?: string;
 }
 
 interface RollupRow {
@@ -1209,6 +1211,9 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
     ...(typeof record.summary_guard_kept === 'number' && Number.isFinite(record.summary_guard_kept)
       ? { summary_guard_kept: record.summary_guard_kept }
       : {}),
+    ...(typeof record.summary_guard_pending === 'string' && record.summary_guard_pending.length > 0
+      ? { summary_guard_pending: record.summary_guard_pending }
+      : {}),
   };
 }
 
@@ -1303,11 +1308,11 @@ async function loadPriorSessionSummary(
   const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
   try {
     const rows = await executeRows<{
-      status: unknown; merged_into: unknown; summary: unknown; decisions: unknown; next_steps: unknown;
+      status: unknown; merged_into: unknown; summary: unknown; decisions: unknown; next_steps: unknown; metadata: unknown;
     }>(
       db,
       sql`
-        SELECT status, merged_into, summary, decisions, next_steps
+        SELECT status, merged_into, summary, decisions, next_steps, metadata
         FROM project_memories
         WHERE project_id = ${projectId}
           AND idempotency_key = ${idempotencyKey}
@@ -1322,12 +1327,16 @@ async function loadPriorSessionSummary(
       return { kind: 'merged', mergedInto: typeof row.merged_into === 'string' ? row.merged_into : 'unknown' };
     }
     if (typeof row.summary !== 'string' || row.summary.length === 0) return { kind: 'none' };
+    // Check for a pending summary from a guarded window that needs merging.
+    const capture = existingCaptureMetadata(row.metadata);
+    const pendingSummary = capture?.summary_guard_pending;
     return {
       kind: 'active',
       summary: {
         summary: row.summary,
         decisions: stringArray(row.decisions),
         next_steps: stringArray(row.next_steps),
+        ...(pendingSummary ? { pendingSummary } : {}),
       },
     };
   } catch {
@@ -1661,6 +1670,16 @@ async function writeCaptureWindow(
       : priorGuardKept > 0
         ? { summary_guard_kept: priorGuardKept }
         : {}),
+    // When the guard triggers, store the rejected summary (clamped to schema limit)
+    // so the next window's LLM can merge it.  On a normal (non-guarded) write,
+    // the pending field is omitted (= cleared from metadata).
+    ...(guardTriggered
+      ? {
+          summary_guard_pending: summary.summary.length > PRIOR_SUMMARY_MAX_SUMMARY_CHARS
+            ? summary.summary.slice(0, PRIOR_SUMMARY_MAX_SUMMARY_CHARS)
+            : summary.summary,
+        }
+      : {}),
   };
 
   let rollupId = existing?.id ?? null;
@@ -2819,6 +2838,8 @@ export interface ReplayCaptureWindowInput {
   generateEmbedding?: (text: string) => Promise<number[] | null>;
   embeddingExpected?: boolean;
   now?: () => Date;
+  stdout?: { write(chunk: string): unknown };
+  env?: Record<string, string | undefined>;
 }
 
 export type ReplayCaptureWindowResult =
@@ -2862,6 +2883,11 @@ export async function replayCaptureWindow(
     processingTime: input.now?.() ?? new Date(),
   };
 
+  // Load prior summary so the replay path gets the same cumulative context
+  // and summary guard protection as the main capture path.
+  const priorLookup = await loadPriorSessionSummary(input.db, input.projectId, input.sessionId);
+  const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
+
   let rawResponse: CaptureLlmRawResponse;
   let extraction: CaptureLlmExtraction;
   try {
@@ -2873,11 +2899,16 @@ export async function replayCaptureWindow(
       spoolOffsetEnd: window.spoolOffsetEnd,
       hwmOffsetStart: window.hwmOffsetStart,
       hwmOffsetEnd: window.hwmOffsetEnd,
+      ...(priorSummary ? { priorSummary } : {}),
     });
     extraction = parseCaptureLlmExtraction(rawResponse);
   } catch (error) {
     return { status: 'failed', errorCode: llmErrorCode(error), message: llmErrorMessage(error) };
   }
+
+  const env = input.env ?? process.env;
+  const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
+  const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
 
   const source: TranscriptSourceRange = {
     path_hash: input.source.path_hash,
@@ -2890,6 +2921,9 @@ export async function replayCaptureWindow(
         writerHost: input.writerHost ?? resolveWriterHost(),
         generateEmbedding: input.generateEmbedding ?? defaultGenerateEmbedding,
         embeddingExpected: input.embeddingExpected ?? false,
+        summaryGuardEnabled,
+        priorSummaryText: priorSummary?.summary ?? null,
+        stdout: input.stdout,
       })
     );
     if (writeResult.replayed) return { status: 'skipped', reason: 'already-covered' };
