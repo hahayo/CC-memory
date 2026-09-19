@@ -536,14 +536,29 @@ export async function searchMemories(
   };
 }
 
-interface SourceWeights {
+export interface SourceWeights {
   manual: number;
   rollup: number;
   observationDecision: number;
   observationAuto: number;
 }
 
-interface WeightedIndexCandidate extends IndexSearchCandidate {
+export interface SessionRecencyConfig {
+  /**
+   * Minimum multiplier for the earliest observation in a session group.
+   * Latest gets 1.0; linearly interpolated for intermediate positions.
+   * Set to 1.0 to disable (no recency adjustment).
+   */
+  recencyMin: number;
+  /**
+   * Whether to floor a rollup's weightedScore at the max observation
+   * weightedScore within the same session.
+   * Set to 0 to disable; any positive value enables.
+   */
+  rollupFloor: number;
+}
+
+export interface WeightedIndexCandidate extends IndexSearchCandidate {
   weightedScore: number;
 }
 
@@ -599,6 +614,24 @@ function readSourceWeights(): SourceWeights {
     observationAuto: parseWeightEnv(
       'CC_MEMORY_WEIGHT_OBSERVATION_AUTO',
       DEFAULT_SOURCE_WEIGHTS.observationAuto
+    ),
+  };
+}
+
+const DEFAULT_SESSION_RECENCY: SessionRecencyConfig = {
+  recencyMin: 0.9,
+  rollupFloor: 1,
+};
+
+export function readSessionRecencyConfig(): SessionRecencyConfig {
+  return {
+    recencyMin: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN',
+      DEFAULT_SESSION_RECENCY.recencyMin
+    ),
+    rollupFloor: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR',
+      DEFAULT_SESSION_RECENCY.rollupFloor
     ),
   };
 }
@@ -744,21 +777,116 @@ function sourceWeight(candidate: IndexSearchCandidate, weights: SourceWeights): 
   return result.type === 'decision' ? weights.observationDecision : weights.observationAuto;
 }
 
-function sortWeightedIndexCandidates(
+/**
+ * Apply session-recency multipliers and rollup floor adjustments, then sort.
+ *
+ * Two post-weighting adjustment passes (both scoped per projectId+sessionId group):
+ *
+ * 1. **Recency pass** — observations with a non-null sessionId get a linear
+ *    multiplier from `recencyMin` (earliest) to `1.0` (latest) based on their
+ *    `occurredAt` rank within the group. Ties on `occurredAt` receive the same
+ *    multiplier (dense-rank). Rollups and manuals are untouched.
+ *
+ * 2. **Rollup floor pass** — if a rollup and its observations are both in the
+ *    candidate set, the rollup's weightedScore is floored at the maximum
+ *    observation weightedScore in that group (after recency). The comparator's
+ *    existing sourceOrder tie-break (rollup=1 < observation=2/3) guarantees
+ *    that equal scores still place the rollup first.
+ *
+ * Both passes are no-ops when their respective env value equals the identity
+ * value (recencyMin=1.0, rollupFloor=0).
+ */
+export function sortWeightedIndexCandidates(
   candidates: IndexSearchCandidate[],
-  weights: SourceWeights
+  weights: SourceWeights,
+  recency?: SessionRecencyConfig
 ): WeightedIndexCandidate[] {
-  return candidates
-    .map((candidate) => ({
-      ...candidate,
-      weightedScore: candidate.baseScore * sourceWeight(candidate, weights),
-    }))
-    .sort((a, b) => {
-      if (b.weightedScore !== a.weightedScore) return b.weightedScore - a.weightedScore;
-      if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
-      if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
-      return b.result.occurredAt.getTime() - a.result.occurredAt.getTime();
-    });
+  const cfg = recency ?? readSessionRecencyConfig();
+
+  // Step 1: compute initial weightedScore (unchanged from original logic)
+  const weighted: WeightedIndexCandidate[] = candidates.map((candidate) => ({
+    ...candidate,
+    weightedScore: candidate.baseScore * sourceWeight(candidate, weights),
+  }));
+
+  // Step 2: session-recency multiplier (observations only, per projectId+sessionId)
+  if (cfg.recencyMin < 1) {
+    const groups = new Map<string, WeightedIndexCandidate[]>();
+    for (const item of weighted) {
+      if (item.result.kind !== 'observation' || item.result.sessionId == null) continue;
+      const groupKey = `${item.result.projectId}\0${item.result.sessionId}`;
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = [];
+        groups.set(groupKey, group);
+      }
+      group.push(item);
+    }
+
+    for (const group of groups.values()) {
+      if (group.length <= 1) continue; // single item gets multiplier 1.0
+
+      // Sort copy by occurredAt ascending to assign dense-rank positions
+      const sorted = [...group].sort(
+        (a, b) => a.result.occurredAt.getTime() - b.result.occurredAt.getTime()
+      );
+
+      // Assign dense ranks (same occurredAt → same rank)
+      const ranks: number[] = [];
+      let currentRank = 0;
+      for (let i = 0; i < sorted.length; i++) {
+        if (i > 0 && sorted[i].result.occurredAt.getTime() !== sorted[i - 1].result.occurredAt.getTime()) {
+          currentRank++;
+        }
+        ranks.push(currentRank);
+      }
+      const maxRank = ranks[ranks.length - 1];
+
+      if (maxRank === 0) continue; // all same timestamp, all get 1.0
+
+      for (let i = 0; i < sorted.length; i++) {
+        const t = ranks[i] / maxRank; // 0.0 (earliest) → 1.0 (latest)
+        const multiplier = cfg.recencyMin + (1 - cfg.recencyMin) * t;
+        sorted[i].weightedScore *= multiplier;
+      }
+    }
+  }
+
+  // Step 3: rollup floor (per projectId+sessionId)
+  if (cfg.rollupFloor > 0) {
+    // Build groups of rollup + observations sharing a session
+    const sessionItems = new Map<string, { rollups: WeightedIndexCandidate[]; maxObsScore: number }>();
+    for (const item of weighted) {
+      const sid = item.result.sessionId;
+      if (sid == null) continue;
+      const groupKey = `${item.result.projectId}\0${sid}`;
+      let entry = sessionItems.get(groupKey);
+      if (!entry) {
+        entry = { rollups: [], maxObsScore: -Infinity };
+        sessionItems.set(groupKey, entry);
+      }
+      if (item.result.kind === 'rollup') {
+        entry.rollups.push(item);
+      } else if (item.result.kind === 'observation') {
+        entry.maxObsScore = Math.max(entry.maxObsScore, item.weightedScore);
+      }
+    }
+
+    for (const entry of sessionItems.values()) {
+      if (entry.rollups.length === 0 || entry.maxObsScore === -Infinity) continue;
+      for (const rollup of entry.rollups) {
+        rollup.weightedScore = Math.max(rollup.weightedScore, entry.maxObsScore);
+      }
+    }
+  }
+
+  // Step 4: sort — comparator is identical to the original
+  return weighted.sort((a, b) => {
+    if (b.weightedScore !== a.weightedScore) return b.weightedScore - a.weightedScore;
+    if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
+    if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
+    return b.result.occurredAt.getTime() - a.result.occurredAt.getTime();
+  });
 }
 
 export async function searchMemoryIndexes(
