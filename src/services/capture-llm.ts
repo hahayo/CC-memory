@@ -1254,7 +1254,7 @@ export function neutralizePromptDelimiters(text: string): string {
 }
 
 /** 與 CAPTURE_EXTRACTION_JSON_SCHEMA 同界：summary ≤1500、decisions／next_steps ≤12×500（字元）。 */
-const PRIOR_SUMMARY_MAX_SUMMARY_CHARS = 1_500;
+export const PRIOR_SUMMARY_MAX_SUMMARY_CHARS = 1_500;
 const PRIOR_SUMMARY_MAX_ITEMS = 12;
 const PRIOR_SUMMARY_MAX_ITEM_CHARS = 500;
 /**

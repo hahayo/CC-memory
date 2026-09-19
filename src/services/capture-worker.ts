@@ -10,6 +10,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   CLAUDE_CLI_PROVIDER_ID,
   CaptureLlmValidationError,
+  PRIOR_SUMMARY_MAX_SUMMARY_CHARS,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
   isCaptureLlmDisabled,
@@ -1588,6 +1589,16 @@ async function writeCaptureWindow(
   if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
     return { observationsWritten: 0, rollupsWritten: 0, embeddingFailed: 0, replayed: true };
   }
+
+  // Summary degradation guard — check BEFORE computing rollup embedding so a
+  // guarded window does not waste a Gemini call.  Uses PRIOR_SUMMARY_MAX_SUMMARY_CHARS
+  // as an upper clamp so an oversized prior (> schema limit) can still be replaced by
+  // a spec-compliant new summary.
+  const guardTriggered =
+    options.summaryGuardEnabled !== false &&
+    existing !== null &&
+    isSummaryDegraded(options.priorSummaryText, summary.summary, PRIOR_SUMMARY_MAX_SUMMARY_CHARS);
+
   const rollupContentHash = contentHash([
     window.projectId,
     'session',
@@ -1597,11 +1608,16 @@ async function writeCaptureWindow(
     summary.next_steps,
   ]);
   const discoveryTokens = estimateDiscoveryTokens(captureTextForTokenEstimate(extraction));
-  const rollupEmbedding = await safeEmbedding(
-    options.generateEmbedding,
-    composeEmbeddingText(summary.summary, summary.keywords, summary.decisions),
-    options.embeddingExpected,
-  );
+
+  // Skip rollup embedding when guard will keep the prior summary — the old
+  // embedding stays and we avoid a stale embedding_policy.input_sha256.
+  const rollupEmbedding = guardTriggered
+    ? { value: null, failed: false, policy: undefined }
+    : await safeEmbedding(
+        options.generateEmbedding,
+        composeEmbeddingText(summary.summary, summary.keywords, summary.decisions),
+        options.embeddingExpected,
+      );
   let embeddingFailed = rollupEmbedding.failed ? 1 : 0;
 
   // at-least-once 重放守衛：transaction commit 後 HWM 寫入若失敗，同 window 會重跑；
@@ -1610,6 +1626,10 @@ async function writeCaptureWindow(
   const isReplayedWindow = previousOffsets.some(
     (offset) => offset.start === window.spoolOffsetStart && offset.end === window.spoolOffsetEnd
   );
+
+  // Carry forward the existing guard counter so it accumulates across windows.
+  const priorGuardKept = previousCapture?.summary_guard_kept ?? 0;
+
   const baseCapture: CaptureMetadata = {
     version: '0.5',
     session_id: window.sessionId,
@@ -1635,6 +1655,12 @@ async function writeCaptureWindow(
             },
           ]
         : previousCapture?.empty_observation_windows ?? [],
+    // Always carry forward the guard counter; increment only when guard fires.
+    ...(guardTriggered
+      ? { summary_guard_kept: priorGuardKept + 1 }
+      : priorGuardKept > 0
+        ? { summary_guard_kept: priorGuardKept }
+        : {}),
   };
 
   let rollupId = existing?.id ?? null;
@@ -1680,22 +1706,15 @@ async function writeCaptureWindow(
     if (insertedId) insertedObservationIds.push(insertedId);
   }
 
-  // Summary degradation guard: if the new summary is a degraded version of the prior,
-  // keep the prior summary and only update metadata (observations are still written above).
-  const guardTriggered =
-    options.summaryGuardEnabled !== false &&
-    existing !== null &&
-    isSummaryDegraded(options.priorSummaryText, summary.summary);
-
   const finalCapture: CaptureMetadata = {
     ...baseCapture,
     observation_ids: [...baseCapture.observation_ids, ...insertedObservationIds],
-    ...(guardTriggered
-      ? { summary_guard_kept: (baseCapture.summary_guard_kept ?? 0) + 1 }
-      : {}),
   };
   const captureMetadata = mergeMetadata(existing?.metadata, finalCapture);
-  const finalMetadata = rollupEmbedding.policy
+  // When the guard fires we keep the existing embedding and its policy untouched —
+  // applying mergeEmbeddingPolicyMetadata here would record input_sha256 for a
+  // summary that was never actually stored.
+  const finalMetadata = (!guardTriggered && rollupEmbedding.policy)
     ? mergeEmbeddingPolicyMetadata(captureMetadata, rollupEmbedding.policy)
     : captureMetadata;
 

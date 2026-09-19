@@ -69,4 +69,39 @@ describe('isSummaryDegraded', () => {
   it('handles undefined prior as no prior', () => {
     expect(isSummaryDegraded(undefined, 'anything')).toBe(false);
   });
+
+  // Fix 3: maxSummaryLength clamp prevents oversized prior from permanently blocking
+  describe('with maxSummaryLength', () => {
+    it('does not trigger when prior exceeds schema limit and new is at limit (prior 5000, new 1500, max 1500)', () => {
+      const prior = 'X'.repeat(5000);
+      const next = 'Y'.repeat(1500); // 1500 / min(5000, 1500) = 100% — not degraded
+      expect(isSummaryDegraded(prior, next, 1500)).toBe(false);
+    });
+
+    it('still triggers when new is truly tiny relative to clamped prior', () => {
+      const prior = 'X'.repeat(5000);
+      const next = 'Y'.repeat(100); // 100 / min(5000, 1500) = 6.7% — degraded
+      expect(isSummaryDegraded(prior, next, 1500)).toBe(true);
+    });
+
+    it('clamps prior to maxSummaryLength for ratio check', () => {
+      const prior = 'X'.repeat(3000);
+      const next = 'Y'.repeat(700); // Without clamp: 700/3000 = 23% → degraded
+      // With clamp to 1500: 700/1500 = 46.7% → not degraded
+      expect(isSummaryDegraded(prior, next, 1500)).toBe(false);
+    });
+
+    it('does not affect priors already below the max', () => {
+      const prior = 'X'.repeat(300);
+      const next = 'Y'.repeat(50); // 50/300 = 16.7% → degraded regardless
+      expect(isSummaryDegraded(prior, next, 1500)).toBe(true);
+    });
+
+    it('returns false when clamped effective length falls below MIN_PRIOR_LENGTH', () => {
+      const prior = 'X'.repeat(500);
+      const next = 'Y'.repeat(10);
+      // Clamp to 100 → effectiveLength 100 < 200 → guard inactive
+      expect(isSummaryDegraded(prior, next, 100)).toBe(false);
+    });
+  });
 });

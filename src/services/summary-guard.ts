@@ -21,15 +21,25 @@ const DEGRADATION_RATIO = 0.4;
  * Determine whether `nextSummary` is a degraded replacement for `priorSummary`.
  *
  * Returns `true` when:
- *  1. `priorSummary` exists and is at least {@link MIN_PRIOR_LENGTH} characters, AND
- *  2. `nextSummary` length is strictly less than {@link DEGRADATION_RATIO} of `priorSummary` length.
+ *  1. `priorSummary` exists and its effective length is at least {@link MIN_PRIOR_LENGTH} characters, AND
+ *  2. `nextSummary` length is strictly less than {@link DEGRADATION_RATIO} of the effective prior length.
+ *
+ * When `maxSummaryLength` is provided, the prior summary length is clamped to
+ * that value before the ratio comparison.  This prevents an oversized prior
+ * (which can exceed the schema limit if it was written before validation was
+ * added) from permanently blocking any spec-compliant replacement.
  *
  * Pure function, safe to call from any context.
  */
 export function isSummaryDegraded(
   priorSummary: string | null | undefined,
   nextSummary: string,
+  maxSummaryLength?: number,
 ): boolean {
   if (!priorSummary || priorSummary.length < MIN_PRIOR_LENGTH) return false;
-  return nextSummary.length < priorSummary.length * DEGRADATION_RATIO;
+  const effectiveLength = maxSummaryLength !== undefined
+    ? Math.min(priorSummary.length, maxSummaryLength)
+    : priorSummary.length;
+  if (effectiveLength < MIN_PRIOR_LENGTH) return false;
+  return nextSummary.length < effectiveLength * DEGRADATION_RATIO;
 }
