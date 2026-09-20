@@ -3,7 +3,7 @@
 // Pure-function unit tests for the rollup summary degradation guard.
 
 import { describe, expect, it } from 'vitest';
-import { isSummaryDegraded } from '../../src/services/summary-guard.js';
+import { isSummaryDegraded, mergeGuardPending } from '../../src/services/summary-guard.js';
 
 describe('isSummaryDegraded', () => {
   it('returns false when there is no prior summary (first window)', () => {
@@ -103,5 +103,59 @@ describe('isSummaryDegraded', () => {
       // Clamp to 100 → effectiveLength 100 < 200 → guard inactive
       expect(isSummaryDegraded(prior, next, 100)).toBe(false);
     });
+  });
+});
+
+describe('mergeGuardPending', () => {
+  const limits = { maxSummaryChars: 100, maxItems: 3, maxItemChars: 10 };
+
+  it('stores the rejected summary as-is when there is no existing pending', () => {
+    const rejected = { summary: 'window two', decisions: ['d1'], next_steps: ['n1'] };
+    expect(mergeGuardPending(null, rejected, limits)).toEqual(rejected);
+  });
+
+  it('keeps the earlier pending when the guard fires twice in a row', () => {
+    const first = { summary: 'window one', decisions: ['d1'], next_steps: ['n1'] };
+    const second = { summary: 'window two', decisions: ['d2'], next_steps: ['n2'] };
+    const merged = mergeGuardPending(first, second, limits);
+    expect(merged.summary).toBe('window one\n\nwindow two');
+    expect(merged.decisions).toEqual(['d1', 'd2']);
+    expect(merged.next_steps).toEqual(['n1', 'n2']);
+  });
+
+  it('keeps the newest summary whole and trims the older end when over the limit', () => {
+    const first = { summary: 'A'.repeat(90), decisions: [], next_steps: [] };
+    const second = { summary: 'B'.repeat(60), decisions: [], next_steps: [] };
+    const merged = mergeGuardPending(first, second, limits);
+    expect(merged.summary.length).toBeLessThanOrEqual(limits.maxSummaryChars);
+    expect(merged.summary.endsWith('B'.repeat(60))).toBe(true);
+    expect(merged.summary.startsWith('A')).toBe(true);
+  });
+
+  it('falls back to the newest alone when it already fills the limit', () => {
+    const first = { summary: 'old', decisions: [], next_steps: [] };
+    const second = { summary: 'N'.repeat(150), decisions: [], next_steps: [] };
+    expect(mergeGuardPending(first, second, limits).summary).toBe('N'.repeat(100));
+  });
+
+  it('dedupes items, clamps item length, and drops the oldest beyond maxItems', () => {
+    const first = { summary: 's1', decisions: ['a', 'b'], next_steps: ['x'.repeat(20)] };
+    const second = { summary: 's2', decisions: ['b', 'c', 'd'], next_steps: ['x'.repeat(20)] };
+    const merged = mergeGuardPending(first, second, limits);
+    expect(merged.decisions).toEqual(['b', 'c', 'd']);
+    expect(merged.next_steps).toEqual(['x'.repeat(10)]);
+  });
+
+  it('does not duplicate an identical consecutive rejected summary', () => {
+    const same = { summary: 'same text', decisions: [], next_steps: [] };
+    expect(mergeGuardPending(same, same, limits).summary).toBe('same text');
+  });
+
+  it('does not mutate its inputs', () => {
+    const first = { summary: 'one', decisions: ['d1'], next_steps: [] };
+    const second = { summary: 'two', decisions: ['d2'], next_steps: [] };
+    const snapshot = JSON.stringify([first, second]);
+    mergeGuardPending(first, second, limits);
+    expect(JSON.stringify([first, second])).toBe(snapshot);
   });
 });

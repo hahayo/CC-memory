@@ -39,7 +39,7 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
-import { isSummaryDegraded } from './summary-guard.js';
+import { isSummaryDegraded, mergeGuardPending } from './summary-guard.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -333,10 +333,6 @@ function statePathFor(spoolPath: string): string {
 
 function lockPathFor(spoolPath: string): string {
   return `${spoolPath}.lock`;
-}
-
-function clampField(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) : text;
 }
 
 function parsePositiveIntegerEnv(value: string | undefined, fallback: number): number {
@@ -1712,21 +1708,26 @@ async function writeCaptureWindow(
       : priorGuardKept > 0
         ? { summary_guard_kept: priorGuardKept }
         : {}),
-    // When the guard triggers, store the full rejected session_summary (each field
-    // clamped to the schema limits) so the next window's LLM can merge decisions
-    // and next_steps too.  On a normal (non-guarded) write, the field is omitted
-    // (= cleared from metadata).
+    // When the guard triggers, merge the rejected session_summary into any existing
+    // pending (consecutive guard hits must not drop the earlier window — the guard
+    // firing means the LLM ignored cumulative context, so the newer output cannot be
+    // assumed to subsume the older one).  On a normal (non-guarded) write, the field
+    // is omitted (= cleared from metadata).
     ...(guardTriggered
       ? {
-          summary_guard_pending: {
-            summary: clampField(summary.summary, PRIOR_SUMMARY_MAX_SUMMARY_CHARS),
-            decisions: summary.decisions.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(
-              (d) => clampField(d, PRIOR_SUMMARY_MAX_ITEM_CHARS),
-            ),
-            next_steps: summary.next_steps.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(
-              (d) => clampField(d, PRIOR_SUMMARY_MAX_ITEM_CHARS),
-            ),
-          },
+          summary_guard_pending: mergeGuardPending(
+            previousCapture?.summary_guard_pending,
+            {
+              summary: summary.summary,
+              decisions: summary.decisions,
+              next_steps: summary.next_steps,
+            },
+            {
+              maxSummaryChars: PRIOR_SUMMARY_MAX_SUMMARY_CHARS,
+              maxItems: PRIOR_SUMMARY_MAX_ITEMS,
+              maxItemChars: PRIOR_SUMMARY_MAX_ITEM_CHARS,
+            },
+          ),
         }
       : {}),
   };
