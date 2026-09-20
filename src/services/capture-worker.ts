@@ -10,6 +10,9 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   CLAUDE_CLI_PROVIDER_ID,
   CaptureLlmValidationError,
+  PRIOR_SUMMARY_MAX_ITEM_CHARS,
+  PRIOR_SUMMARY_MAX_ITEMS,
+  PRIOR_SUMMARY_MAX_SUMMARY_CHARS,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
   isCaptureLlmDisabled,
@@ -36,6 +39,7 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
+import { isSummaryDegraded, mergeGuardPending } from './summary-guard.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
@@ -154,6 +158,17 @@ interface CaptureMetadata {
     end: number;
     reason: 'no_high_value_observations';
   }>;
+  /** Number of windows where the summary guard kept the prior summary due to degradation. */
+  summary_guard_kept?: number;
+  /** Rejected session_summary from the most recent guarded window, awaiting merge. Cleared on a non-guarded write. Object form since R4; old string form is read as {summary: <string>, decisions: [], next_steps: []}. */
+  summary_guard_pending?: SummaryGuardPending;
+}
+
+/** The shape stored in metadata.capture.summary_guard_pending. */
+interface SummaryGuardPending {
+  summary: string;
+  decisions: string[];
+  next_steps: string[];
 }
 
 interface RollupRow {
@@ -1202,7 +1217,38 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
             (entry as { reason?: unknown }).reason === 'no_high_value_observations'
         )
       : [],
+    ...(typeof record.summary_guard_kept === 'number' && Number.isFinite(record.summary_guard_kept)
+      ? { summary_guard_kept: record.summary_guard_kept }
+      : {}),
+    ...parseSummaryGuardPending(record.summary_guard_pending),
   };
+}
+
+/** Parse summary_guard_pending from metadata: supports old string form and new object form. */
+function parseSummaryGuardPending(
+  value: unknown,
+): { summary_guard_pending: SummaryGuardPending } | Record<string, never> {
+  if (typeof value === 'string' && value.length > 0) {
+    // Backward compat: old string form → wrap as object with empty arrays.
+    return { summary_guard_pending: { summary: value, decisions: [], next_steps: [] } };
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.summary === 'string' && obj.summary.length > 0) {
+      return {
+        summary_guard_pending: {
+          summary: obj.summary,
+          decisions: Array.isArray(obj.decisions)
+            ? obj.decisions.filter((d): d is string => typeof d === 'string')
+            : [],
+          next_steps: Array.isArray(obj.next_steps)
+            ? obj.next_steps.filter((d): d is string => typeof d === 'string')
+            : [],
+        },
+      };
+    }
+  }
+  return {};
 }
 
 function normalizeTranscriptSources(sources: TranscriptSourceRange[]): TranscriptSourceRange[] {
@@ -1296,11 +1342,11 @@ async function loadPriorSessionSummary(
   const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
   try {
     const rows = await executeRows<{
-      status: unknown; merged_into: unknown; summary: unknown; decisions: unknown; next_steps: unknown;
+      status: unknown; merged_into: unknown; summary: unknown; decisions: unknown; next_steps: unknown; metadata: unknown;
     }>(
       db,
       sql`
-        SELECT status, merged_into, summary, decisions, next_steps
+        SELECT status, merged_into, summary, decisions, next_steps, metadata
         FROM project_memories
         WHERE project_id = ${projectId}
           AND idempotency_key = ${idempotencyKey}
@@ -1315,12 +1361,16 @@ async function loadPriorSessionSummary(
       return { kind: 'merged', mergedInto: typeof row.merged_into === 'string' ? row.merged_into : 'unknown' };
     }
     if (typeof row.summary !== 'string' || row.summary.length === 0) return { kind: 'none' };
+    // Check for a pending summary from a guarded window that needs merging.
+    const capture = existingCaptureMetadata(row.metadata);
+    const pendingSummary = capture?.summary_guard_pending;
     return {
       kind: 'active',
       summary: {
         summary: row.summary,
         decisions: stringArray(row.decisions),
         next_steps: stringArray(row.next_steps),
+        ...(pendingSummary ? { pendingSummary } : {}),
       },
     };
   } catch {
@@ -1417,6 +1467,28 @@ async function updateRollup(
       embedding = ${vectorLiteral(input.embedding)}::vector,
       content_hash = ${input.contentHash},
       writer_host = ${input.writerHost},
+      metadata = ${JSON.stringify(input.metadata)}::jsonb,
+      updated_at = NOW()
+    WHERE id = ${input.rollupId}
+  `);
+}
+
+/**
+ * Update only the metadata (and updated_at) of an existing rollup, without touching
+ * summary, keywords, decisions, next_steps, or embedding.  Used when the summary
+ * degradation guard fires: observations are still persisted, metadata (including the
+ * guard counter) is written, but the accumulated summary is kept intact.
+ */
+async function updateRollupMetadataOnly(
+  tx: DbClient,
+  input: {
+    rollupId: string;
+    metadata: Record<string, unknown>;
+  }
+): Promise<void> {
+  await tx.execute(sql`
+    UPDATE project_memories
+    SET
       metadata = ${JSON.stringify(input.metadata)}::jsonb,
       updated_at = NOW()
     WHERE id = ${input.rollupId}
@@ -1548,6 +1620,9 @@ async function writeCaptureWindow(
   source: TranscriptSourceRange,
   options: Required<Pick<CaptureWorkerOptions, 'writerHost' | 'generateEmbedding'>> & {
     embeddingExpected: boolean;
+    summaryGuardEnabled?: boolean;
+    priorSummaryText?: string | null;
+    stdout?: { write(chunk: string): unknown };
   }
 ): Promise<WriteWindowResult> {
   const summary = extraction.session_summary;
@@ -1557,6 +1632,16 @@ async function writeCaptureWindow(
   if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
     return { observationsWritten: 0, rollupsWritten: 0, embeddingFailed: 0, replayed: true };
   }
+
+  // Summary degradation guard — check BEFORE computing rollup embedding so a
+  // guarded window does not waste a Gemini call.  Uses PRIOR_SUMMARY_MAX_SUMMARY_CHARS
+  // as an upper clamp so an oversized prior (> schema limit) can still be replaced by
+  // a spec-compliant new summary.
+  const guardTriggered =
+    options.summaryGuardEnabled !== false &&
+    existing !== null &&
+    isSummaryDegraded(options.priorSummaryText, summary.summary, PRIOR_SUMMARY_MAX_SUMMARY_CHARS);
+
   const rollupContentHash = contentHash([
     window.projectId,
     'session',
@@ -1566,11 +1651,16 @@ async function writeCaptureWindow(
     summary.next_steps,
   ]);
   const discoveryTokens = estimateDiscoveryTokens(captureTextForTokenEstimate(extraction));
-  const rollupEmbedding = await safeEmbedding(
-    options.generateEmbedding,
-    composeEmbeddingText(summary.summary, summary.keywords, summary.decisions),
-    options.embeddingExpected,
-  );
+
+  // Skip rollup embedding when guard will keep the prior summary — the old
+  // embedding stays and we avoid a stale embedding_policy.input_sha256.
+  const rollupEmbedding = guardTriggered
+    ? { value: null, failed: false, policy: undefined }
+    : await safeEmbedding(
+        options.generateEmbedding,
+        composeEmbeddingText(summary.summary, summary.keywords, summary.decisions),
+        options.embeddingExpected,
+      );
   let embeddingFailed = rollupEmbedding.failed ? 1 : 0;
 
   // at-least-once 重放守衛：transaction commit 後 HWM 寫入若失敗，同 window 會重跑；
@@ -1579,6 +1669,10 @@ async function writeCaptureWindow(
   const isReplayedWindow = previousOffsets.some(
     (offset) => offset.start === window.spoolOffsetStart && offset.end === window.spoolOffsetEnd
   );
+
+  // Carry forward the existing guard counter so it accumulates across windows.
+  const priorGuardKept = previousCapture?.summary_guard_kept ?? 0;
+
   const baseCapture: CaptureMetadata = {
     version: '0.5',
     session_id: window.sessionId,
@@ -1592,7 +1686,11 @@ async function writeCaptureWindow(
       source,
     ]),
     summarize_count: (previousCapture?.summarize_count ?? 0) + 1,
-    discovery_tokens: discoveryTokens,
+    // When guard fires the stored summary is unchanged, so keep the prior discovery_tokens
+    // that match it; otherwise use the freshly estimated value for the new summary.
+    discovery_tokens: guardTriggered
+      ? (previousCapture?.discovery_tokens ?? discoveryTokens)
+      : discoveryTokens,
     empty_observation_windows:
       extraction.observations.length === 0 && !isReplayedWindow
         ? [
@@ -1604,6 +1702,34 @@ async function writeCaptureWindow(
             },
           ]
         : previousCapture?.empty_observation_windows ?? [],
+    // Always carry forward the guard counter; increment only when guard fires.
+    ...(guardTriggered
+      ? { summary_guard_kept: priorGuardKept + 1 }
+      : priorGuardKept > 0
+        ? { summary_guard_kept: priorGuardKept }
+        : {}),
+    // When the guard triggers, merge the rejected session_summary into any existing
+    // pending (consecutive guard hits must not drop the earlier window — the guard
+    // firing means the LLM ignored cumulative context, so the newer output cannot be
+    // assumed to subsume the older one).  On a normal (non-guarded) write, the field
+    // is omitted (= cleared from metadata).
+    ...(guardTriggered
+      ? {
+          summary_guard_pending: mergeGuardPending(
+            previousCapture?.summary_guard_pending,
+            {
+              summary: summary.summary,
+              decisions: summary.decisions,
+              next_steps: summary.next_steps,
+            },
+            {
+              maxSummaryChars: PRIOR_SUMMARY_MAX_SUMMARY_CHARS,
+              maxItems: PRIOR_SUMMARY_MAX_ITEMS,
+              maxItemChars: PRIOR_SUMMARY_MAX_ITEM_CHARS,
+            },
+          ),
+        }
+      : {}),
   };
 
   let rollupId = existing?.id ?? null;
@@ -1654,18 +1780,32 @@ async function writeCaptureWindow(
     observation_ids: [...baseCapture.observation_ids, ...insertedObservationIds],
   };
   const captureMetadata = mergeMetadata(existing?.metadata, finalCapture);
-  const finalMetadata = rollupEmbedding.policy
+  // When the guard fires we keep the existing embedding and its policy untouched —
+  // applying mergeEmbeddingPolicyMetadata here would record input_sha256 for a
+  // summary that was never actually stored.
+  const finalMetadata = (!guardTriggered && rollupEmbedding.policy)
     ? mergeEmbeddingPolicyMetadata(captureMetadata, rollupEmbedding.policy)
     : captureMetadata;
-  await updateRollup(tx, {
-    rollupId,
-    window,
-    extraction,
-    contentHash: rollupContentHash,
-    writerHost: options.writerHost,
-    embedding: rollupEmbedding.value,
-    metadata: finalMetadata,
-  });
+
+  if (guardTriggered) {
+    options.stdout?.write(
+      `[cc-memory] auto-capture info: summary-guard-kept session=${window.sessionId} project=${window.projectId} prior_len=${options.priorSummaryText?.length ?? 0} new_len=${summary.summary.length}\n`
+    );
+    await updateRollupMetadataOnly(tx, {
+      rollupId,
+      metadata: finalMetadata,
+    });
+  } else {
+    await updateRollup(tx, {
+      rollupId,
+      window,
+      extraction,
+      contentHash: rollupContentHash,
+      writerHost: options.writerHost,
+      embedding: rollupEmbedding.value,
+      metadata: finalMetadata,
+    });
+  }
 
   return {
     observationsWritten: insertedObservationIds.length,
@@ -2649,6 +2789,8 @@ export async function runCaptureWorkerOnce(
           }
 
           try {
+            const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
+            const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
             const writeResult = await options.db.transaction((tx: DbClient) =>
               writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {
                 path_hash: chunk.pathHash,
@@ -2658,6 +2800,9 @@ export async function runCaptureWorkerOnce(
                 writerHost,
                 generateEmbedding,
                 embeddingExpected,
+                summaryGuardEnabled,
+                priorSummaryText: priorSummary?.summary ?? null,
+                stdout,
               })
             );
             result.processed += 1;
@@ -2743,6 +2888,8 @@ export interface ReplayCaptureWindowInput {
   generateEmbedding?: (text: string) => Promise<number[] | null>;
   embeddingExpected?: boolean;
   now?: () => Date;
+  stdout?: { write(chunk: string): unknown };
+  env?: Record<string, string | undefined>;
 }
 
 export type ReplayCaptureWindowResult =
@@ -2786,6 +2933,11 @@ export async function replayCaptureWindow(
     processingTime: input.now?.() ?? new Date(),
   };
 
+  // Load prior summary so the replay path gets the same cumulative context
+  // and summary guard protection as the main capture path.
+  const priorLookup = await loadPriorSessionSummary(input.db, input.projectId, input.sessionId);
+  const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
+
   let rawResponse: CaptureLlmRawResponse;
   let extraction: CaptureLlmExtraction;
   try {
@@ -2797,11 +2949,16 @@ export async function replayCaptureWindow(
       spoolOffsetEnd: window.spoolOffsetEnd,
       hwmOffsetStart: window.hwmOffsetStart,
       hwmOffsetEnd: window.hwmOffsetEnd,
+      ...(priorSummary ? { priorSummary } : {}),
     });
     extraction = parseCaptureLlmExtraction(rawResponse);
   } catch (error) {
     return { status: 'failed', errorCode: llmErrorCode(error), message: llmErrorMessage(error) };
   }
+
+  const env = input.env ?? process.env;
+  const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
+  const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
 
   const source: TranscriptSourceRange = {
     path_hash: input.source.path_hash,
@@ -2814,6 +2971,9 @@ export async function replayCaptureWindow(
         writerHost: input.writerHost ?? resolveWriterHost(),
         generateEmbedding: input.generateEmbedding ?? defaultGenerateEmbedding,
         embeddingExpected: input.embeddingExpected ?? false,
+        summaryGuardEnabled,
+        priorSummaryText: priorSummary?.summary ?? null,
+        stdout: input.stdout,
       })
     );
     if (writeResult.replayed) return { status: 'skipped', reason: 'already-covered' };

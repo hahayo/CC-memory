@@ -31,6 +31,7 @@ import {
 } from '../../src/services/capture-spool.js';
 import {
   isCaptureRetryHeld,
+  replayCaptureWindow,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
   type CaptureRetryEntry,
@@ -4654,5 +4655,86 @@ describe('fresh-first ordering and cursor fallback (2026-09-04, no DB)', () => {
     age(a);
     await runWorker(a, { db: fakeDb, llm });
     expect(llm.calls.map((x) => x.sessionId)).toEqual([a.sessionId, b.sessionId, c.sessionId]);
+  });
+});
+
+describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
+  let sql: Sql;
+  let pg: Sql;
+  let db: unknown;
+
+  beforeAll(async () => {
+    sql = await connectDb(TEST_DB_URL);
+    pg = postgres(TEST_DB_URL, { max: 4 });
+    db = drizzle(pg);
+  });
+
+  afterAll(async () => {
+    if (pg) await pg.end();
+  });
+
+  it('passes prior summary to the LLM extract call during replay', async () => {
+    const projectId = `replay-prior-${randomUUID()}`;
+    const sessionId = `session-replay-prior-${randomUUID()}`;
+    const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
+
+    // Seed a rollup row so loadPriorSessionSummary finds it.
+    // project_memories has no session_id column — session identity lives in
+    // idempotency_key and metadata.capture.session_id.
+    await sql`
+      INSERT INTO project_memories (
+        project_id, type, idempotency_key,
+        summary, keywords, decisions, next_steps,
+        content_hash, writer_host, metadata, status
+      ) VALUES (
+        ${projectId}, 'session', ${idempotencyKey},
+        'existing cumulative summary about auth flow', ARRAY['auth'],
+        ARRAY['use SSO'], ARRAY['deploy SSO'],
+        'replay-prior-hash', 'vitest',
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
+        'active'
+      )
+    `;
+
+    const llmCalls: CaptureLlmRequest[] = [];
+    const mockLlm: CaptureLlmAdapter = {
+      model: 'test-model',
+      provider: 'test',
+      worstCaseCallBudgetMs: 10_000,
+      extract: async (req) => {
+        llmCalls.push(req);
+        return {
+          model: 'test-model',
+          text: JSON.stringify({
+            session_summary: { summary: 'replayed cumulative', keywords: ['auth'], decisions: ['use SSO'], next_steps: [] },
+            observations: [],
+          }),
+        };
+      },
+      takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0 }),
+    };
+
+    const result = await replayCaptureWindow({
+      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+      llm: mockLlm,
+      projectId,
+      sessionId,
+      transcriptPath: '/dev/null',
+      raw: Buffer.from('User asked about SSO.\nAssistant fixed auth.'),
+      spoolOffset: { start: 0, end: 100 },
+      hwmOffset: { start: 0, end: 100 },
+      source: { path_hash: 'replay-prior-test', start: 0, end: 100, content_hash: null },
+    });
+
+    expect(result.status).toBe('written');
+    expect(llmCalls).toHaveLength(1);
+    expect(llmCalls[0].priorSummary).toBeDefined();
+    expect(llmCalls[0].priorSummary!.summary).toBe('existing cumulative summary about auth flow');
+    expect(llmCalls[0].priorSummary!.decisions).toEqual(['use SSO']);
+    expect(llmCalls[0].priorSummary!.next_steps).toEqual(['deploy SSO']);
+
+    // Cleanup
+    await sql`DELETE FROM project_memories WHERE project_id = ${projectId}`;
+    await sql`DELETE FROM observations WHERE project_id = ${projectId}`;
   });
 });
