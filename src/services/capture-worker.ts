@@ -39,6 +39,7 @@ import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
+import { enrollFinalization, finalizeMarkerPath, finalizeQuietMs, finalizeSession, hasCloseMarker, runFinalizers } from './session-finalize.js';
 import { isSummaryDegraded, mergeGuardPending } from './summary-guard.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
@@ -1612,6 +1613,12 @@ async function insertObservation(
   return rows[0]?.id ?? null;
 }
 
+/** Preserve finalization generation and retry fencing across new extraction windows. */
+function finalizationMetadata(metadata: unknown): Record<string, unknown> {
+  const capture = (metadata as { capture?: Record<string, unknown> } | null)?.capture ?? {};
+  return Object.fromEntries(Object.entries(capture).filter(([key]) => key.startsWith('finaliz')));
+}
+
 async function writeCaptureWindow(
   tx: DbClient,
   window: CaptureWindow,
@@ -1674,6 +1681,7 @@ async function writeCaptureWindow(
   const priorGuardKept = previousCapture?.summary_guard_kept ?? 0;
 
   const baseCapture: CaptureMetadata = {
+    ...finalizationMetadata(existing?.metadata),
     version: '0.5',
     session_id: window.sessionId,
     observation_ids: previousCapture?.observation_ids ?? [],
@@ -1920,6 +1928,7 @@ async function maybeRotateCaptureSpool(
 ): Promise<boolean> {
   const info = await stat(spool.path).catch(() => null);
   if (!info || state.spool.cursor < info.size) return false;
+  if (await stat(finalizeMarkerPath(spool.path)).catch(() => null)) return false;
   const shouldRotateBySize = hasStopSentinel && info.size > ROTATE_SIZE_BYTES;
   const shouldRotateByAge = hasStopSentinel && nowMs - info.mtimeMs > ROTATE_IDLE_MS;
   if (!shouldRotateBySize && !shouldRotateByAge) return false;
@@ -2082,6 +2091,7 @@ export async function runCaptureWorkerOnce(
   const budget = tickBudgetMs(env);
   const tickStartMs = getNowMs();
   let windowsThisTick = 0;
+  let finalizationAllowed = false;
 
   try {
 
@@ -2116,12 +2126,18 @@ export async function runCaptureWorkerOnce(
     return result;
   }
 
+  finalizationAllowed = true;
   const rawSessions = await listSpoolSessions(root);
   if (rawSessions.length === 0) return result;
   await archiveLegacySidecars(root, getNowMs());
   const cursor = await loadTickCursor(root);
+  // Explicit close requests bypass extraction quiet hold so their pending bytes can catch up.
+  const closePaths = new Set<string>();
+  for (const spool of rawSessions) if (await hasCloseMarker(spool.path)) closePaths.add(spool.path);
+  const schedulingSessions = rawSessions.map(spool => closePaths.has(spool.path)
+    ? { ...spool, mtimeMs: 0 } : spool);
   const { ordered: sessions, freshPaths, quietHeld } = orderSessionsForTick(
-    rawSessions, cursor, getNowMs(), captureFreshWindowMs(env), captureQuietPeriodMs(env),
+    schedulingSessions, cursor, getNowMs(), captureFreshWindowMs(env), captureQuietPeriodMs(env),
   );
   if (quietHeld.length > 0) {
     stdout.write(`[cc-memory] auto-capture info: quiet-held=${quietHeld.length}\n`);
@@ -2791,6 +2807,9 @@ export async function runCaptureWorkerOnce(
           try {
             const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
             const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
+            // Persist intent BEFORE commit: a crash after DB success must not lose finalization.
+            // Failed writes retain a harmless marker; readiness + active-rollup checks gate the LLM.
+            if (finalizeQuietMs(env) > 0) await enrollFinalization(spool.path, chunkWindow.projectId, chunkWindow.sessionId);
             const writeResult = await options.db.transaction((tx: DbClient) =>
               writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {
                 path_hash: chunk.pathHash,
@@ -2854,6 +2873,22 @@ export async function runCaptureWorkerOnce(
     // D1b: capture fatal error, telemetry still flows via result
     result.fatalError = fatalErr instanceof Error ? fatalErr.message : String(fatalErr);
   } finally {
+    try {
+      if (finalizationAllowed) await runFinalizers({
+        root, env, nowMs: getNowMs,
+        hasBudget: () => budget === 0 || getNowMs() - tickStartMs + llmCallBudgetReserveMs(options.llm) <= budget,
+        acquireLock: (path) => acquireSpoolLock(path, { env, nowMs: getNowMs() }),
+        finalize: (input) => finalizeSession({ ...input, db: options.db, llm: options.llm,
+          env, nowMs: getNowMs,
+          hasBudget: () => budget === 0 || getNowMs() - tickStartMs + llmCallBudgetReserveMs(options.llm) <= budget,
+          generateEmbedding: options.generateEmbedding ?? defaultGenerateEmbedding }),
+        report: (status) => {
+          if (status === 'finalized') result.rollupsWritten += 1;
+          if (status === 'failed') result.failed += 1;
+          if (status !== 'skipped') stdout.write(`[cc-memory] session-finalize: ${status}\n`);
+        },
+      });
+    } catch { result.failed += 1; }
     // D1b: takeTelemetry exactly once in function-level finally
     result.windows = windowsThisTick;
     const telemetry = options.llm.takeTelemetry();

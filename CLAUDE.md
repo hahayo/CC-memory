@@ -88,6 +88,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 ### Skills (skills/)
 - `save-memory.md` - `/save-memory` 指令，分析對話並儲存記憶
 - `load-memory.md` - `/load-memory` 指令，載入專案記憶上下文
+- `session-close/SKILL.md` - `/session-close` 指令，Claude Code／Codex 共用本地結束記號，背景抽取追上後收尾
 
 ### Hooks (hooks/)
 - `session-end.json` - Session 結束提醒儲存記憶
@@ -127,6 +128,11 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
 - `CC_CAPTURE_FRESH_WINDOW_MS` - fresh-first（新鮮優先）窗口毫秒（預設 259200000＝72 小時；2026-09-04 起）：spool 檔在窗口內有動的 session 先處理、新到舊；其餘依路徑輪流（round-robin cursor 只在這層推進）。設 `0` 回到純路徑輪流
 - `CC_CAPTURE_QUIET_PERIOD_MS` - quiet period（靜默期）毫秒（預設 `0`＝關閉；正式 unit 2026-09-12 起設 7200000＝2 小時）：spool 檔在這段時間內還有動的 session 視為「還在聊」，本 tick 整個略過、不動 cursor；等它安靜後才抓，讓窗口塞滿（邊聊邊抓平均只有 39 KB／窗），LLM 呼叫次數降 3–5 倍。代價：記憶延遲＝靜默期
+- `CC_CAPTURE_FINALIZE_QUIET_MS` - 工作階段收尾靜默門檻，預設 `21600000`（6 小時）；`0` 關閉所有收尾。明確結束記號或固定快照補舊帳抽完可略過靜默門檻，仍需下一次採集喚醒
+- `CC_CAPTURE_FINALIZE_MAX_PER_TICK` - 每輪最多收尾嘗試，預設 `1`
+- `CC_CAPTURE_FINALIZE_INPUT_BYTES` - 觀察資料 JSON 位元組上限，預設 `65536`；既有摘要另沿用 16 KiB 上限
+- `CC_CAPTURE_FINALIZE_MAX_ATTEMPTS` - 每抽取世代最多收尾嘗試，預設 `3`
+- `CC_CAPTURE_FINALIZE_RETRY_MS` - 收尾重試最短間隔，預設 `1800000`（30 分鐘）
 - `CC_CAPTURE_SUMMARY_GUARD` - summary degradation guard（摘要退化守衛）開關（預設 on）：`off`/`0`/`false` 關閉。啟用時，若新窗口的 session_summary 長度低於先前累積摘要的 40%（且先前摘要 ≥ 200 字元），視為退化並保留舊摘要（observations 照常寫入），在 rollup metadata 的 `summary_guard_kept` 計數器遞增，輸出 info 行；被擋下的 {summary, decisions, next_steps} 暫存於 `summary_guard_pending`，下一窗隨 `<prior_summary>` 交給 LLM 併入累積摘要，正常覆寫成功後清除
 - `CC_MEMORY_SPOOL_LOCK_STALE_MS` - spool 檔案鎖過期毫秒數
 - `CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR` - 只供離線 archive/drain 讀取固定 transcript snapshot；live supervisor 會主動移除，避免誤讀封存資料

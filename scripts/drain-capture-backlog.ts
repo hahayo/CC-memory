@@ -165,7 +165,7 @@ export function classifyDrainTick(
   }
   const progress =
     result.processed + result.parked + result.malformed + result.transcriptMissing +
-    result.observationsWritten;
+    result.observationsWritten + result.rollupsWritten;
   if (progress > 0) return 'PROGRESS';
   if (result.failed > 0) return 'FAILING';
   if (result.rateLimited > 0) return 'RATE_LIMITED';
