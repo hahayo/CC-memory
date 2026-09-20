@@ -81,6 +81,34 @@ describe('finalization database contract', () => {
     expect((await run()).status).toBe('finalized');
   });
 
+  it('preserves the stale outcome when its DB connection closes before lease cleanup', async () => {
+    const transient = await connectTestDb();
+    const transientDb = drizzle(transient);
+    let readinessChecks = 0;
+    try {
+      const result = await finalizeSession({ db: transientDb, projectId, sessionId, llm, env: {}, nowMs: () => now,
+        generateEmbedding: async () => null, stillReady: async () => {
+          if (++readinessChecks === 1) return true;
+          await transient.end();
+          return false;
+        } });
+      expect(result).toEqual({ attempted: true, status: 'stale' });
+      expect((await row()).summary).toBe('old');
+      expect((await row()).metadata.capture.finalize_retry.lease_until).toBeGreaterThan(now);
+    } finally { await transient.end(); }
+  });
+
+  it('retains the old rollup and pending evidence when a required embedding is unavailable', async () => {
+    expect(await finalizeSession({ db: serviceDb, projectId, sessionId, llm,
+      env: { CC_MEMORY_EMBEDDING_EXPECTED: '1' }, nowMs: () => now,
+      generateEmbedding: async () => null, stillReady: async () => true,
+    })).toEqual({ attempted: true, status: 'failed' });
+    const saved = await row();
+    expect(saved.summary).toBe('old');
+    expect(saved.metadata.capture.summary_guard_pending.summary).toBe('last rejected window');
+    expect(saved.metadata.capture.finalize_retry.attempts).toBe(1);
+  });
+
   it('claims a generation once across concurrent workers', async () => {
     const results = await Promise.all([run(), run()]);
     expect(results.filter(r => r.status === 'finalized')).toHaveLength(1);

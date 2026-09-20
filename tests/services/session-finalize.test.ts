@@ -149,3 +149,25 @@ it('charges an unexpected finalizer failure against the per-tick attempt cap', a
     expect(calls).toBe(1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+it('isolates a corrupt marker without starving another ready session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-corrupt-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    for (const id of ['a', 'b']) {
+      const spool = join(dir, `${id}.jsonl`);
+      await writeFile(spool, ''); await writeFile(`${spool}.close`, '');
+      await writeFile(spool.replace('.jsonl', '.capture-state.json'), JSON.stringify({
+        version: 2, projectId: 'project', spool: { cursor: 0 }, transcripts: {}, retries: {},
+      }));
+      await enrollFinalization(spool, 'project', id);
+    }
+    await writeFile(join(dir, 'a.jsonl.finalize.json'), 'not json');
+    const called: string[] = [];
+    await runFinalizers({ root, env: {}, nowMs: Date.now, hasBudget: () => true,
+      acquireLock: async () => async () => {}, finalize: async ({ sessionId }) => {
+        called.push(sessionId); return { attempted: true, status: 'finalized' };
+      } });
+    expect(called).toEqual(['b']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
