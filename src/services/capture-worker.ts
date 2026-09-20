@@ -10,6 +10,8 @@ import { sql, type SQL } from 'drizzle-orm';
 import {
   CLAUDE_CLI_PROVIDER_ID,
   CaptureLlmValidationError,
+  PRIOR_SUMMARY_MAX_ITEM_CHARS,
+  PRIOR_SUMMARY_MAX_ITEMS,
   PRIOR_SUMMARY_MAX_SUMMARY_CHARS,
   estimateDiscoveryTokens,
   formatCaptureLlmDisabledWarning,
@@ -158,8 +160,15 @@ interface CaptureMetadata {
   }>;
   /** Number of windows where the summary guard kept the prior summary due to degradation. */
   summary_guard_kept?: number;
-  /** Rejected summary text from the most recent guarded window, awaiting merge into the next successful cumulative summary. Cleared on a non-guarded write. */
-  summary_guard_pending?: string;
+  /** Rejected session_summary from the most recent guarded window, awaiting merge. Cleared on a non-guarded write. Object form since R4; old string form is read as {summary: <string>, decisions: [], next_steps: []}. */
+  summary_guard_pending?: SummaryGuardPending;
+}
+
+/** The shape stored in metadata.capture.summary_guard_pending. */
+interface SummaryGuardPending {
+  summary: string;
+  decisions: string[];
+  next_steps: string[];
 }
 
 interface RollupRow {
@@ -324,6 +333,10 @@ function statePathFor(spoolPath: string): string {
 
 function lockPathFor(spoolPath: string): string {
   return `${spoolPath}.lock`;
+}
+
+function clampField(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
 }
 
 function parsePositiveIntegerEnv(value: string | undefined, fallback: number): number {
@@ -1211,10 +1224,35 @@ function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
     ...(typeof record.summary_guard_kept === 'number' && Number.isFinite(record.summary_guard_kept)
       ? { summary_guard_kept: record.summary_guard_kept }
       : {}),
-    ...(typeof record.summary_guard_pending === 'string' && record.summary_guard_pending.length > 0
-      ? { summary_guard_pending: record.summary_guard_pending }
-      : {}),
+    ...parseSummaryGuardPending(record.summary_guard_pending),
   };
+}
+
+/** Parse summary_guard_pending from metadata: supports old string form and new object form. */
+function parseSummaryGuardPending(
+  value: unknown,
+): { summary_guard_pending: SummaryGuardPending } | Record<string, never> {
+  if (typeof value === 'string' && value.length > 0) {
+    // Backward compat: old string form → wrap as object with empty arrays.
+    return { summary_guard_pending: { summary: value, decisions: [], next_steps: [] } };
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.summary === 'string' && obj.summary.length > 0) {
+      return {
+        summary_guard_pending: {
+          summary: obj.summary,
+          decisions: Array.isArray(obj.decisions)
+            ? obj.decisions.filter((d): d is string => typeof d === 'string')
+            : [],
+          next_steps: Array.isArray(obj.next_steps)
+            ? obj.next_steps.filter((d): d is string => typeof d === 'string')
+            : [],
+        },
+      };
+    }
+  }
+  return {};
 }
 
 function normalizeTranscriptSources(sources: TranscriptSourceRange[]): TranscriptSourceRange[] {
@@ -1652,7 +1690,11 @@ async function writeCaptureWindow(
       source,
     ]),
     summarize_count: (previousCapture?.summarize_count ?? 0) + 1,
-    discovery_tokens: discoveryTokens,
+    // When guard fires the stored summary is unchanged, so keep the prior discovery_tokens
+    // that match it; otherwise use the freshly estimated value for the new summary.
+    discovery_tokens: guardTriggered
+      ? (previousCapture?.discovery_tokens ?? discoveryTokens)
+      : discoveryTokens,
     empty_observation_windows:
       extraction.observations.length === 0 && !isReplayedWindow
         ? [
@@ -1670,14 +1712,21 @@ async function writeCaptureWindow(
       : priorGuardKept > 0
         ? { summary_guard_kept: priorGuardKept }
         : {}),
-    // When the guard triggers, store the rejected summary (clamped to schema limit)
-    // so the next window's LLM can merge it.  On a normal (non-guarded) write,
-    // the pending field is omitted (= cleared from metadata).
+    // When the guard triggers, store the full rejected session_summary (each field
+    // clamped to the schema limits) so the next window's LLM can merge decisions
+    // and next_steps too.  On a normal (non-guarded) write, the field is omitted
+    // (= cleared from metadata).
     ...(guardTriggered
       ? {
-          summary_guard_pending: summary.summary.length > PRIOR_SUMMARY_MAX_SUMMARY_CHARS
-            ? summary.summary.slice(0, PRIOR_SUMMARY_MAX_SUMMARY_CHARS)
-            : summary.summary,
+          summary_guard_pending: {
+            summary: clampField(summary.summary, PRIOR_SUMMARY_MAX_SUMMARY_CHARS),
+            decisions: summary.decisions.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(
+              (d) => clampField(d, PRIOR_SUMMARY_MAX_ITEM_CHARS),
+            ),
+            next_steps: summary.next_steps.slice(0, PRIOR_SUMMARY_MAX_ITEMS).map(
+              (d) => clampField(d, PRIOR_SUMMARY_MAX_ITEM_CHARS),
+            ),
+          },
         }
       : {}),
   };

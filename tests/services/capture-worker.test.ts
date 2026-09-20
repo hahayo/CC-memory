@@ -4679,17 +4679,19 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
     const idempotencyKey = `capture:v05:${projectId}:${sessionId}`;
 
     // Seed a rollup row so loadPriorSessionSummary finds it.
+    // project_memories has no session_id column — session identity lives in
+    // idempotency_key and metadata.capture.session_id.
     await sql`
       INSERT INTO project_memories (
-        project_id, session_id, type, idempotency_key,
+        project_id, type, idempotency_key,
         summary, keywords, decisions, next_steps,
         content_hash, writer_host, metadata, status
       ) VALUES (
-        ${projectId}, ${sessionId}, 'session', ${idempotencyKey},
+        ${projectId}, 'session', ${idempotencyKey},
         'existing cumulative summary about auth flow', ARRAY['auth'],
         ARRAY['use SSO'], ARRAY['deploy SSO'],
         'replay-prior-hash', 'vitest',
-        '{"capture":{"version":"0.5","session_id":"s","observation_ids":[],"model":"test","spool_offsets":[],"transcript_sources":[],"summarize_count":1,"discovery_tokens":100,"empty_observation_windows":[]}}'::jsonb,
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
         'active'
       )
     `;
