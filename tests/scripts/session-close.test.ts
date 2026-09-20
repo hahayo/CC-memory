@@ -1,6 +1,6 @@
 import { openSync, closeSync, mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
@@ -17,7 +17,7 @@ describe('local session close command', () => {
       writeFileSync(payload, JSON.stringify({ cwd, session_id: `${client}-session`, transcript_path: transcript }));
       const fd = openSync(payload, 'r');
       const result = spawnSync('bash', [script], { encoding: 'utf8', timeout: 5000,
-        env: { PATH: '/usr/bin:/bin', HOME: root, CC_MEMORY_CAPTURE_CHILD: '', CC_MEMORY_SPOOL_DIR: join(root, 'spool') },
+        env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, CC_MEMORY_CAPTURE_CHILD: '', CC_MEMORY_SPOOL_DIR: join(root, 'spool') },
         stdio: [fd, 'pipe', 'pipe'],
       });
       closeSync(fd);
@@ -31,7 +31,7 @@ describe('local session close command', () => {
   it('always exits zero for invalid input and capture children', () => {
     for (const child of ['', '1']) {
       const fd = openSync('/dev/null', 'r');
-      const result = spawnSync('bash', [script], { stdio: [fd, 'pipe', 'pipe'], timeout: 5000, env: { PATH: '/usr/bin:/bin', CC_MEMORY_CAPTURE_CHILD: child } });
+      const result = spawnSync('bash', [script], { stdio: [fd, 'pipe', 'pipe'], timeout: 5000, env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, CC_MEMORY_CAPTURE_CHILD: child } });
       closeSync(fd);
       expect(result.status).toBe(0);
     }
@@ -48,7 +48,7 @@ it.each(['personal', 'child'])('does not write any marker for a valid %s request
     writeFileSync(payload, JSON.stringify({ cwd: root, session_id: 's', transcript_path: transcript }));
     const fd = openSync(payload, 'r');
     const result = spawnSync('bash', [script], { stdio: [fd, 'pipe', 'pipe'], timeout: 5000,
-      env: { PATH: '/usr/bin:/bin', HOME: root, CC_MEMORY_SPOOL_DIR: join(root, 'spool'),
+      env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, CC_MEMORY_SPOOL_DIR: join(root, 'spool'),
         CC_MEMORY_CAPTURE_CHILD: mode === 'child' ? '1' : '' },
     });
     closeSync(fd);

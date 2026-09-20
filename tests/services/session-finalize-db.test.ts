@@ -11,13 +11,18 @@ const response = { model: 'test', text: JSON.stringify({ session_summary: {
 
 describe('finalization database contract', () => {
   let db: Sql;
+  let serviceDb: ReturnType<typeof drizzle>;
   const projectId = `finalize-${randomUUID()}`;
   const sessionId = 'session';
   let now = 1_800_000_000_000;
   const extract = vi.fn(async (_request: CaptureLlmRequest) => response);
   const llm: CaptureLlmAdapter = { model: 'test', worstCaseCallBudgetMs: 100, extract,
     takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 }) };
-  beforeAll(async () => { db = await connectTestDb(); });
+  beforeAll(async () => {
+    db = await connectTestDb();
+    // Drizzle installs JSON serializers on this connection; initialize before seeding any fixture.
+    serviceDb = drizzle(db);
+  });
   afterAll(async () => {
     if (db) { await db`DELETE FROM observations WHERE project_id IN (${projectId}, ${projectId + '-other'})`; await db`DELETE FROM project_memories WHERE project_id=${projectId}`; await db.end(); }
   });
@@ -31,7 +36,7 @@ describe('finalization database contract', () => {
       ${`capture:v05:${projectId}:${sessionId}`},${JSON.stringify({ capture: { summarize_count: 1,
         summary_guard_pending: { summary: 'last rejected window', decisions: ['pending decision'], next_steps: [] } } })}::jsonb)`;
   });
-  const run = (hasBudget?: () => boolean) => finalizeSession({ hasBudget, db: drizzle(db), projectId, sessionId, llm, nowMs: () => now,
+  const run = (hasBudget?: () => boolean) => finalizeSession({ hasBudget, db: serviceDb, projectId, sessionId, llm, nowMs: () => now,
     env: {}, stillReady: async () => true, generateEmbedding: async () => null });
   const row = async () => (await db`SELECT * FROM project_memories WHERE project_id=${projectId}`)[0];
 
