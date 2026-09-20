@@ -1,19 +1,19 @@
 <!-- SSOT_STATUS_BLOCK_START v1.0 -->
 SpecConsistency:
-  status: PENDING
-  verification_basis: 本次工作階段收尾規格；首輪三項已修；複查新增兩項維運文件發現亦已修，追加稽核待使用者核准。
-  last_checked_diff_hash: c786fd54fbfc
+  status: VERIFIED
+  verification_basis: 完整追加稽核先找出 plan.md 舊 rotation 表缺少收尾關卡；修正後的針對性複審 verdict=OK、unresolved=0、search_scope_complete=true。
+  last_checked_diff_hash: 89f4e861e1de
   audit_tool_version: 1.3.1
-  audit_scope_hash: 82f4bc142784a14b2db24e764cf99529da9bcf205ef74ea34fcf71607dd0ad0f
-  checked_tree_hash: ecbe13863b554fb399301e569cecc992d2c39ec3
-  checked_tree_note: 第二輪已稽核提交；其後兩份維運文件修正尚待追加稽核。
-  audit_command: node /home/haha/.claude/hooks/spec-cascade-check.js --mode review --force-cascade --paths docs/auto-capture-v0.5/spec.md,docs/auto-capture-v0.5/plan.md,docs/auto-capture-v0.5/task.md,CLAUDE.md --status-block-path .claude/spec-status.md --codex-timeout 480
+  audit_scope_hash: eed95b3261ceb401ab43bcd194b137bdd516ab6f031f324092a54319ccbfdcbd
+  checked_tree_hash: b339bd3631cc786095d0ae5262ef17027393fd21
+  checked_tree_note: 以 9740843 為固定點重現 bbbed23 完整差異及最終 plan.md 修正；tree hash 含稽核前 PENDING meta-file，Status Block 本身依規則排除。
+  audit_command: 完整稽核使用 --paths spec.md,plan.md,task.md,CLAUDE.md,multi-machine-setup.md,memory-ops-cutover.md；最終複審使用 node /home/haha/.claude/hooks/spec-cascade-check.js --mode review --force-cascade --paths docs/auto-capture-v0.5/plan.md --status-block-path .claude/spec-status.md --codex-timeout 480
 CascadeTerms: ["工作階段收尾", "Session Finalization", "最後一窗說了算", "收尾成功後以收尾摘要為準", "21600000", "65536", "1800000", "/session-close", "finalize_retry", "CC_CAPTURE_FINALIZE_QUIET_MS"]
 AffectedSections: ["docs/auto-capture-v0.5/spec.md#Session Finalization", "docs/auto-capture-v0.5/plan.md#Session Finalization Environment Variables", "docs/auto-capture-v0.5/task.md#工作階段收尾（2026-09-20 甲案）", "CLAUDE.md#Skills", "CLAUDE.md#Environment Variables", "docs/auto-capture-v0.5/multi-machine-setup.md#5. 注意事項", "docs/auto-capture-v0.5/memory-ops-cutover.md#5. 封存歷史 capture backlog，再按需回放"]
-UnresolvedItems: ["跨機設定與維運手冊兩項已修；追加規格複查超過預設輪次，等待使用者核准"]
+UnresolvedItems: []
 LastCascadeAudit:
-  date: 2026-09-20T16:29:23.491791+00:00
-  result: INCONSISTENT（二輪）；2 項維運文件連動發現已修，未宣稱 VERIFIED。
+  date: 2026-09-20T17:05:20+00:00
+  result: OK；unresolved_count=0；searched_terms_count=47；search_scope_complete=true。
 ChangedPaths: ["docs/auto-capture-v0.5/spec.md", "docs/auto-capture-v0.5/plan.md", "docs/auto-capture-v0.5/task.md", "CLAUDE.md", "skills/session-close/SKILL.md", "docs/auto-capture-v0.5/multi-machine-setup.md", "docs/auto-capture-v0.5/memory-ops-cutover.md", ".claude/spec-status.md"]
 <!-- SSOT_STATUS_BLOCK_END -->
 
@@ -108,4 +108,4 @@ ChangedPaths: ["docs/auto-capture-v0.5/{spec,plan,task}.md", "docs/{INDEX,spec,p
 <!-- HISTORICAL_STATUS_BLOCK_END -->
 
 <!-- session-finalize audit: 2026-09-21 -->
-工作階段收尾規格連動檢查進行中；首次沙箱初始化失敗，升權後逾時，尚無通過結論。
+工作階段收尾規格連動檢查已通過；最終針對性複審 verdict=OK，未解項目為 0。

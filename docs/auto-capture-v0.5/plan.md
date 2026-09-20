@@ -189,7 +189,7 @@ claude-mem plugin   # 併用期保留
 | empty transcript chunk | 先按原始 bytes 切 chunk，再移除 injection marker；過濾後空白時不呼叫 LLM、不寫 dead-letter，但保存原始 byte range checkpoint | empty chunk / marker 測試 |
 | max window chunking | transcript range 超過 `CC_CAPTURE_MAX_WINDOW_BYTES` 時依原始 bytes 的 UTF-8 安全邊界切 chunk；各 chunk 共用 canonical rollup，`observed_at` 微增序號跨 chunk 延續；前已成功 chunk 即時保存 checkpoint | chunk / UTF-8 / partial failure 測試 |
 | idempotency | rollup metadata 的可合併 transcript source coverage + DB unique index 擋重複；已覆蓋 range 重播跳過所有 DB 寫入 | commit 後 state 寫入失敗的重播測試 |
-| rotation | 單檔 >10MB 或 session 結束 24h 後一併 seal spool 與 generation state；新同名 spool 從 cursor 0 開新 generation | rotation / 0600 測試 |
+| rotation | 單檔 >10MB 或 session 結束 24h 後可進入 rotation 檢查；只有末筆為 Stop sentinel，且既有 `.jsonl.finalize.json` 已在收尾成功後消耗時，才可一併 seal spool 與 generation state；新同名 spool 從 cursor 0 開新 generation | rotation / 0600／finalization gate 測試 |
 | size cap | 全 spool >500MB 時停止 capture 並 stdout 告警 | flood（洪水）測試 |
 | dead-letter | v2 state 以 path hash + 原始 range + content hash 穩定 retry key 跨 tick 累計 attempts：第 1-4 次 hold；第 5 次只 park 該 chunk、保存 checkpoint 並停止該 session 本 tick。有效 path 的來源不可讀／短於 boundary 時改用固定 `TRANSCRIPT_SOURCE_UNAVAILABLE` hash；來源可讀且長度達 boundary 才清除該 retry。429 與 budget yield 不計 attempts | metadata 不含敏感全文或完整本機 path；來源不可用時 `model=none`，warning 只含 path hash prefix/range/attempts |
 | recovery | worker crash 後從各 path checkpoint 重讀；DB source coverage 讓 commit 後 state 寫入失敗可安全重播。歷史資料只由 audit script 產生 `would_replay: false` manifest | at-least-once / dry-run audit 測試 |
