@@ -1263,7 +1263,7 @@ function buildCaptureSystemPrompt(): string {
  * 只處理 prior summary：transcript 本身刻意不改，那是既有設計（改了會失真，且 transcript 含程式碼
  * 時常合法出現這些字串）。
  */
-const PROMPT_DELIMITER_TAG = /<(\/?)(prior_summary|transcript)\s*>/gi;
+const PROMPT_DELIMITER_TAG = /<(\/?)(prior_summary|transcript|observations)\s*>/gi;
 
 export function neutralizePromptDelimiters(text: string): string {
   return text.replace(PROMPT_DELIMITER_TAG, '＜$1$2>');

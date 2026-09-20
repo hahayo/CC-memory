@@ -62,6 +62,9 @@ function result(overrides: Partial<CaptureWorkerResult> = {}): CaptureWorkerResu
 }
 
 describe('drain tick classification', () => {
+  it('treats finalization-only rollup writes as progress so remaining sessions drain', () => {
+    expect(classifyDrainTick(result({ rollupsWritten: 1 }), 1, 100)).toBe('PROGRESS');
+  });
   it('refuses execute before side effects when production approval is denied', async () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-memory-drain-approval-'));
     roots.push(root);

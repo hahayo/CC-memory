@@ -129,7 +129,7 @@ function makeHarness(overrides: Partial<Pick<TestHarness, 'projectId' | 'session
     root,
     spoolDir,
     // 既有測試以 path 順序推理；fresh-first（2026-09-04）預設關閉，需要的測試自行打開。
-    env: { CC_MEMORY_SPOOL_DIR: spoolDir, CC_CAPTURE_RETRY_MIN_INTERVAL_MS: '0', CC_CAPTURE_FRESH_WINDOW_MS: '0' },
+    env: { CC_CAPTURE_FINALIZE_QUIET_MS: '0', CC_MEMORY_SPOOL_DIR: spoolDir, CC_CAPTURE_RETRY_MIN_INTERVAL_MS: '0', CC_CAPTURE_FRESH_WINDOW_MS: '0' },
     projectId,
     sessionId,
     transcriptPath,
@@ -3418,6 +3418,41 @@ describe('capture worker DB-backed RED contracts', () => {
     await sql`DROP FUNCTION IF EXISTS test_capture_rollup_discovery_guard()`;
     await sql`DELETE FROM observations WHERE project_id LIKE 'capture-worker-%'`;
     await sql`DELETE FROM project_memories WHERE project_id LIKE 'capture-worker-%'`;
+  });
+
+  it('finalizes after quiet completion, retains the spool before sealing, and resumes a new generation', async () => {
+    const harness = makeHarness();
+    harness.env.CC_CAPTURE_FINALIZE_QUIET_MS = '21600000';
+    let clock = Date.now();
+    const end = appendTranscriptEntries(harness.transcriptPath, [{ message: 'initial diagnosis' }]);
+    await appendWindow(harness, { transcriptStart: 0, transcriptEnd: end, timestamp: new Date(clock).toISOString() });
+    const llm = mockLlm([
+      rawExtraction({ summary: 'initial diagnosis', observations: [observation('diagnosis', 'evidence')] }),
+      rawExtraction({ summary: 'whole session final', observations: [] }),
+      rawExtraction({ summary: 'new evidence', observations: [] }),
+      rawExtraction({ summary: 'revised whole session final', observations: [] }),
+    ]);
+    await runWorker(harness, { db, llm, nowMs: () => clock });
+    expect(llm.calls).toHaveLength(1);
+    expect(existsSync(`${spoolPath(harness)}.finalize.json`)).toBe(true);
+    // Beyond the existing 24-hour seal threshold: finalization still sees the retained spool.
+    clock += 25 * 3600000;
+    await runWorker(harness, { db, llm, nowMs: () => clock });
+    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls[1].retryPromptPrefix).toContain('SESSION FINALIZATION');
+    expect(llm.calls[1].transcript).toContain('evidence');
+    expect(existsSync(`${spoolPath(harness)}.finalize.json`)).toBe(false);
+    const end2 = appendTranscriptEntries(harness.transcriptPath, [{ message: 'new evidence' }]);
+    await appendWindow(harness, { transcriptStart: end, transcriptEnd: end2, timestamp: new Date(clock).toISOString() });
+    writeFileSync(`${spoolPath(harness)}.close`, '');
+    harness.env.CC_CAPTURE_QUIET_PERIOD_MS = '7200000';
+    clock = Date.now();
+    await runWorker(harness, { db, llm, nowMs: () => clock });
+    expect(llm.calls).toHaveLength(4);
+    const saved = await sql`SELECT metadata, summary FROM project_memories WHERE project_id=${harness.projectId}`;
+    expect(saved[0].summary).toBe('revised whole session final');
+    expect(saved[0].metadata.capture.finalize_count).toBe(2);
+    expect(saved[0].metadata.capture.finalized_generation).toBe(2);
   });
 
   it('retries malformed LLM JSON once and writes the second successful response without dead-lettering', async () => {

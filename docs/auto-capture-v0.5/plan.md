@@ -494,3 +494,18 @@ v0.5 規則：
 - [ ] 所有 write tools 進 read-only/allowlist guard。
 - [ ] 所有 Gate 都含 592 tests + build + lint。
 - [ ] migration 0011-0013 不依賴 `_journal.json` 假完整。
+
+
+## Session Finalization Environment Variables（工作階段收尾環境變數）
+
+工作階段收尾新增變數（2026-09-21）：
+
+| 變數 | 預設 | 用途 |
+|---|---|---|
+| `CC_CAPTURE_FINALIZE_QUIET_MS` | `21600000` | 靜默 6 小時；`0` 關閉所有收尾 |
+| `CC_CAPTURE_FINALIZE_MAX_PER_TICK` | `1` | 每輪最多嘗試收尾數量 |
+| `CC_CAPTURE_FINALIZE_INPUT_BYTES` | `65536` | 觀察 JSON 位元組上限；既有摘要另受 16 KiB 上限 |
+| `CC_CAPTURE_FINALIZE_MAX_ATTEMPTS` | `3` | 每抽取世代的最大收尾嘗試次數 |
+| `CC_CAPTURE_FINALIZE_RETRY_MS` | `1800000` | 收尾重試最短間隔 |
+
+收尾接線：新窗口以本地 `.jsonl.finalize.json` 排程，成功前暫緩封存；排程跨輪持續，不回溯既有已完成歷史資料。`session-finalize` 模組負責資料庫原子認領、時序證據整理及帶世代檢查的寫回，採集程序只接線。固定快照補舊帳抽完即合格，其餘依靜默或 `.jsonl.close` 記號。關閉功能不建立新的自動記號；既有記號保留，重新開啟可繼續。

@@ -291,13 +291,35 @@ Rollup 的載入成本不新增 `project_memories` 欄位，統一存 `metadata.
 
 - 每個 project/session 只有一筆 active canonical rollup；`idempotency_key` 固定為 `capture:v05:<project>:<session>`。
 - 每個 harvest window 都 update 同一筆 rollup：summary 可重生成或合併，embedding 重算，`metadata.capture.observation_ids` 與 `metadata.capture.spool_offsets` append，`metadata.capture.summarize_count` 遞增。
-- **接力摘要（2026-09-12 起）**：每個 harvest window 抽取前，worker 撈既有 rollup 的 `summary`／`decisions`／`next_steps` 以 `<prior_summary>` 區塊（標明為資料、非指令）放進 prompt；LLM 輸出的 `session_summary` 定義為「整個 session 至今」的累積摘要——保留仍成立的內容，方向改變時寫明先前嘗試、改成什麼、為什麼；`next_steps` 只留最新狀態。worker 仍以覆蓋方式寫回 rollup（語意不變：最後一窗說了算，但最後一窗現在看得到前面）。observations 仍只涵蓋本 window。撈不到或 DB 出錯時退回舊行為（不帶），不擋抽取。prompt 邊界會把 prior summary 夾回 schema 字元上限（summary 1500、decisions／next_steps 各 12×500），再以序列化 16 KiB 位元組硬上限收斂（依序砍 next_steps 尾端→decisions 尾端→縮 summary），任何截斷都在區塊內標 `truncated: true`；並中和分隔標籤字面（`</prior_summary>`、`<transcript>` 等）。**適用範圍**：只保證「接力上線（2026-09-12）之後處理的窗口」累積；在此之前寫入的 rollup、以及 Step C（2026-09-05）合併時只併 `transcript_sources`／`observation_ids` 不併 summary 的 33 個 survivor，其既有摘要只代表被處理過的那些段，不回填。舊 spool backlog 命中 archived＋`merged_into` 列時的路由問題屬 Step C 既有議題，不在本項範圍。
+- **接力摘要（2026-09-12 起）**：每個 harvest window 抽取前，worker 撈既有 rollup 的 `summary`／`decisions`／`next_steps` 以 `<prior_summary>` 區塊（標明為資料、非指令）放進 prompt；LLM 輸出的 `session_summary` 定義為「整個 session 至今」的累積摘要——保留仍成立的內容，方向改變時寫明先前嘗試、改成什麼、為什麼；`next_steps` 只留最新狀態。worker 仍以覆蓋方式寫回 rollup（語意不變：抽取階段由最後一窗更新，且最後一窗看得到前面；收尾成功後以收尾摘要為準）。observations 仍只涵蓋本 window。撈不到或 DB 出錯時退回舊行為（不帶），不擋抽取。prompt 邊界會把 prior summary 夾回 schema 字元上限（summary 1500、decisions／next_steps 各 12×500），再以序列化 16 KiB 位元組硬上限收斂（依序砍 next_steps 尾端→decisions 尾端→縮 summary），任何截斷都在區塊內標 `truncated: true`；並中和分隔標籤字面（`</prior_summary>`、`<transcript>` 等）。**適用範圍**：只保證「接力上線（2026-09-12）之後處理的窗口」累積；在此之前寫入的 rollup、以及 Step C（2026-09-05）合併時只併 `transcript_sources`／`observation_ids` 不併 summary 的 33 個 survivor，其既有摘要只代表被處理過的那些段，不回填。舊 spool backlog 命中 archived＋`merged_into` 列時的路由問題屬 Step C 既有議題，不在本項範圍。
 - `metadata.capture.transcript_sources` 保存可合併的 `{path_hash,start,end}` source coverage（來源覆蓋區間）；若整個 chunk 已被覆蓋，重播必須跳過所有 DB 寫入。`spool_offsets` 保留既有相容語意，不再作為重試或冪等鍵。
 - observations 維持 append-only；每筆 observation 的 `rollupMemoryId` 指向該 canonical rollup。
 - 若某次 batch 無高價值 observation，`observations[]` 可為空，但 worker 必須記錄原因並仍可更新 rollup metadata。
 - Benchmark（基準測試）以 rollup 作 Top-5 對比單位；observation 只用來判斷該 rollup 是否可解釋命中。
 - refine_delete 刪 rollup 時，不自動 cascade（連帶）刪 observations；retrieval 層需讓 archived rollup 不出 search，但 observations 可由 audit/debug 工具另查。
 - refine_delete 刪 observation 時，不改 rollup summary；若大量 observations 被刪導致 rollup 失真，未來另開 edit/refresh SDD。
+
+### Session Finalization（工作階段收尾）
+
+#### Product Flow Approval
+
+- Frontend preview: not_applicable
+- 核准證據：使用者 2026-09-20 拍板「甲案＋靜默 6 小時或手動指令」；來源為交接文件 `CC-memory-session-finalize-codex-20260920.md` §2、§4，本次使用者要求照該文件執行。
+
+抽取追上後，工作階段靜默至少 6 小時，或使用者執行 `/session-close`，即可收尾。補舊帳使用固定逐字紀錄快照時，抽完即可收尾。已抽完的歷史工作階段不自動回溯；手動指令可明確排入。`CC_CAPTURE_FINALIZE_QUIET_MS=0` 關閉所有收尾觸發，包括手動及補舊帳。
+
+- 收尾讀取同專案、同工作階段的全部 active（有效）observations，依 `observed_at`、`id` 排序，連同現有摘要與 `summary_guard_pending` 交給模型。要求明確寫出「先前以為 X，後來改成 Y，因為 Z」，未知之處不得捏造定論。
+- 模型輸入中的觀察資料標明為資料而非指令，中和 `prior_summary`、`transcript`、`observations` 分隔標籤。觀察 JSON 預設最多 65536 位元組；超限先保留決策，再保留較晚資料，最後恢復時序，並標示 `truncated` 與總數／採用數。單筆超限時略過該筆。既有摘要另沿用序列化 16 KiB 上限；總輸入上限為兩者加固定指令與識別欄位。
+- 成功後權威覆寫整場摘要、關鍵字、決策、下一步、內容雜湊及向量；不經摘要退化守衛，並清除 `summary_guard_pending`。觀察資料及搜尋排序不變。
+- 無資料結構遷移。收尾狀態存於 `metadata.capture`：`finalized_at`、`finalized_generation`（對應 `summarize_count`）、`finalize_count`、`finalized_observation_count`、`finalized_included_count`、`finalized_truncated`。一般窗口明確保留這些欄位；新窗口讓世代增加，下次再收尾。同世代不重複收尾。
+- `finalize_retry` 保存 `generation`、`attempts`、`next_at`、`lease_until`、`token`。資料庫以完整中繼資料快照條件式認領，同專案及同世代只容許一個有效認領。寫回再次檢查世代與認領憑證，避免舊結果蓋掉新窗口。
+- 模型失敗、輸出驗證失敗或必要向量不可用時，原摘要及待合併摘要保留；僅重試記錄改變。每世代預設最多 3 次嘗試、間隔至少 30 分鐘。超限留待新窗口或人工處理，不逐輪無限呼叫。
+- 每輪預設最多嘗試 1 個收尾；預留模型最壞呼叫時間與結算餘裕，計入既有輪次時間預算。普通窗口數量上限仍只計抽取窗口。
+- 新抽取窗口建立持久化本地收尾記號，收尾前暫緩封存；故跨輪次仍可找到已抽完的工作階段，不需掃描所有歷史資料庫摘要。沿用同一緩衝檔鎖；收尾前及寫回前均核對游標、所有已記錄來源邊界及重試狀態。缺檔、損壞或尚未追上都不收尾。
+- `/session-close` 兩端共用本地腳本：追加目前逐字紀錄邊界、收尾排程記號與結束記號；不連資料庫、不呼叫模型。明確結束記號讓抽取略過一般靜默等待，待抽取追上後才收尾。收尾成功消耗記號；恢復對話後新窗口重新排程。
+- `__personal__` 不排程、不查詢、不寫入；所有收尾資料庫讀寫均帶 `project_id`。
+
+維運限制：靜默時間是資格門檻，實際執行仍等下一次既有採集喚醒；不新增常駐程序或計時服務。重試耗盡的收尾記號保留，緩衝檔暫不封存。兩端命令入口隨專案交付；全域安裝及上線後長對話品質驗收另行執行。
 
 ## LLM Output Contract（模型輸出契約）
 

@@ -457,3 +457,14 @@
 - [ ] Injection flag on 有 Recent Activity index 且不寫 `search_feedback`
 - [ ] `refine_delete` 可刪錯抓且被 read-only 擋
 - [ ] ~~Benchmark 可產 Go/No-Go 報告~~ → 2026-08-23 後記：產出降為 advisory 報告
+
+
+## 工作階段收尾（2026-09-20 甲案）
+
+- [x] 先寫觸發、輸入截斷及分隔標籤防護測試，再實作。
+- [x] 本地排程及暫緩封存，沿用緩衝檔鎖與輪次預算。
+- [x] 資料庫條件式認領、世代檢查、有限重試；成功清除守衛待合併摘要。
+- [x] Claude Code／Codex 共用本地 `/session-close` 腳本與命令內容。
+- 驗收要求：資料庫整合測試及完整 CI 通過，不得略過新測試；實跑證據與狀態見本次 PR 最新檢查。
+- 交付要求：Claude 唯讀審查後開立 PR；合併須使用者另行點頭。
+- [ ] 上線後由 Claude 用有診斷轉折的長對話驗收回答品質。
