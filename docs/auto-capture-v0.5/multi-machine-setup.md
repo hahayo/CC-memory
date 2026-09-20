@@ -109,6 +109,6 @@ journalctl --user -u cc-memory-auto-capture.service -n 50 --no-pager
 
 - **遞迴斷路器**：worker spawn 的 claude 子程序帶 `CC_MEMORY_CAPTURE_CHILD=1`，hooks 開頭 guard 直接 exit 0——抽取 session 不會再進 spool。不要移除該 guard。
 - **`GEMINI_API_KEY` 不要 unset**：雙用途（gemini-flash capture 選項 + search embedding）；unset 會讓語義搜尋失效。claude-cli capture 不需要它。
-- spool 安全閥：單檔 >10MB rotate、全 spool >500MB 停止 capture（`CC_MEMORY_SPOOL_MAX_MB`）。
+- spool 安全閥：單檔 >10MB rotate（已排入收尾者先保留，收尾成功後才可封存）、全 spool >500MB 停止 capture（`CC_MEMORY_SPOOL_MAX_MB`）。
 - 窗口安全閥：空窗口 skip；超過上限依 UTF-8 邊界分塊（`CC_CAPTURE_MAX_WINDOW_BYTES`）——claude-cli 預設 96 KiB、其他 provider 256 KiB；顯式設定則優先。
-- 環境變數全表：`plan.md` §Environment Variables。
+- 環境變數索引：`plan.md` §Environment Variables（既有採集設定）及 §Session Finalization Environment Variables（工作階段收尾設定）。

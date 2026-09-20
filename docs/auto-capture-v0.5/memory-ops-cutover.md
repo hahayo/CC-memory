@@ -401,7 +401,11 @@ npm run drain:capture -- \
 
 foreground（前景執行）的 drain 不是 timer 或 daemon。execute 會在任何 env 注入、LLM／DB 載入或備份前，將實際 project URL 交給 §1.5 的 production DB identity gate；命中 production 而 marker 缺少、過期或不安全時直接以 preflight 失敗中止，隔離測試 DB 則不誤擋。通過後仍會先建立並驗證完整 spool tar 備份；缺 Gemini key 時允許擷取並寫入 `NULL` embedding，之後依 §1.2 補算；若 capture provider 是 `gemini-flash`，缺 key 會在 preflight 中止。
 
-重要 exit code（退出碼）：`0` 全清、`1` preflight 失敗、`2` 連續 failure 斷路、`3` 共用鎖忙、`4` backup 失敗、`5` 有殘工可續跑、`6` 額度冷卻、`130` 收到停止訊號。worker 對同一 terminal retry 預設至少間隔 30 分鐘（`CC_CAPTURE_RETRY_MIN_INTERVAL_MS=1800000`），hold 不增加 attempt、不推進 checkpoint，且在 supervisor 中只屬資訊狀態；真正執行 retry 又失敗時輸出的 `retry-pending` warning 才會告警。不要為了加速設成 `0` 跑正式 backlog。
+重要 exit code（退出碼）：`0` 抽取迴圈已無可立即處理項目（收尾狀態另查下段）、`1` preflight 失敗、`2` 連續 failure 斷路、`3` 共用鎖忙、`4` backup 失敗、`5` 有殘工可續跑、`6` 額度冷卻、`130` 收到停止訊號。worker 對同一 terminal retry 預設至少間隔 30 分鐘（`CC_CAPTURE_RETRY_MIN_INTERVAL_MS=1800000`），hold 不增加 attempt、不推進 checkpoint，且在 supervisor 中只屬資訊狀態；真正執行 retry 又失敗時輸出的 `retry-pending` warning 才會告警。不要為了加速設成 `0` 跑正式 backlog。
+
+工作階段收尾（2026-09-21）：設定固定快照的補舊帳工作階段在抽取追上後，即可收尾，不等靜默 6 小時。新窗口建立 `.jsonl.finalize.json`；收尾成功才消耗記號並允許後續封存，只有摘要寫入的輪次也算補舊帳進度。`CC_CAPTURE_FINALIZE_QUIET_MS=0` 會關閉所有收尾。
+
+收尾與抽取分開判讀：模型、輸出驗證或必要向量失敗時，既有摘要不變，`metadata.capture.finalize_retry` 記錄重試世代、次數、最早再試時間及認領租期。預設每世代最多 3 次、間隔 30 分鐘；冷卻或耗盡時仍保留本地記號。退出碼 `0` 不代表收尾全部成功；若有 `.jsonl.finalize.json`，須檢查對應彙總的 `finalized_generation` 是否等於 `summarize_count`，以及 `finalize_retry`。未完成者保留原始緩衝資料，等待可重試時再執行；耗盡者轉人工處理，不靠重複每輪呼叫繞過上限。沒有設定必要向量時，缺 Gemini key 仍可用 `NULL` 向量完成；已設定 `CC_MEMORY_EMBEDDING_EXPECTED=1` 或提供 Gemini key 卻無法產生向量時，收尾視為失敗並保留待辦。
 
 還原 epoch 指向時先停下會 quick-kick 的 Claude Code／Codex sessions，取得共用鎖並保留目前 symlink 與兩個 epoch，再以原子 symlink swap 指回原目錄，最後重新 dry-run。不要直接覆蓋或刪除目前 spool。DB 寫入由 content hash（內容雜湊）與 idempotency key（冪等鍵）防重，但還原前仍先保留現況，不刪除任何 spool 或 DB row。
 

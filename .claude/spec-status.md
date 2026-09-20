@@ -1,20 +1,20 @@
 <!-- SSOT_STATUS_BLOCK_START v1.0 -->
 SpecConsistency:
   status: PENDING
-  verification_basis: 本次工作階段收尾規格；首輪連動檢查三項發現已修，待針對性複查。
-  last_checked_diff_hash: cead90a5d5ad
+  verification_basis: 本次工作階段收尾規格；首輪三項已修；複查新增兩項維運文件發現亦已修，追加稽核待使用者核准。
+  last_checked_diff_hash: c786fd54fbfc
   audit_tool_version: 1.3.1
   audit_scope_hash: 82f4bc142784a14b2db24e764cf99529da9bcf205ef74ea34fcf71607dd0ad0f
-  checked_tree_hash: 9740843
-  checked_tree_note: 基底提交；目前待驗證，不宣稱對應最終內容。
+  checked_tree_hash: ecbe13863b554fb399301e569cecc992d2c39ec3
+  checked_tree_note: 第二輪已稽核提交；其後兩份維運文件修正尚待追加稽核。
   audit_command: node /home/haha/.claude/hooks/spec-cascade-check.js --mode review --force-cascade --paths docs/auto-capture-v0.5/spec.md,docs/auto-capture-v0.5/plan.md,docs/auto-capture-v0.5/task.md,CLAUDE.md --status-block-path .claude/spec-status.md --codex-timeout 480
 CascadeTerms: ["工作階段收尾", "Session Finalization", "最後一窗說了算", "收尾成功後以收尾摘要為準", "21600000", "65536", "1800000", "/session-close", "finalize_retry", "CC_CAPTURE_FINALIZE_QUIET_MS"]
-AffectedSections: ["docs/auto-capture-v0.5/spec.md#Session Finalization", "docs/auto-capture-v0.5/plan.md#Session Finalization Environment Variables", "docs/auto-capture-v0.5/task.md#工作階段收尾（2026-09-20 甲案）", "CLAUDE.md#Skills", "CLAUDE.md#Environment Variables"]
-UnresolvedItems: ["三项連動發現已修；待工具確認閉環"]
+AffectedSections: ["docs/auto-capture-v0.5/spec.md#Session Finalization", "docs/auto-capture-v0.5/plan.md#Session Finalization Environment Variables", "docs/auto-capture-v0.5/task.md#工作階段收尾（2026-09-20 甲案）", "CLAUDE.md#Skills", "CLAUDE.md#Environment Variables", "docs/auto-capture-v0.5/multi-machine-setup.md#5. 注意事項", "docs/auto-capture-v0.5/memory-ops-cutover.md#5. 封存歷史 capture backlog，再按需回放"]
+UnresolvedItems: ["跨機設定與維運手冊兩項已修；追加規格複查超過預設輪次，等待使用者核准"]
 LastCascadeAudit:
   date: 2026-09-20T16:29:23.491791+00:00
-  result: INCONSISTENT（首輪）；技能漏列已補，新增表格移至末尾，既有行號錨點未再位移。
-ChangedPaths: ["docs/auto-capture-v0.5/spec.md", "docs/auto-capture-v0.5/plan.md", "docs/auto-capture-v0.5/task.md", "CLAUDE.md", "skills/session-close/SKILL.md", ".claude/spec-status.md"]
+  result: INCONSISTENT（二輪）；2 項維運文件連動發現已修，未宣稱 VERIFIED。
+ChangedPaths: ["docs/auto-capture-v0.5/spec.md", "docs/auto-capture-v0.5/plan.md", "docs/auto-capture-v0.5/task.md", "CLAUDE.md", "skills/session-close/SKILL.md", "docs/auto-capture-v0.5/multi-machine-setup.md", "docs/auto-capture-v0.5/memory-ops-cutover.md", ".claude/spec-status.md"]
 <!-- SSOT_STATUS_BLOCK_END -->
 
 以下保留本機既有歷史稽核紀錄，不作為本次通過證據。
