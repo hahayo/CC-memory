@@ -536,14 +536,29 @@ export async function searchMemories(
   };
 }
 
-interface SourceWeights {
+export interface SourceWeights {
   manual: number;
   rollup: number;
   observationDecision: number;
   observationAuto: number;
 }
 
-interface WeightedIndexCandidate extends IndexSearchCandidate {
+export interface SessionRecencyConfig {
+  /**
+   * Minimum multiplier for the earliest observation in a session group.
+   * Latest gets 1.0; linearly interpolated for intermediate positions.
+   * Set to 1.0 to disable (no recency adjustment).
+   */
+  recencyMin: number;
+  /**
+   * Whether to floor a rollup's weightedScore at the max observation
+   * weightedScore within the same session.
+   * Set to 0 to disable; any positive value enables.
+   */
+  rollupFloor: number;
+}
+
+export interface WeightedIndexCandidate extends IndexSearchCandidate {
   weightedScore: number;
 }
 
@@ -599,6 +614,58 @@ function readSourceWeights(): SourceWeights {
     observationAuto: parseWeightEnv(
       'CC_MEMORY_WEIGHT_OBSERVATION_AUTO',
       DEFAULT_SOURCE_WEIGHTS.observationAuto
+    ),
+  };
+}
+
+const DEFAULT_SESSION_RECENCY: SessionRecencyConfig = {
+  recencyMin: 0.9,
+  rollupFloor: 1,
+};
+
+/**
+ * Over-sample multiplier for candidate fetch when session-recency or
+ * rollup-floor adjustments are active. Fetching more candidates increases the
+ * chance that same-session companions (later observations, rollups) are present
+ * in the candidate set before re-ranking. This is best-effort: the companion
+ * may still fall outside the over-sampled window.
+ */
+const SESSION_RECENCY_OVERSAMPLE_K = 3;
+
+/**
+ * Hard cap on over-sampled fetch per source, matching the widest existing
+ * per-source fetch in observations.ts (limit * 4 → keywordObservationIndexCandidates).
+ */
+const SESSION_RECENCY_OVERSAMPLE_CAP = 100;
+
+/**
+ * Compute the per-source candidate fetch limit.
+ *
+ * When session-recency or rollup-floor is active, over-sample by K up to CAP
+ * to increase the likelihood that same-session companions are in the candidate
+ * set. When both are disabled, return the caller's limit unchanged (preserving
+ * byte-identical behavior with pre-feature code).
+ */
+export function candidateFetchLimit(
+  limit: number,
+  recency: SessionRecencyConfig
+): number {
+  const active = recency.recencyMin < 1 || recency.rollupFloor > 0;
+  if (!active) return limit;
+  // 撈取數 = 原 limit + 超額部分；CAP 只限制超額部分，limit 本身永遠不被砍（Codex R2／R3 P2）。
+  const excess = Math.min(limit * (SESSION_RECENCY_OVERSAMPLE_K - 1), SESSION_RECENCY_OVERSAMPLE_CAP);
+  return limit + excess;
+}
+
+export function readSessionRecencyConfig(): SessionRecencyConfig {
+  return {
+    recencyMin: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN',
+      DEFAULT_SESSION_RECENCY.recencyMin
+    ),
+    rollupFloor: parseWeightEnv(
+      'CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR',
+      DEFAULT_SESSION_RECENCY.rollupFloor
     ),
   };
 }
@@ -705,34 +772,60 @@ async function semanticMemoryIndexCandidates(
   }));
 }
 
+/**
+ * 決定 hybrid RRF（倒數排名融合）的排名分組。
+ *
+ * RRF 的 rank 取自「所在清單」內的位置。原本 memory 與 observation 串成一條清單，observation
+ * 的 rank 從 memory 筆數起算。超額撈取後若仍串成一條，多撈的 memory（含 keyword 路徑
+ * 「DB limit 後再文字過濾」讓 memory 從不足 limit 補滿到 limit 的情況）會把 observation 的
+ * rank 往後推，系統性壓低 observation（Codex R4 P1／R5 P1）。
+ *
+ * - 未超額：回單一串接清單，與原行為完全相同（回歸保證）。
+ * - 超額中：memory 與 observation 各自成一條清單、各自從 0 起算 rank，彼此不影響。
+ */
+export function hybridRankLists(
+  memoryCandidates: IndexSearchCandidate[],
+  observationCandidates: IndexSearchCandidate[],
+  overSampling: boolean
+): IndexSearchCandidate[][] {
+  if (!overSampling) return [[...memoryCandidates, ...observationCandidates]];
+  return [memoryCandidates, observationCandidates];
+}
+
+/**
+ * RRF 融合。`keywordLists`／`semanticLists` 各是一組「各自獨立排名」的清單；
+ * 每條清單內的 rank 從 0 起算（見 hybridRankLists）。
+ */
 function combineIndexHybridCandidates(
-  keywordCandidates: IndexSearchCandidate[],
-  semanticCandidates: IndexSearchCandidate[]
+  keywordLists: IndexSearchCandidate[][],
+  semanticLists: IndexSearchCandidate[][]
 ): IndexSearchCandidate[] {
   const k = 60;
   const combined = new Map<string, IndexSearchCandidate>();
 
-  keywordCandidates.forEach((candidate, rank) => {
-    combined.set(candidate.result.id, {
-      ...candidate,
-      baseScore: 1 / (k + rank + 1),
-      semanticScore: null,
+  for (const list of keywordLists) {
+    list.forEach((candidate, rank) => {
+      const rrf = 1 / (k + rank + 1);
+      const existing = combined.get(candidate.result.id);
+      if (existing) {
+        existing.baseScore += rrf;
+      } else {
+        combined.set(candidate.result.id, { ...candidate, baseScore: rrf, semanticScore: null });
+      }
     });
-  });
+  }
 
-  semanticCandidates.forEach((candidate, rank) => {
-    const rrf = 1 / (k + rank + 1);
-    const existing = combined.get(candidate.result.id);
-    if (existing) {
-      existing.baseScore += rrf;
-    } else {
-      combined.set(candidate.result.id, {
-        ...candidate,
-        baseScore: rrf,
-        semanticScore: null,
-      });
-    }
-  });
+  for (const list of semanticLists) {
+    list.forEach((candidate, rank) => {
+      const rrf = 1 / (k + rank + 1);
+      const existing = combined.get(candidate.result.id);
+      if (existing) {
+        existing.baseScore += rrf;
+      } else {
+        combined.set(candidate.result.id, { ...candidate, baseScore: rrf, semanticScore: null });
+      }
+    });
+  }
 
   return Array.from(combined.values());
 }
@@ -744,21 +837,123 @@ function sourceWeight(candidate: IndexSearchCandidate, weights: SourceWeights): 
   return result.type === 'decision' ? weights.observationDecision : weights.observationAuto;
 }
 
-function sortWeightedIndexCandidates(
+/**
+ * Apply session-recency multipliers and rollup floor adjustments, then sort.
+ *
+ * Two post-weighting adjustment passes (both scoped per projectId+sessionId group):
+ *
+ * 1. **Recency pass** — observations with a non-null sessionId get a linear
+ *    multiplier from `recencyMin` (earliest) to `1.0` (latest) based on their
+ *    `occurredAt` rank within the group. Ties on `occurredAt` receive the same
+ *    multiplier (dense-rank). Rollups and manuals are untouched.
+ *
+ * 2. **Rollup floor pass** — if a rollup and its observations are both in the
+ *    candidate set, the rollup's weightedScore is floored at the maximum
+ *    observation weightedScore in that group (after recency). The comparator's
+ *    existing sourceOrder tie-break (rollup=1 < observation=2/3) guarantees
+ *    that equal scores still place the rollup first.
+ *
+ * Both passes are no-ops when their respective env value equals the identity
+ * value (recencyMin=1.0, rollupFloor=0).
+ *
+ * **Best-effort caveat**: these adjustments can only operate on candidates
+ * already present in the input array. If a same-session companion (later
+ * observation, rollup) was not fetched by the upstream query (e.g. because
+ * limit was too small), neither mechanism can account for it. The caller
+ * should over-sample via `candidateFetchLimit()` to mitigate this, but it
+ * is not a hard guarantee.
+ */
+export function sortWeightedIndexCandidates(
   candidates: IndexSearchCandidate[],
-  weights: SourceWeights
+  weights: SourceWeights,
+  recency?: SessionRecencyConfig
 ): WeightedIndexCandidate[] {
-  return candidates
-    .map((candidate) => ({
-      ...candidate,
-      weightedScore: candidate.baseScore * sourceWeight(candidate, weights),
-    }))
-    .sort((a, b) => {
-      if (b.weightedScore !== a.weightedScore) return b.weightedScore - a.weightedScore;
-      if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
-      if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
-      return b.result.occurredAt.getTime() - a.result.occurredAt.getTime();
-    });
+  const cfg = recency ?? readSessionRecencyConfig();
+
+  // Step 1: compute initial weightedScore (unchanged from original logic)
+  const weighted: WeightedIndexCandidate[] = candidates.map((candidate) => ({
+    ...candidate,
+    weightedScore: candidate.baseScore * sourceWeight(candidate, weights),
+  }));
+
+  // Step 2: session-recency multiplier (observations only, per projectId+sessionId)
+  if (cfg.recencyMin < 1) {
+    const groups = new Map<string, WeightedIndexCandidate[]>();
+    for (const item of weighted) {
+      if (item.result.kind !== 'observation' || item.result.sessionId == null) continue;
+      const groupKey = `${item.result.projectId}\0${item.result.sessionId}`;
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = [];
+        groups.set(groupKey, group);
+      }
+      group.push(item);
+    }
+
+    for (const group of groups.values()) {
+      if (group.length <= 1) continue; // single item gets multiplier 1.0
+
+      // Sort copy by occurredAt ascending to assign dense-rank positions
+      const sorted = [...group].sort(
+        (a, b) => a.result.occurredAt.getTime() - b.result.occurredAt.getTime()
+      );
+
+      // Assign dense ranks (same occurredAt → same rank)
+      const ranks: number[] = [];
+      let currentRank = 0;
+      for (let i = 0; i < sorted.length; i++) {
+        if (i > 0 && sorted[i].result.occurredAt.getTime() !== sorted[i - 1].result.occurredAt.getTime()) {
+          currentRank++;
+        }
+        ranks.push(currentRank);
+      }
+      const maxRank = ranks[ranks.length - 1];
+
+      if (maxRank === 0) continue; // all same timestamp, all get 1.0
+
+      for (let i = 0; i < sorted.length; i++) {
+        const t = ranks[i] / maxRank; // 0.0 (earliest) → 1.0 (latest)
+        const multiplier = cfg.recencyMin + (1 - cfg.recencyMin) * t;
+        sorted[i].weightedScore *= multiplier;
+      }
+    }
+  }
+
+  // Step 3: rollup floor (per projectId+sessionId)
+  if (cfg.rollupFloor > 0) {
+    // Build groups of rollup + observations sharing a session
+    const sessionItems = new Map<string, { rollups: WeightedIndexCandidate[]; maxObsScore: number }>();
+    for (const item of weighted) {
+      const sid = item.result.sessionId;
+      if (sid == null) continue;
+      const groupKey = `${item.result.projectId}\0${sid}`;
+      let entry = sessionItems.get(groupKey);
+      if (!entry) {
+        entry = { rollups: [], maxObsScore: -Infinity };
+        sessionItems.set(groupKey, entry);
+      }
+      if (item.result.kind === 'rollup') {
+        entry.rollups.push(item);
+      } else if (item.result.kind === 'observation') {
+        entry.maxObsScore = Math.max(entry.maxObsScore, item.weightedScore);
+      }
+    }
+
+    for (const entry of sessionItems.values()) {
+      if (entry.rollups.length === 0 || entry.maxObsScore === -Infinity) continue;
+      for (const rollup of entry.rollups) {
+        rollup.weightedScore = Math.max(rollup.weightedScore, entry.maxObsScore);
+      }
+    }
+  }
+
+  // Step 4: sort — comparator is identical to the original
+  return weighted.sort((a, b) => {
+    if (b.weightedScore !== a.weightedScore) return b.weightedScore - a.weightedScore;
+    if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
+    if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
+    return b.result.occurredAt.getTime() - a.result.occurredAt.getTime();
+  });
 }
 
 export async function searchMemoryIndexes(
@@ -777,21 +972,28 @@ export async function searchMemoryIndexes(
   const isScoped = typeof input.projectId === 'string' && input.projectId.trim().length > 0;
   const excludeReserved = !isScoped && !input.includeReserved;
   const includeObservations = shouldIncludeObservations();
+  const recency = readSessionRecencyConfig();
+  // observations 進不了候選集（旗標關閉、或 type 過濾只有 decision 會命中 observation）時，
+  // 兩道調整都不可能生效，維持原 limit（Codex R4 P2／R5 P2）。
+  const observationsEligible =
+    includeObservations && (input.type === undefined || input.type === null || input.type === 'decision');
+  const fetchLimit = observationsEligible ? candidateFetchLimit(limit, recency) : limit;
+  const overSampling = fetchLimit > limit;
 
   let candidates: IndexSearchCandidate[];
   if (effectiveMode === 'keyword') {
     const [memoryCandidates, observationCandidates] = await Promise.all([
-      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
+      keywordMemoryIndexCandidates(db, input, fetchLimit, excludeReserved),
       includeObservations
-        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        ? keywordObservationIndexCandidates(db, input, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = [...memoryCandidates, ...observationCandidates];
   } else if (effectiveMode === 'semantic') {
     const [memoryCandidates, observationCandidates] = await Promise.all([
-      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved),
       includeObservations
-        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = [...memoryCandidates, ...observationCandidates];
@@ -802,23 +1004,23 @@ export async function searchMemoryIndexes(
       keywordObservationCandidates,
       semanticObservationCandidates,
     ] = await Promise.all([
-      keywordMemoryIndexCandidates(db, input, limit, excludeReserved),
-      semanticMemoryIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved),
+      keywordMemoryIndexCandidates(db, input, fetchLimit, excludeReserved),
+      semanticMemoryIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved),
       includeObservations
-        ? keywordObservationIndexCandidates(db, input, limit, excludeReserved)
+        ? keywordObservationIndexCandidates(db, input, fetchLimit, excludeReserved)
         : Promise.resolve([]),
       includeObservations
-        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, limit, excludeReserved)
+        ? semanticObservationIndexCandidates(db, input, queryEmbedding!, fetchLimit, excludeReserved)
         : Promise.resolve([]),
     ]);
     candidates = combineIndexHybridCandidates(
-      [...keywordMemoryCandidates, ...keywordObservationCandidates],
-      [...semanticMemoryCandidates, ...semanticObservationCandidates]
+      hybridRankLists(keywordMemoryCandidates, keywordObservationCandidates, overSampling),
+      hybridRankLists(semanticMemoryCandidates, semanticObservationCandidates, overSampling)
     );
   }
 
   const weights = readSourceWeights();
-  const sorted = sortWeightedIndexCandidates(candidates, weights).slice(0, limit);
+  const sorted = sortWeightedIndexCandidates(candidates, weights, recency).slice(0, limit);
   const results = sorted.map((candidate) => candidate.result);
   const scores =
     effectiveMode === 'semantic'

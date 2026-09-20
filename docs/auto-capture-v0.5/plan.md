@@ -269,6 +269,8 @@ interface SearchResultEnvelope<T = MemoryIndexResult> {
 | `CC_MEMORY_WEIGHT_ROLLUP` | `0.85` | search ranking | parse 失敗用預設 |
 | `CC_MEMORY_WEIGHT_OBSERVATION_DECISION` | `0.80` | search ranking | parse 失敗用預設 |
 | `CC_MEMORY_WEIGHT_OBSERVATION_AUTO` | `0.65` | search ranking | parse 失敗用預設 |
+| `CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN` | `0.90` | search ranking | 同 session observations 的時序加權最低乘數；`1.0`=關閉；parse 失敗用預設。啟用時每來源超額撈取 ×3（超額部分上限 100，不低於原 limit） |
+| `CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR` | `1`（啟用） | search ranking | rollup 加權分數不低於同 session 最高 observation；`0`=關閉；parse 失敗用預設。啟用時每來源超額撈取 ×3（超額部分上限 100，不低於原 limit） |
 
 ## Injection Pollution Defense（注入污染防線）
 
