@@ -2807,6 +2807,8 @@ export async function runCaptureWorkerOnce(
           try {
             const summaryGuardOff = (env.CC_CAPTURE_SUMMARY_GUARD ?? '').toLowerCase();
             const summaryGuardEnabled = summaryGuardOff !== 'off' && summaryGuardOff !== '0' && summaryGuardOff !== 'false';
+            // Persist intent BEFORE commit: a crash after DB success must not lose finalization.
+            // Failed writes retain a harmless marker; readiness + active-rollup checks gate the LLM.
             if (finalizeQuietMs(env) > 0) await enrollFinalization(spool.path, chunkWindow.projectId, chunkWindow.sessionId);
             const writeResult = await options.db.transaction((tx: DbClient) =>
               writeCaptureWindow(tx, chunkWindow, extraction, rawResponse, {

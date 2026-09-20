@@ -154,10 +154,15 @@ export async function finalizeSession(options: FinalizeSessionOptions): Promise<
     // Never log model output, SQL parameters or connection strings.
     return { attempted: true, status: 'failed' };
   } finally {
-    await db.execute(sql`UPDATE project_memories
-      SET metadata=jsonb_set(metadata,'{capture,finalize_retry,lease_until}','0'::jsonb)
-      WHERE id=${row.id} AND project_id=${projectId} AND status='active'
-        AND metadata->'capture'->'finalize_retry'->>'token'=${token}`);
+    try {
+      await db.execute(sql`UPDATE project_memories
+        SET metadata=jsonb_set(metadata,'{capture,finalize_retry,lease_until}','0'::jsonb)
+        WHERE id=${row.id} AND project_id=${projectId} AND status='active'
+          AND metadata->'capture'->'finalize_retry'->>'token'=${token}`);
+    } catch {
+      // A disconnected DB cannot release the lease; bounded expiry handles recovery.
+      // Preserve the outcome already determined above, including a committed success.
+    }
   }
 }
 
