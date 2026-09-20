@@ -2239,6 +2239,36 @@ describe('sanitizePriorSummary byte bound', () => {
     expect(block.summary.length).toBeGreaterThan(0);
   });
 
+  it('sheds all pending data before dropping any confirmed main decisions or next_steps', () => {
+    // 主體單獨放得下（約 6 KiB），加上同樣大的 pending 才超過 16 KiB：
+    // pending 必須先被削，主體的 decisions／next_steps 一筆都不能少（Codex R5 P2）。
+    const mainDecisions = Array.from({ length: 6 }, (_, i) => `d${i}-${'決'.repeat(150)}`);
+    const mainNextSteps = Array.from({ length: 6 }, (_, i) => `n${i}-${'步'.repeat(150)}`);
+    const mainOnly = sanitizePriorSummary({
+      summary: '記'.repeat(300),
+      decisions: mainDecisions,
+      next_steps: mainNextSteps,
+    });
+    expect(bytes(mainOnly)).toBeLessThanOrEqual(PRIOR_SUMMARY_MAX_BYTES);
+    expect(mainOnly.truncated).toBeUndefined();
+
+    const block = sanitizePriorSummary({
+      summary: '記'.repeat(300),
+      decisions: mainDecisions,
+      next_steps: mainNextSteps,
+      pendingSummary: {
+        summary: '待'.repeat(1_500),
+        decisions: Array.from({ length: 12 }, () => '擋'.repeat(500)),
+        next_steps: Array.from({ length: 12 }, () => '擋'.repeat(500)),
+      },
+    });
+    expect(bytes(block)).toBeLessThanOrEqual(PRIOR_SUMMARY_MAX_BYTES);
+    expect(block.truncated).toBe(true);
+    expect(block.decisions).toHaveLength(mainDecisions.length);
+    expect(block.next_steps).toHaveLength(mainNextSteps.length);
+    expect(block.summary).toBe(mainOnly.summary);
+  });
+
   it('sheds pending next_steps before pending decisions before pending summary', () => {
     // Fill main body to leave little room, then add pending with all three fields.
     const block = sanitizePriorSummary({

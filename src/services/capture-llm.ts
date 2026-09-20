@@ -1333,20 +1333,11 @@ export function sanitizePriorSummary(prior: CapturePriorSummary): PriorSummaryPr
     };
   }
 
-  // 位元組收斂。Shedding order: main next_steps → main decisions →
-  // pending next_steps → pending decisions → pending summary → delete pending →
-  // main summary.  Pending is supplementary and shed before main summary.
+  // 位元組收斂。削減順序：pending next_steps → pending decisions → pending summary →
+  // 刪除 pending → 主體 next_steps → 主體 decisions → 主體 summary。
+  // pending 是補充資料，必須先於「已確認的累積狀態」（主體任何欄位）被削（Codex R5 P2）。
   if (truncated) block.truncated = true;
   const over = (): boolean => serializedBytes(block) > PRIOR_SUMMARY_MAX_BYTES;
-  while (over() && block.next_steps.length > 0) {
-    block.next_steps = block.next_steps.slice(0, -1);
-    block.truncated = true;
-  }
-  while (over() && block.decisions.length > 0) {
-    block.decisions = block.decisions.slice(0, -1);
-    block.truncated = true;
-  }
-  // Shed pending fields before cutting into main summary.
   if (over() && block.pendingSummary) {
     while (over() && block.pendingSummary.next_steps.length > 0) {
       block.pendingSummary.next_steps = block.pendingSummary.next_steps.slice(0, -1);
@@ -1364,6 +1355,14 @@ export function sanitizePriorSummary(prior: CapturePriorSummary): PriorSummaryPr
       delete block.pendingSummary;
       block.truncated = true;
     }
+  }
+  while (over() && block.next_steps.length > 0) {
+    block.next_steps = block.next_steps.slice(0, -1);
+    block.truncated = true;
+  }
+  while (over() && block.decisions.length > 0) {
+    block.decisions = block.decisions.slice(0, -1);
+    block.truncated = true;
   }
   while (over() && block.summary.length > 1) {
     block.summary = clampText(block.summary, Math.max(1, Math.floor(block.summary.length / 2)));
