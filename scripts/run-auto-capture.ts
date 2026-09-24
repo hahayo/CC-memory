@@ -50,6 +50,14 @@ export const DEFAULT_DB_CONNECT_TIMEOUT_SEC = 2;
 const DECIMAL_POSITIVE_INT = /^\d+$/;
 
 /**
+ * 秒數上限。postgres.js 會做 `setTimeout(done, seconds * 1000)`
+ * （node_modules/postgres/src/connection.js:1054），而 Node 的 setTimeout 延遲一旦超過
+ * 32 位元有號整數上限就會被改成 1 毫秒（TimeoutOverflowWarning）——設一個超大值想要
+ * 「幾乎不逾時」，實際會變成立刻逾時，跟意圖完全相反。
+ */
+const MAX_CONNECT_TIMEOUT_SEC = Math.floor(2_147_483_647 / 1000);
+
+/**
  * 解析 CC_DB_CONNECT_TIMEOUT_SEC。postgres.js 的 connect_timeout 預設 2 秒；高並行 drain 走同一條
  * SSH tunnel 時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），故開放覆寫。
  *
@@ -57,12 +65,14 @@ const DECIMAL_POSITIVE_INT = /^\d+$/;
  * 都當成設定打錯，寧可用預設也不要靜默套一個使用者沒預期的逾時。被擋掉的兩類（Codex review PR #44）：
  *   - Number.parseInt 會吃掉開頭數字就停：'15seconds' → 15、'2.5' → 2、'1e3' → 1（比預設還短）
  *   - Number 會收科學記號與十六進位：'1e3' → 1000、'0x10' → 16
+ *   - 超過 MAX_CONNECT_TIMEOUT_SEC 的值會被 Node 計時器折成 1 毫秒，反而立刻逾時
  */
 export function resolveConnectTimeoutSec(raw: string | undefined): number {
   const trimmed = raw?.trim();
   if (!trimmed || !DECIMAL_POSITIVE_INT.test(trimmed)) return DEFAULT_DB_CONNECT_TIMEOUT_SEC;
   const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+  return parsed <= MAX_CONNECT_TIMEOUT_SEC ? parsed : DEFAULT_DB_CONNECT_TIMEOUT_SEC;
 }
 
 export async function runAutoCaptureTick(deps: RunAutoCaptureTickDeps = {}): Promise<CaptureWorkerResult> {

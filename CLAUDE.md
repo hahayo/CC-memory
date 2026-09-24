@@ -152,7 +152,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR` - rollup 的加權分數下限保護（rollup session floor）：同 session 的 rollup 不低於該 session 內最高 observation 加權分數（預設 `1`＝啟用）；設 `0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（超額部分上限 100，不低於原 limit）
 - `CC_MEMORY_CAPTURE_CHILD` - 遞迴採集斷路器：worker spawn 的子程序設為 1，hooks（掛鉤）偵測到即 exit 0
 - `CC_CAPTURE_TICK_BUDGET_MS` - worker 每 tick（執行輪次）的時間預算毫秒（預設 240000；0=停用；預算耗盡則不開新窗優雅收尾）
-- `CC_DB_CONNECT_TIMEOUT_SEC` - auto-capture worker 連 PostgreSQL 的 connect timeout（連線逾時）秒數（預設 2）。高並行 drain 共用同一條 SSH tunnel（SSH 通道）時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），補舊帳 runner 設 15；必須是純十進位正整數字串，其餘一律退回預設 2——截斷型打錯字（`15seconds`、`2.5`）不會被吃成 15／2，非十進位寫法（`1e3`、`0x10`）也不接受
+- `CC_DB_CONNECT_TIMEOUT_SEC` - auto-capture worker 連 PostgreSQL 的 connect timeout（連線逾時）秒數（預設 2）。高並行 drain 共用同一條 SSH tunnel（SSH 通道）時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），補舊帳 runner 設 15；必須是純十進位正整數字串，其餘一律退回預設 2——截斷型打錯字（`15seconds`、`2.5`）不會被吃成 15／2，非十進位寫法（`1e3`、`0x10`）也不接受；上限 2147483 秒（再大會被 Node 計時器折成 1 毫秒反而立刻逾時），超過同樣退回 2
 - `EMBEDDING_MODEL` - embedding（嵌入向量）模型名稱（預設 `gemini-embedding-001`）
 - `EMBEDDING_DIMENSIONS` - embedding 向量維度（預設 1536）
 - `CC_BACKUP_TARGET` - 備份目標，只允許 `project` 或 `personal`；Coolify 兩個 service 各自固定

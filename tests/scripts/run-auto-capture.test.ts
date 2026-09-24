@@ -205,4 +205,17 @@ describe('resolveConnectTimeoutSec (CC_DB_CONNECT_TIMEOUT_SEC)', () => {
   it.each(['0', '-1', '-15', 'Infinity', 'NaN'])('非正數 %s → 退回預設 2', (raw) => {
     expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
   });
+
+  // Codex review PR #44 第三輪 [P2]：postgres.js 做 setTimeout(fn, seconds * 1000)，
+  // 毫秒數超過 32 位元上限時 Node 會折成 1ms，設超大值反而立刻逾時。上限 = floor(2147483647/1000)。
+  it('剛好在 Node 計時器上限內 → 採用', () => {
+    expect(resolveConnectTimeoutSec('2147483')).toBe(2147483);
+  });
+
+  it.each(['2147484', '99999999', String(Number.MAX_SAFE_INTEGER)])(
+    '超過計時器上限 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
 });
