@@ -178,18 +178,29 @@ describe('resolveConnectTimeoutSec (CC_DB_CONNECT_TIMEOUT_SEC)', () => {
     expect(resolveConnectTimeoutSec('   ')).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
   });
 
-  it('完整正整數字串 → 採用（含前後空白）', () => {
+  it('純十進位正整數 → 採用（含前後空白）', () => {
     expect(resolveConnectTimeoutSec('15')).toBe(15);
     expect(resolveConnectTimeoutSec(' 15 ')).toBe(15);
-    expect(resolveConnectTimeoutSec('1e3')).toBe(1000);
-    expect(resolveConnectTimeoutSec('0x10')).toBe(16);
+    expect(resolveConnectTimeoutSec('007')).toBe(7);
   });
 
-  // Codex review PR #44 [P2]：parseInt 會吃掉開頭數字就停，讓打錯的值被靜默採用
-  // （'15seconds'→15、'2.5'→2、'1e3'→1，最後一個比預設還短）。改用 Number 後必須全部退回預設。
-  it.each(['15seconds', '2.5', 'abc', '15s', '1 5'])('非完整正整數 %s → 退回預設 2', (raw) => {
-    expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
-  });
+  // Codex review PR #44 第一輪 [P2]：Number.parseInt 會吃掉開頭數字就停，
+  // 讓打錯的值被靜默採用（'15seconds'→15、'2.5'→2、'1e3'→1，最後一個比預設還短）。
+  it.each(['15seconds', '2.5', 'abc', '15s', '1 5', '+15'])(
+    '截斷型打錯字 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
+
+  // Codex review PR #44 第二輪 [P2]：改用 Number 後仍會收科學記號與十六進位
+  // （'1e3'→1000、'0x10'→16），與「必須是純十進位正整數」的契約不符。
+  it.each(['1e3', '0x10', '0b1111', '0o17', '1_000'])(
+    '非十進位寫法 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
 
   it.each(['0', '-1', '-15', 'Infinity', 'NaN'])('非正數 %s → 退回預設 2', (raw) => {
     expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);

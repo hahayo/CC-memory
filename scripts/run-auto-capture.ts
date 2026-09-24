@@ -46,17 +46,23 @@ export interface RunAutoCaptureTickDeps {
 
 export const DEFAULT_DB_CONNECT_TIMEOUT_SEC = 2;
 
+/** 只認純十進位正整數；見 resolveConnectTimeoutSec 的說明。 */
+const DECIMAL_POSITIVE_INT = /^\d+$/;
+
 /**
  * 解析 CC_DB_CONNECT_TIMEOUT_SEC。postgres.js 的 connect_timeout 預設 2 秒；高並行 drain 走同一條
  * SSH tunnel 時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），故開放覆寫。
  *
- * 只接受完整的正整數字串。刻意不用 Number.parseInt——它會吃掉開頭數字就停，讓 '15seconds' 變 15、
- * '1e3' 變 1（比預設還短），打錯字會靜默套用錯誤的逾時而非退回預設。
+ * 只接受純十進位正整數字串，其餘一律退回預設——這個值是「幾秒」，任何看起來不像秒數的寫法
+ * 都當成設定打錯，寧可用預設也不要靜默套一個使用者沒預期的逾時。被擋掉的兩類（Codex review PR #44）：
+ *   - Number.parseInt 會吃掉開頭數字就停：'15seconds' → 15、'2.5' → 2、'1e3' → 1（比預設還短）
+ *   - Number 會收科學記號與十六進位：'1e3' → 1000、'0x10' → 16
  */
 export function resolveConnectTimeoutSec(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return DEFAULT_DB_CONNECT_TIMEOUT_SEC;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+  const trimmed = raw?.trim();
+  if (!trimmed || !DECIMAL_POSITIVE_INT.test(trimmed)) return DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_DB_CONNECT_TIMEOUT_SEC;
 }
 
 export async function runAutoCaptureTick(deps: RunAutoCaptureTickDeps = {}): Promise<CaptureWorkerResult> {
