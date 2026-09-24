@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { maskDsnCredentials, formatSummaryLine, runAutoCaptureTick } from '../../scripts/run-auto-capture.js';
+import {
+  maskDsnCredentials,
+  formatSummaryLine,
+  runAutoCaptureTick,
+  resolveConnectTimeoutSec,
+  DEFAULT_DB_CONNECT_TIMEOUT_SEC,
+} from '../../scripts/run-auto-capture.js';
 import { assessAutoCaptureExecution } from '../../src/services/auto-capture-alerts.js';
 import type { CaptureWorkerResult } from '../../src/services/capture-worker.js';
 
@@ -162,5 +168,30 @@ describe('supervisor fallback-success streak alert integration', () => {
         state = decision.updatedState;
       }
     }
+  });
+});
+
+describe('resolveConnectTimeoutSec (CC_DB_CONNECT_TIMEOUT_SEC)', () => {
+  it('未設或空白 → 預設 2 秒', () => {
+    expect(resolveConnectTimeoutSec(undefined)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    expect(resolveConnectTimeoutSec('')).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    expect(resolveConnectTimeoutSec('   ')).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+  });
+
+  it('完整正整數字串 → 採用（含前後空白）', () => {
+    expect(resolveConnectTimeoutSec('15')).toBe(15);
+    expect(resolveConnectTimeoutSec(' 15 ')).toBe(15);
+    expect(resolveConnectTimeoutSec('1e3')).toBe(1000);
+    expect(resolveConnectTimeoutSec('0x10')).toBe(16);
+  });
+
+  // Codex review PR #44 [P2]：parseInt 會吃掉開頭數字就停，讓打錯的值被靜默採用
+  // （'15seconds'→15、'2.5'→2、'1e3'→1，最後一個比預設還短）。改用 Number 後必須全部退回預設。
+  it.each(['15seconds', '2.5', 'abc', '15s', '1 5'])('非完整正整數 %s → 退回預設 2', (raw) => {
+    expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+  });
+
+  it.each(['0', '-1', '-15', 'Infinity', 'NaN'])('非正數 %s → 退回預設 2', (raw) => {
+    expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
   });
 });

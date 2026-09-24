@@ -44,15 +44,27 @@ export interface RunAutoCaptureTickDeps {
   stdout?: { write(chunk: string): unknown };
 }
 
+export const DEFAULT_DB_CONNECT_TIMEOUT_SEC = 2;
+
+/**
+ * 解析 CC_DB_CONNECT_TIMEOUT_SEC。postgres.js 的 connect_timeout 預設 2 秒；高並行 drain 走同一條
+ * SSH tunnel 時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），故開放覆寫。
+ *
+ * 只接受完整的正整數字串。刻意不用 Number.parseInt——它會吃掉開頭數字就停，讓 '15seconds' 變 15、
+ * '1e3' 變 1（比預設還短），打錯字會靜默套用錯誤的逾時而非退回預設。
+ */
+export function resolveConnectTimeoutSec(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_DB_CONNECT_TIMEOUT_SEC;
+}
+
 export async function runAutoCaptureTick(deps: RunAutoCaptureTickDeps = {}): Promise<CaptureWorkerResult> {
   const stdout = deps.stdout ?? process.stdout;
   const workerFn = deps.runWorker ?? runCaptureWorkerOnce;
-  // connect_timeout 預設 2 秒；高並行 drain 走同一條 SSH tunnel 時 2 秒太短（2026-09-20 實測
-  // 10 支 6 小時內 32 次 CONNECT_TIMEOUT），用 CC_DB_CONNECT_TIMEOUT_SEC 調高。
-  const connectTimeoutSec = Number.parseInt(process.env.CC_DB_CONNECT_TIMEOUT_SEC ?? '', 10);
   const client = postgres(config.databaseUrl, {
     max: 1,
-    connect_timeout: Number.isInteger(connectTimeoutSec) && connectTimeoutSec > 0 ? connectTimeoutSec : 2,
+    connect_timeout: resolveConnectTimeoutSec(process.env.CC_DB_CONNECT_TIMEOUT_SEC),
     idle_timeout: 2,
   });
   const db = drizzle(client);
