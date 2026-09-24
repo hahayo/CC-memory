@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { maskDsnCredentials, formatSummaryLine, runAutoCaptureTick } from '../../scripts/run-auto-capture.js';
+import {
+  maskDsnCredentials,
+  formatSummaryLine,
+  runAutoCaptureTick,
+  resolveConnectTimeoutSec,
+  DEFAULT_DB_CONNECT_TIMEOUT_SEC,
+} from '../../scripts/run-auto-capture.js';
 import { assessAutoCaptureExecution } from '../../src/services/auto-capture-alerts.js';
 import type { CaptureWorkerResult } from '../../src/services/capture-worker.js';
 
@@ -163,4 +169,53 @@ describe('supervisor fallback-success streak alert integration', () => {
       }
     }
   });
+});
+
+describe('resolveConnectTimeoutSec (CC_DB_CONNECT_TIMEOUT_SEC)', () => {
+  it('未設或空白 → 預設 2 秒', () => {
+    expect(resolveConnectTimeoutSec(undefined)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    expect(resolveConnectTimeoutSec('')).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    expect(resolveConnectTimeoutSec('   ')).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+  });
+
+  it('純十進位正整數 → 採用（含前後空白）', () => {
+    expect(resolveConnectTimeoutSec('15')).toBe(15);
+    expect(resolveConnectTimeoutSec(' 15 ')).toBe(15);
+    expect(resolveConnectTimeoutSec('007')).toBe(7);
+  });
+
+  // Codex review PR #44 第一輪 [P2]：Number.parseInt 會吃掉開頭數字就停，
+  // 讓打錯的值被靜默採用（'15seconds'→15、'2.5'→2、'1e3'→1，最後一個比預設還短）。
+  it.each(['15seconds', '2.5', 'abc', '15s', '1 5', '+15'])(
+    '截斷型打錯字 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
+
+  // Codex review PR #44 第二輪 [P2]：改用 Number 後仍會收科學記號與十六進位
+  // （'1e3'→1000、'0x10'→16），與「必須是純十進位正整數」的契約不符。
+  it.each(['1e3', '0x10', '0b1111', '0o17', '1_000'])(
+    '非十進位寫法 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
+
+  it.each(['0', '-1', '-15', 'Infinity', 'NaN'])('非正數 %s → 退回預設 2', (raw) => {
+    expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+  });
+
+  // Codex review PR #44 第三輪 [P2]：postgres.js 做 setTimeout(fn, seconds * 1000)，
+  // 毫秒數超過 32 位元上限時 Node 會折成 1ms，設超大值反而立刻逾時。上限 = floor(2147483647/1000)。
+  it('剛好在 Node 計時器上限內 → 採用', () => {
+    expect(resolveConnectTimeoutSec('2147483')).toBe(2147483);
+  });
+
+  it.each(['2147484', '99999999', String(Number.MAX_SAFE_INTEGER)])(
+    '超過計時器上限 %s → 退回預設 2',
+    (raw) => {
+      expect(resolveConnectTimeoutSec(raw)).toBe(DEFAULT_DB_CONNECT_TIMEOUT_SEC);
+    }
+  );
 });
