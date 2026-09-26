@@ -749,6 +749,7 @@ export function runClaudeCliSubprocess(input: ClaudeCliRunRequest): Promise<Clau
 class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly provider = CLAUDE_CLI_PROVIDER_ID;
   readonly worstCaseCallBudgetMs: number;
+  private _successCount = 0;
 
   constructor(
     readonly model: string,
@@ -761,7 +762,9 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 
   takeTelemetry(): CaptureTelemetrySnapshot {
-    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+    const count = this._successCount;
+    this._successCount = 0;
+    return { primaryProvider: this.provider, primarySuccess: count, fallbackSuccess: 0, fallbackFailed: 0 };
   }
 
   async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
@@ -878,6 +881,7 @@ class ClaudeCliCaptureLlmAdapter implements CaptureLlmAdapter {
       throw error;
     }
 
+    this._successCount += 1;
     return {
       model: this.model,
       text,
@@ -991,6 +995,7 @@ function isCodexRateLimited(combined: string): boolean {
 class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly provider = CODEX_CLI_CAPTURE_LLM_PROVIDER;
   readonly worstCaseCallBudgetMs: number;
+  private _successCount = 0;
 
   constructor(
     readonly model: string,
@@ -1005,7 +1010,9 @@ class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 
   takeTelemetry(): CaptureTelemetrySnapshot {
-    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+    const count = this._successCount;
+    this._successCount = 0;
+    return { primaryProvider: this.provider, primarySuccess: count, fallbackSuccess: 0, fallbackFailed: 0 };
   }
 
   async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
@@ -1159,6 +1166,7 @@ class CodexCliCaptureLlmAdapter implements CaptureLlmAdapter {
         throw error;
       }
 
+      this._successCount += 1;
       return { model: this.model, text };
     } finally {
       // Contract (d): cleanup all three: hostOutputDir, hostCwd, and sandbox disposable dir.
@@ -1179,6 +1187,7 @@ class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
   readonly worstCaseCallBudgetMs: number;
   private readonly generateFn: GeminiGenerateContent;
   private readonly timeoutMs: number;
+  private _successCount = 0;
 
   constructor(
     readonly model: string,
@@ -1197,7 +1206,9 @@ class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
   }
 
   takeTelemetry(): CaptureTelemetrySnapshot {
-    return { primaryProvider: this.provider, primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 };
+    const count = this._successCount;
+    this._successCount = 0;
+    return { primaryProvider: this.provider, primarySuccess: count, fallbackSuccess: 0, fallbackFailed: 0 };
   }
 
   async extract(request: CaptureLlmRequest, _options?: CaptureLlmExtractOptions): Promise<CaptureLlmRawResponse> {
@@ -1211,6 +1222,7 @@ class GeminiFlashCaptureLlmAdapter implements CaptureLlmAdapter {
           abortSignal: controller.signal,
         },
       });
+      this._successCount += 1;
       return {
         model: this.model,
         text: response.text ?? '',

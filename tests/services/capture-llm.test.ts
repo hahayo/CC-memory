@@ -1018,6 +1018,23 @@ describe('worstCaseCallBudgetMs', () => {
 // --- D1b: takeTelemetry ---
 
 describe('takeTelemetry', () => {
+  it('single-provider claude-cli adapter counts its own successes and resets', async () => {
+    const adapter = createCaptureLlmAdapter(
+      adapterOptions({
+        env: {},
+        findClaudeCli: () => 'claude',
+        runClaudeCli: async () => ({ stdout: claudeEnvelope(), exitCode: 0 }),
+      })
+    );
+
+    await adapter.extract(request());
+    await adapter.extract(request());
+    expect(adapter.takeTelemetry()).toEqual({
+      primaryProvider: 'claude-cli', primarySuccess: 2, fallbackSuccess: 0, fallbackFailed: 0,
+    });
+    expect(adapter.takeTelemetry().primarySuccess).toBe(0);
+  });
+
   it('returns counters and resets to zero', () => {
     const primary = mockAdapter({ provider: 'codex-cli', model: 'gpt-5' });
     const fallback = mockAdapter({ provider: 'claude-cli', model: 'haiku' });

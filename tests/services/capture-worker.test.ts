@@ -409,7 +409,7 @@ describe('capture worker failure contracts without DB', () => {
 
     const result = await runWorker(harness, { db, llm, stdout: { write: (c: string) => lines.push(c) } });
 
-    expect(result).toMatchObject({ failed: 1, processed: 0 });
+    expect(result).toMatchObject({ failed: 1, processed: 0, failDb: 1, failOther: 0 });
     const line = lines.find((l) => l.includes('db-write-failed'));
     expect(line).toContain(`session=${harness.sessionId}`);
     expect(line).toContain('code=23505');
@@ -2362,7 +2362,7 @@ describe('Phase 1: worker category→action integration', () => {
       new CaptureLlmValidationError('LLM_TIMEOUT', 'timed out', { model: TEST_MODEL }),
     ]);
     const result = await runWorker(harness, { db: {}, llm });
-    expect(result).toMatchObject({ blocked: 1, rateLimited: 0, parked: 0, deadLettered: 0 });
+    expect(result).toMatchObject({ blocked: 1, rateLimited: 0, parked: 0, deadLettered: 0, failTimeout: 1, failParse: 0, failOther: 0 });
     const state = readState(harness);
     const retryKeys = Object.keys(state.retries);
     expect(retryKeys).toHaveLength(1);
@@ -2927,6 +2927,8 @@ describe('Phase 4/5: worker telemetry, budget, capacity, windows', () => {
     const result = await runWorker(harness, { db: {}, llm });
     // Only 1 window, even though 2 LLM calls
     expect(result.windows).toBe(1);
+    // 兩次 LLM 呼叫都解析失敗 → 各記一次
+    expect(result).toMatchObject({ failParse: 2, failTimeout: 0, failOther: 0 });
   });
 
   it('telemetry lifecycle: two ticks do not retain counters', async () => {

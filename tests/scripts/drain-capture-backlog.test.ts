@@ -57,6 +57,10 @@ function result(overrides: Partial<CaptureWorkerResult> = {}): CaptureWorkerResu
     spoolBytes: 0,
     spoolCapPct: 0,
     windows: 0,
+    failTimeout: 0,
+    failParse: 0,
+    failDb: 0,
+    failOther: 0,
     ...overrides,
   };
 }
