@@ -133,6 +133,10 @@ function emptyWorkerResult(): CaptureWorkerResult {
     spoolBytes: 0,
     spoolCapPct: 0,
     windows: 0,
+    failTimeout: 0,
+    failParse: 0,
+    failDb: 0,
+    failOther: 0,
   };
 }
 
@@ -141,6 +145,7 @@ const SUM_RESULT_KEYS: ReadonlyArray<keyof CaptureWorkerResult> = [
   'malformed', 'blocked', 'parked', 'yielded', 'held', 'embeddingFailed',
   'transcriptMissing', 'llmRetries', 'observationsWritten', 'rollupsWritten',
   'primarySuccess', 'fallbackSuccess', 'fallbackFailed', 'windows',
+  'failTimeout', 'failParse', 'failDb', 'failOther',
 ];
 
 function addWorkerResult(target: CaptureWorkerResult, value: CaptureWorkerResult): void {

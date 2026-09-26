@@ -64,6 +64,7 @@ describe('run-auto-capture formatSummaryLine', () => {
       transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
       primaryProvider: 'codex-cli', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0,
       fatalError: 'test fatal error', spoolBytes: 0, spoolCapPct: 0, windows: 0,
+      failTimeout: 0, failParse: 0, failDb: 0, failOther: 0,
     };
     const line = formatSummaryLine(result);
     expect(line).toContain('fatal=1');
@@ -83,9 +84,11 @@ describe('run-auto-capture formatSummaryLine', () => {
       transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
       primaryProvider: 'claude-cli', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0,
       fatalError: null, spoolBytes: 1000, spoolCapPct: 10, windows: 1,
+      failTimeout: 0, failParse: 0, failDb: 0, failOther: 0,
     };
     const line = formatSummaryLine(result);
     expect(line).toContain('fatal=0');
+    expect(line).toContain('fail-timeout=0 fail-parse=0 fail-db=0 fail-other=0');
     const assessment = assessAutoCaptureExecution({ exitCode: 0, stdout: line, stderr: '' });
     expect(assessment.ok).toBe(true);
   });
@@ -100,6 +103,7 @@ describe('run-auto-capture fatal path via injectable runWorker', () => {
       transcriptMissing: 0, llmRetries: 0, observationsWritten: 0, rollupsWritten: 0,
       primaryProvider: 'none', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0,
       fatalError: 'injected fatal for test', spoolBytes: 0, spoolCapPct: 0, windows: 0,
+      failTimeout: 0, failParse: 0, failDb: 0, failOther: 0,
     };
 
     // Save and restore process.exitCode

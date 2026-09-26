@@ -96,6 +96,12 @@ export interface CaptureWorkerResult {
   spoolBytes: number;
   spoolCapPct: number;
   windows: number;
+  // 失敗原因分類：fail-timeout／fail-parse／fail-other 以「LLM 呼叫失敗次數」計；
+  // fail-db＝DB 寫入失敗窗口數；fail-other 另含 session 例外與收尾失敗
+  failTimeout: number;
+  failParse: number;
+  failDb: number;
+  failOther: number;
 }
 
 export interface CaptureWorkerOptions {
@@ -316,7 +322,19 @@ function emptyResult(): CaptureWorkerResult {
     spoolBytes: 0,
     spoolCapPct: 0,
     windows: 0,
+    failTimeout: 0,
+    failParse: 0,
+    failDb: 0,
+    failOther: 0,
   };
+}
+
+// 每次 LLM 呼叫失敗依原因記一次（含之後會重試、切窗或暫停的）；rate-limited／disabled 已有自己的計數，不重複記
+function countLlmFailure(result: CaptureWorkerResult, category: FailureCategory): void {
+  if (category === 'rate-limited' || category === 'disabled') return;
+  if (category === 'timeout') result.failTimeout += 1;
+  else if (category === 'malformed' || category === 'schema-invalid') result.failParse += 1;
+  else result.failOther += 1;
 }
 
 function spoolRoot(env: Record<string, string | undefined>): string {
@@ -2608,6 +2626,7 @@ export async function runCaptureWorkerOnce(
               retryProvider = undefined;
 
               const category: FailureCategory = toFailureCategory(error);
+              countLlmFailure(result, category);
               const timeoutSubtype =
                 error instanceof CaptureLlmValidationError && typeof error.details.timeoutSubtype === 'string'
                   ? error.details.timeoutSubtype
@@ -2840,6 +2859,7 @@ export async function runCaptureWorkerOnce(
               `[cc-memory] auto-capture warning: db-write-failed session=${sessionId} project=${chunkWindow.projectId} source=${chunk.pathHash.slice(0, 12)}:${chunk.start}-${chunk.end} error=${message}\n`
             );
             result.failed += 1;
+            result.failDb += 1;
             sessionStopped = true;
             snapshotCompleted = false;
             break;
@@ -2860,6 +2880,7 @@ export async function runCaptureWorkerOnce(
       }
     } catch (error) {
       result.failed += 1;
+      result.failOther += 1;
       const message = error instanceof Error ? error.message : String(error);
       stdout.write(
         `[cc-memory] auto-capture warning: worker-session-failed session=${spool.sessionIdFromPath} error=${message}\n`
@@ -2884,11 +2905,11 @@ export async function runCaptureWorkerOnce(
           generateEmbedding: options.generateEmbedding ?? defaultGenerateEmbedding }),
         report: (status) => {
           if (status === 'finalized') result.rollupsWritten += 1;
-          if (status === 'failed') result.failed += 1;
+          if (status === 'failed') { result.failed += 1; result.failOther += 1; }
           if (status !== 'skipped') stdout.write(`[cc-memory] session-finalize: ${status}\n`);
         },
       });
-    } catch { result.failed += 1; }
+    } catch { result.failed += 1; result.failOther += 1; }
     // D1b: takeTelemetry exactly once in function-level finally
     result.windows = windowsThisTick;
     const telemetry = options.llm.takeTelemetry();
