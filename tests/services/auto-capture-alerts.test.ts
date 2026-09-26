@@ -100,14 +100,54 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
       exitCode: 0,
       stdout:
         '[cc-memory] auto-capture info: project-id-remapped session=abc old=__ new=AI_Copilot\n' +
-        '[cc-memory] auto-capture warning: blocked session=abc source=deadbeef:1-2 reason=timeout blocked=1/5\n' +
+        '[cc-memory] auto-capture warning: blocked session=abc source=deadbeef:1-2 reason=spawn-failed blocked=1/5\n' +
         '[cc-memory] auto-capture summary: processed=0 skipped=1 dead-letter=0 failed=0 fatal=0\n',
       stderr: '',
     })
 
     expect(assessment.ok).toBe(false)
     expect(assessment.nonSummaryLines).toHaveLength(1)
-    expect(assessment.problemLine).toContain('reason=timeout')
+    expect(assessment.problemLine).toContain('reason=spawn-failed')
+  })
+
+  it('treats timeout-blocked warnings as log-only until the window is parked', () => {
+    // 逾時下一輪會自動重試：不算問題、不發 Telegram
+    const retrying = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: blocked session=s1 source=aaaaaaaaaaaa:1-2 reason=timeout blocked=1/5\n' +
+        '[cc-memory] auto-capture warning: blocked session=s2 source=bbbbbbbbbbbb:1-2 reason=timeout blocked=2/5\n' +
+        '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=2 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0\n',
+      stderr: '',
+    })
+    expect(retrying.ok).toBe(true)
+    expect(retrying.blockedCount).toBe(2)
+    expect(retrying.nonSummaryLines).toEqual([])
+    expect(retrying.problemLine).toBeNull()
+    expect(retrying.fingerprint).toBeNull()
+
+    // summary 的 blocked 比逾時行多：多出來的是其他原因，仍算問題
+    const mixed = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: blocked session=s1 source=aaaaaaaaaaaa:1-2 reason=timeout blocked=1/5\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 blocked=2 transcript-missing=0 parked=0 yielded=0 held=0 embedding-failed=0\n',
+      stderr: '',
+    })
+    expect(mixed.ok).toBe(false)
+    expect(mixed.problemLine).toBe('blocked=1')
+
+    // 重試用完：parked-window 行＋dead-letter 照常告警
+    const parked = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] auto-capture warning: blocked session=s1 source=aaaaaaaaaaaa:1-2 reason=timeout blocked=6/5\n' +
+        '[cc-memory] auto-capture warning: parked-window session=s1 source=aaaaaaaaaaaa:1-2 blocked=6\n' +
+        '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=1 failed=0 rate-limited=0 malformed=0 blocked=1 transcript-missing=0 parked=1 yielded=0 held=0 embedding-failed=0\n',
+      stderr: '',
+    })
+    expect(parked.ok).toBe(false)
+    expect(parked.problemLine).toContain('parked-window')
   })
 
   it('flags non-summary stdout and dead-letter as alertable', () => {
