@@ -12,6 +12,13 @@ export const INFO_PREFIX = '[cc-memory] auto-capture info:'
 // problemLine 含 session id 使 fingerprint 去重失效：2026-09-13 單日 81 次 exit 1 ＋ 160 則 Telegram（同 PR #26 的 info 行問題）。
 export const TRANSCRIPT_SOURCE_UNAVAILABLE_WARNING_PREFIX =
   '[cc-memory] auto-capture warning: transcript-source-unavailable'
+// 2026-09-26：逾時造成的 blocked 下一輪會自動重試，操作人不需處理；
+// problemLine 含 session id 使 fingerprint 去重失效，haiku 常逾時時幾乎每輪都發 Telegram。
+// 重試用完會印 parked-window 並進 dead-letter，那時照常告警。其他 reason 的 blocked 仍算問題。
+const BLOCKED_WARNING_PREFIX = '[cc-memory] auto-capture warning: blocked '
+function isTimeoutBlockedWarning(line: string): boolean {
+  return line.startsWith(BLOCKED_WARNING_PREFIX) && / reason=timeout /.test(line)
+}
 const DEFAULT_TELEGRAM_API_BASE = 'https://api.telegram.org'
 export const DEFAULT_ALERT_TIMEOUT_MS = 10_000
 export const DEFAULT_RENOTIFY_MS = 6 * 60 * 60 * 1000
@@ -219,14 +226,16 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const stdoutLines = normalizeLines(result.stdout)
   const stderrLines = normalizeLines(result.stderr)
   const summaryLine = stdoutLines.find((line) => line.startsWith(SUMMARY_PREFIX)) ?? null
-  // info 行與 transcript-source-unavailable warning 只是紀錄，不影響健康判定
+  // info 行、transcript-source-unavailable 與逾時 blocked warning 只是紀錄，不影響健康判定
   //（其他 warning／skipped／任何非 summary 行仍算問題）
   const nonSummaryLines = stdoutLines.filter(
     (line) =>
       line !== summaryLine &&
       !line.startsWith(INFO_PREFIX) &&
-      !line.startsWith(TRANSCRIPT_SOURCE_UNAVAILABLE_WARNING_PREFIX)
+      !line.startsWith(TRANSCRIPT_SOURCE_UNAVAILABLE_WARNING_PREFIX) &&
+      !isTimeoutBlockedWarning(line)
   )
+  const timeoutBlockedLineCount = stdoutLines.filter(isTimeoutBlockedWarning).length
   const deadLetterCount = parseDeadLetterCount(summaryLine)
   const failedCount = parseFailedCount(summaryLine)
   const rateLimitedCount = parseRateLimitedCount(summaryLine)
@@ -236,6 +245,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
   const yieldedCount = parseYieldedCount(summaryLine)
   const heldCount = parseHeldCount(summaryLine)
   const blockedCount = parseBlockedCount(summaryLine)
+  // summary 的 blocked 不分原因：扣掉逾時那幾筆，剩下的才算問題
+  const nonTimeoutBlockedCount = Math.max(0, blockedCount - timeoutBlockedLineCount)
   const embeddingFailedCount = parseEmbeddingFailedCount(summaryLine)
   const primaryProvider = parsePrimaryProvider(summaryLine)
   const primarySuccessCount = parsePrimarySuccessCount(summaryLine)
@@ -263,7 +274,7 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
     failedCount === 0 &&
     malformedCount === 0 &&
     rateLimitedCount === 0 &&
-    blockedCount === 0 &&
+    nonTimeoutBlockedCount === 0 &&
     parkedCount === 0 &&
     embeddingFailedCount === 0 &&
     fallbackFailedCount === 0 &&
@@ -285,8 +296,8 @@ export function assessAutoCaptureExecution(result: AutoCaptureExecutionResult): 
       problemLine = `fallback-failed=${fallbackFailedCount}`
     } else if (rateLimitedCount > 0) {
       problemLine = `rate-limited=${rateLimitedCount}`
-    } else if (blockedCount > 0) {
-      problemLine = `blocked=${blockedCount}`
+    } else if (nonTimeoutBlockedCount > 0) {
+      problemLine = `blocked=${nonTimeoutBlockedCount}`
     } else if (failedCount > 0) {
       problemLine = `failed=${failedCount}`
     } else if (malformedCount > 0) {
