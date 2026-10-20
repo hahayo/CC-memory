@@ -68,7 +68,7 @@ services:
       PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
       TZ: Asia/Taipei
     tmpfs:
-      - /backup-tmp:size=2g,mode=0700,uid=999,gid=999
+      - /backup-tmp:size=12g,mode=0700,uid=999,gid=999
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,7 +104,7 @@ services:
       PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
       TZ: Asia/Taipei
     tmpfs:
-      - /backup-tmp:size=2g,mode=0700,uid=999,gid=999
+      - /backup-tmp:size=12g,mode=0700,uid=999,gid=999
     depends_on:
       postgres:
         condition: service_healthy

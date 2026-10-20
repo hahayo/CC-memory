@@ -141,22 +141,30 @@ main() {
   [[ "$suffix" =~ ^[0-9a-f]{16}$ ]] || fail 'CC_BACKUP_RUN_SUFFIX must be 16 lowercase hex characters'
   run_id="${stamp}-${suffix}"
 
+  # Capacity estimate (not a strict upper bound): pg_dump writes table data and large
+  # objects, never indexes (the pgvector HNSW index alone was 2.3 GiB on 2026-10-21).
+  # Peak tmpfs usage is two large files at once: plain dump + ciphertext during
+  # age_encrypt (the plain dump is removed before the readback copy lands), so budget
+  # 2x the on-disk table data plus pg_largeobject plus a fixed margin for sequences,
+  # schema and the ciphertext envelope. If pg_dump still hits ENOSPC the EXIT trap
+  # removes the run directory and no manifest is written.
   local database_evidence database_bytes postgres_version_num available_bytes required_bytes
   database_evidence="$($psql_bin \
     --no-psqlrc --tuples-only --no-align --field-separator=$'\t' \
-    --command="SELECT pg_database_size(current_database()), current_setting('server_version_num')")"
+    --command="SELECT (COALESCE((SELECT SUM(pg_table_size(c.oid)) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'm', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'), 0) + pg_total_relation_size('pg_catalog.pg_largeobject'))::bigint, current_setting('server_version_num')")"
   IFS=$'\t' read -r database_bytes postgres_version_num <<<"$database_evidence"
   database_bytes="${database_bytes//[[:space:]]/}"
   postgres_version_num="${postgres_version_num//[[:space:]]/}"
-  [[ "$database_bytes" =~ ^[0-9]+$ && "$database_bytes" -gt 0 ]] \
-    || fail 'PostgreSQL returned an invalid database size'
+  # Zero is legitimate: a freshly migrated database has schema but empty table files.
+  [[ "$database_bytes" =~ ^[0-9]+$ ]] \
+    || fail 'PostgreSQL returned an invalid table data size'
   [[ "$postgres_version_num" =~ ^[0-9]+$ ]] \
     || fail 'PostgreSQL returned an invalid server_version_num'
   ((postgres_version_num >= 180000)) || fail 'PostgreSQL server must be version 18 or newer'
 
   available_bytes="$($df_bin -Pk "$CC_BACKUP_TMP_DIR" | awk 'NR == 2 { printf "%.0f", $4 * 1024 }')"
   [[ "$available_bytes" =~ ^[0-9]+$ ]] || fail 'could not determine tmpfs free bytes'
-  required_bytes=$((database_bytes * 3 + 64 * 1024 * 1024))
+  required_bytes=$((database_bytes * 2 + 64 * 1024 * 1024))
   ((available_bytes >= required_bytes)) \
     || fail "insufficient tmpfs capacity: available=${available_bytes} required=${required_bytes}"
 

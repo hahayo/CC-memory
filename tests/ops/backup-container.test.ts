@@ -65,7 +65,7 @@ describe('Coolify backup container contract', () => {
       expect(backupSection).toContain('dockerfile: ops/backup/Dockerfile');
       expect(backupSection).toContain('CC_BACKUP_TMP_DIR: /backup-tmp');
       expect(backupSection).toContain('CC_MEMORY_AGE_RECIPIENT: ${CC_MEMORY_AGE_RECIPIENT}');
-      expect(backupSection).toContain('/backup-tmp:size=2g,mode=0700,uid=999,gid=999');
+      expect(backupSection).toContain('/backup-tmp:size=12g,mode=0700,uid=999,gid=999');
       expect(backupSection).toContain('command: ["sleep", "infinity"]');
       expect(backupSection).toContain('condition: service_healthy');
       expect(backupSection).not.toContain('ports:');

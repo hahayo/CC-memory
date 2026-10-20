@@ -152,7 +152,7 @@ production 實際拓樸是一套 Coolify PostgreSQL stack 內的 `cc_memory_proj
 
 全新建立或災難重建 stack 時，PostgreSQL image 只會自動建立 `POSTGRES_DB` 指定的 personal DB；啟用 `backup-project` 排程前，必須依既有 migration／restore 流程建立 `cc_memory_project`。`POSTGRES_DB` 不得偏離 `cc_memory_personal`。若 project DB 不存在，備份會 fail-closed 並告警，不會產生 manifest。
 
-容器只持有 DB dump 權限、限定 R2 token、Telegram 告警設定與 age recipient 公鑰，**不得**放 age 私鑰。明文 dump 僅存在 2 GiB `/backup-tmp` tmpfs（記憶體暫存檔案系統）；腳本使用全域 flock、每輪 fresh destination、完整 archive 走讀、append-only object key（只新增物件鍵）及 full readback（全量讀回）驗證。任何一步失敗都不建立 manifest；30 天 lock 下的孤兒密文保留到期，不嘗試刪除。
+容器只持有 DB dump 權限、限定 R2 token、Telegram 告警設定與 age recipient 公鑰，**不得**放 age 私鑰。明文 dump 僅存在 12 GiB `/backup-tmp` tmpfs（記憶體暫存檔案系統；2026-10-21 由 2 GiB 加大，tmpfs 只在有檔案時占用 RAM，主機 32 GiB）；preflight 的容量門檻＝（使用者表資料量 `pg_table_size` 總和 ＋ `pg_largeobject` 大小，不含索引）× 2 ＋ 64 MiB，對應 age 加密時明文與密文同時存在的尖峰；這是估算不是嚴格上界（sequence、schema 與密文封裝靠 64 MiB 餘裕吸收），估算失準而 `pg_dump` 撞到 ENOSPC 時 EXIT trap 會清掉執行目錄、不寫 manifest 並發告警（2026-10-21 前誤用 `pg_database_size` × 3，pgvector 索引 2.3 GiB 被算進去，project 備份自 2026-09-13 起每天在 preflight 失敗 37 天）；腳本使用全域 flock、每輪 fresh destination、完整 archive 走讀、append-only object key（只新增物件鍵）及 full readback（全量讀回）驗證。manifest 上傳之前任何一步失敗都不建立 manifest；manifest 上傳後的讀回比對失敗會以非零退出並告警，但遠端 manifest 已存在、Bucket Lock 下也無法刪除（既有順序，2026-10-21 Codex 審查指出）；30 天 lock 下的孤兒密文保留到期，不嘗試刪除。
 
 primary dead-man（主要失聯監測器）的目標部署是 `ops/cloudflare-backup-monitor/` 的 Cloudflare Worker Cron，每小時第 17 分執行。它用 R2 binding 直接讀 bucket，不持有 S3 token；`TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID` 必須用 Wrangler secret（秘密）注入，禁止寫進 `wrangler.jsonc`：
 
