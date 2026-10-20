@@ -52,7 +52,7 @@ printf '%s\\n' 'tmpfs 4194304 0 4194304 0% /tmpfs'
     writeExecutable(join(binDir, 'fake-psql'), `#!/usr/bin/env bash
 set -euo pipefail
 printf 'psql %s\\n' "$*" >> "$COMMAND_LOG"
-printf '1048576\\t180004\\n'
+printf '%s\\t180004\\n' "${'${FAKE_TABLE_DATA_BYTES:-1048576}'}"
 `);
     writeExecutable(join(binDir, 'fake-pg-dump'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -255,6 +255,28 @@ esac
     expect(existsSync(commandLog) ? readFileSync(commandLog, 'utf8') : '').not.toContain(
       'pg_dump ',
     );
+  });
+
+  it('budgets tmpfs from table data times two, not pg_database_size times three', () => {
+    // fake-df reports 4 GiB free. 1.5 GiB of table data needs 3 GiB + 64 MiB under the
+    // 2x rule (fits); the old 3x rule would have demanded 4.5 GiB and failed preflight.
+    const result = run({ FAKE_TABLE_DATA_BYTES: String(1536 * 1024 * 1024) });
+
+    expect(result.status).toBe(0);
+    const log = readFileSync(commandLog, 'utf8');
+    expect(log).toContain('pg_table_size');
+    expect(log).not.toContain('pg_database_size');
+    expect(log).toContain('pg_dump ');
+  });
+
+  it('rejects a dump that cannot fit twice in the tmpfs before creating it', () => {
+    // 2 GiB of table data needs 4 GiB + 64 MiB, which exceeds the 4 GiB fake-df reports.
+    const result = run({ FAKE_TABLE_DATA_BYTES: String(2 * 1024 * 1024 * 1024) });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('insufficient tmpfs capacity');
+    expect(readFileSync(commandLog, 'utf8')).not.toContain('pg_dump ');
+    expect(readdirSync(tmpfsDir)).toEqual(['.cc-memory-backup.lock']);
   });
 
   it('rejects a non-tmpfs work directory before creating a dump', () => {
