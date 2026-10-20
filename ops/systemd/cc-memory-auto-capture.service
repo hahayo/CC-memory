@@ -8,7 +8,7 @@ ConditionPathExists=%h/.ccm-auto-capture-production-approved
 
 [Service]
 Type=oneshot
-TimeoutStartSec=300
+TimeoutStartSec=420
 WorkingDirectory=%h/CC_project/CC-memory
 Environment=CC_CAPTURE_LLM=codex-cli
 Environment=CC_CAPTURE_LLM_FALLBACK=claude-cli
@@ -18,7 +18,11 @@ Environment=CC_CAPTURE_QUIET_PERIOD_MS=7200000
 Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
 Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=4
 Environment=CC_CAPTURE_CLAUDE_MODEL=haiku
-# codex 90 s + claude 75 s + 2×1 s killGrace + 15 s settle = 182 s reserve < tick 240 s < supervisor 270 s < TimeoutStartSec 300 s
+# codex 90 s + claude 75 s + 2×1 s killGrace + 15 s settle = 182 s reserve < tick 360 s < supervisor 390 s < TimeoutStartSec 420 s
+# 2026-10-21：原本 tick 240 s 被 4 窗（約 60 s）＋182 s 保留吃光，session-finalize 讀完 DB 就沒預算、每輪靜默放棄；
+# 加大後收尾有約 2 分鐘讀 DB 的餘裕。
+Environment=CC_CAPTURE_TICK_BUDGET_MS=360000
+Environment=CC_CAPTURE_SUPERVISOR_TIMEOUT_MS=390000
 Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=75000
 Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=4
 Environment=CC_MEMORY_PROJECT_URL_FILE=%h/.ccm-project-url
