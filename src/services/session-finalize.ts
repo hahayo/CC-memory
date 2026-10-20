@@ -66,7 +66,7 @@ export interface FinalizeSessionOptions {
 }
 export interface FinalizeResult {
   attempted: boolean;
-  status: 'skipped' | 'current' | 'finalized' | 'failed' | 'stale';
+  status: 'skipped' | 'current' | 'finalized' | 'failed' | 'stale' | 'orphaned';
 }
 
 /** Atomic claim is shared by workers with different spool roots. Publication is fenced by generation + token. */
@@ -208,7 +208,14 @@ export async function runFinalizers(options: FinalizerSchedulerOptions): Promise
       const release = await options.acquireLock(spool);
       if (!release) continue;
       try {
-        if (!(await lstat(marker)).isFile() || !(await lstat(spool)).isFile()) continue;
+        if (!(await lstat(marker)).isFile()) continue;
+        if (!(await lstat(spool).catch(() => null))?.isFile()) {
+          // The spool was sealed or moved to another root (backfill); this root can never finalize it.
+          // Drop the marker so it stops counting as a failure on every tick.
+          await unlink(marker);
+          options.report?.('orphaned');
+          continue;
+        }
         const enrolled = JSON.parse(await readFile(marker, 'utf8')) as { projectId: string; sessionId: string };
         if (!enrolled.projectId || enrolled.projectId === '__personal__' || !enrolled.sessionId) continue;
         const stillReady = async (): Promise<boolean> => {
@@ -229,12 +236,13 @@ export async function runFinalizers(options: FinalizerSchedulerOptions): Promise
             if ((state.transcripts[hash]?.checkpoint ?? -1) < boundary) return false;
             paths.set(record.transcript_path, state.transcripts[hash].checkpoint);
           }
-          for (const [path, checkpoint] of paths) {
+          for (const path of paths.keys()) {
+            // Every advertised boundary is already captured (checked above). Bytes written after the
+            // last hook record (the closing assistant turn lands after the Stop hook) have no spool
+            // record and no hook will ever enqueue them, so they count toward quiet time instead of
+            // holding finalization forever. A deleted transcript likewise has nothing left to capture.
             const source = await stat(path).catch(() => null);
-            if (source) {
-              if (source.size > checkpoint) return false;
-              lastContentMs = Math.max(lastContentMs, source.mtimeMs);
-            } else if (!options.env.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR?.trim()) return false;
+            if (source) lastContentMs = Math.max(lastContentMs, source.mtimeMs);
           }
           const finalInfo = await stat(spool);
           if (finalInfo.size !== info.size || finalInfo.mtimeMs !== info.mtimeMs) return false;
