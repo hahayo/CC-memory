@@ -171,3 +171,68 @@ it('isolates a corrupt marker without starving another ready session', async () 
     expect(called).toEqual(['b']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+it('drops a marker whose spool was sealed or moved instead of failing every tick', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-orphan-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    for (const id of ['gone', 'ready']) {
+      const spool = join(dir, `${id}.jsonl`);
+      await writeFile(spool, ''); await writeFile(`${spool}.close`, '');
+      await writeFile(spool.replace('.jsonl', '.capture-state.json'), JSON.stringify({
+        version: 2, projectId: 'project', spool: { cursor: 0 }, transcripts: {}, retries: {},
+      }));
+      await enrollFinalization(spool, 'project', id);
+    }
+    const { rename, access } = await import('node:fs/promises');
+    await rename(join(dir, 'gone.jsonl'), join(dir, 'gone.jsonl.1.sealed'));
+    const called: string[] = []; const reported: string[] = [];
+    await runFinalizers({ root, env: {}, nowMs: Date.now, hasBudget: () => true,
+      acquireLock: async () => async () => {}, report: (s) => reported.push(s),
+      finalize: async ({ sessionId }) => {
+        called.push(sessionId); return { attempted: true, status: 'finalized' };
+      } });
+    expect(called).toEqual(['ready']);
+    expect(reported).toEqual(['orphaned', 'finalized']);
+    await expect(access(join(dir, 'gone.jsonl.finalize.json'))).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it('lets uncaptured transcript tail and deleted transcripts age into quiet time instead of blocking', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-tail-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    const { createHash } = await import('node:crypto');
+    const { stat, utimes } = await import('node:fs/promises');
+    const makeSession = async (id: string, transcriptBody: string | null) => {
+      const spool = join(dir, `${id}.jsonl`);
+      const transcript = join(root, `${id}.transcript`);
+      if (transcriptBody !== null) await writeFile(transcript, transcriptBody);
+      await writeFile(spool, JSON.stringify({ transcript_path: transcript, hwm_offset: 10 }) + '\n');
+      const hash = createHash('sha256').update(transcript).digest('hex');
+      await writeFile(spool.replace('.jsonl', '.capture-state.json'), JSON.stringify({
+        version: 2, projectId: 'project', spool: { cursor: (await stat(spool)).size },
+        transcripts: { [hash]: { checkpoint: 10 } }, retries: {},
+      }));
+      await enrollFinalization(spool, 'project', id);
+      return { spool, transcript };
+    };
+    // 'tail': 10 bytes captured, 5 more bytes written after the Stop hook (no spool record).
+    const tail = await makeSession('tail', '0123456789abcde');
+    // 'deleted': transcript cleaned up by the client; nothing left to capture.
+    await makeSession('deleted', null);
+    const called: string[] = [];
+    const run = (nowMs: number) => runFinalizers({ root, env: { CC_CAPTURE_FINALIZE_QUIET_MS: '3600000' },
+      nowMs: () => nowMs, hasBudget: () => true, acquireLock: async () => async () => {},
+      finalize: async ({ sessionId }) => { called.push(sessionId); return { attempted: true, status: 'finalized' }; } });
+    const old = (Date.now() - 2 * 3600000) / 1000;
+    await utimes(tail.spool, old, old); await utimes(join(dir, 'deleted.jsonl'), old, old);
+    // Spools are quiet, but fresh tail bytes in the transcript still hold 'tail' for the quiet period;
+    // 'deleted' has nothing left to capture and finalizes right away.
+    await run(Date.now()); expect(called).toEqual(['deleted']);
+    await run(Date.now()); expect(called).toEqual(['deleted']);
+    // Once the transcript itself has been quiet long enough, 'tail' finalizes too.
+    await utimes(tail.transcript, old, old);
+    await run(Date.now()); expect(called).toEqual(['deleted', 'tail']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

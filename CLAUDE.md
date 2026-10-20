@@ -128,7 +128,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_CAPTURE_RETRY_MIN_INTERVAL_MS` - 同一 terminal retry 的最短間隔毫秒（正式環境預設 1800000，不得用 0 加速 backlog）
 - `CC_CAPTURE_FRESH_WINDOW_MS` - fresh-first（新鮮優先）窗口毫秒（預設 259200000＝72 小時；2026-09-04 起）：spool 檔在窗口內有動的 session 先處理、新到舊；其餘依路徑輪流（round-robin cursor 只在這層推進）。設 `0` 回到純路徑輪流
 - `CC_CAPTURE_QUIET_PERIOD_MS` - quiet period（靜默期）毫秒（預設 `0`＝關閉；正式 unit 2026-09-12 起設 7200000＝2 小時）：spool 檔在這段時間內還有動的 session 視為「還在聊」，本 tick 整個略過、不動 cursor；等它安靜後才抓，讓窗口塞滿（邊聊邊抓平均只有 39 KB／窗），LLM 呼叫次數降 3–5 倍。代價：記憶延遲＝靜默期
-- `CC_CAPTURE_FINALIZE_QUIET_MS` - 工作階段收尾靜默門檻，預設 `21600000`（6 小時）；`0` 關閉所有收尾。明確結束記號或固定快照補舊帳抽完可略過靜默門檻，仍需下一次採集喚醒
+- `CC_CAPTURE_FINALIZE_QUIET_MS` - 工作階段收尾靜默門檻，預設 `21600000`（6 小時）；`0` 關閉所有收尾。明確結束記號或固定快照補舊帳抽完可略過靜默門檻，仍需下一次採集喚醒。2026-10-21 起：對話檔在最後一筆 hook 記錄之後多出的尾段（收尾回覆在 Stop hook 之後才落檔）與已被清掉的對話檔都不再阻擋收尾，只拿對話檔修改時間計入靜默期；spool 已 sealed／搬走的收尾標記視為孤兒直接刪除（`session-finalize: orphaned`），不再每輪計入 failed
 - `CC_CAPTURE_FINALIZE_MAX_PER_TICK` - 每輪最多收尾嘗試，預設 `1`
 - `CC_CAPTURE_FINALIZE_INPUT_BYTES` - 觀察資料 JSON 位元組上限，預設 `65536`；既有摘要另沿用 16 KiB 上限
 - `CC_CAPTURE_FINALIZE_MAX_ATTEMPTS` - 每抽取世代最多收尾嘗試，預設 `3`
