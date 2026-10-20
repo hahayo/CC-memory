@@ -62,6 +62,11 @@ for arg in "$@"; do
   case "$arg" in --file=*) output="${'${arg#--file=}'}" ;; esac
 done
 test -n "$output"
+if [[ "${'${FAIL_PG_DUMP_ENOSPC:-0}'}" == 1 ]]; then
+  dd if=/dev/zero of="$output" bs=1024 count=1 status=none
+  printf 'pg_dump: error: could not write to output file: No space left on device\\n' >&2
+  exit 1
+fi
 dd if=/dev/zero of="$output" bs=2048 count=1 status=none
 `);
     writeExecutable(join(binDir, 'fake-pg-restore'), `#!/usr/bin/env bash
@@ -276,6 +281,33 @@ esac
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('insufficient tmpfs capacity');
     expect(readFileSync(commandLog, 'utf8')).not.toContain('pg_dump ');
+    expect(readdirSync(tmpfsDir)).toEqual(['.cc-memory-backup.lock']);
+  });
+
+  it('counts large objects in the capacity estimate', () => {
+    const result = run();
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(commandLog, 'utf8')).toContain('pg_largeobject');
+  });
+
+  it('accepts a freshly migrated database whose table files are still empty', () => {
+    const result = run({ FAKE_TABLE_DATA_BYTES: '0' });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(commandLog, 'utf8')).toContain('pg_dump ');
+  });
+
+  it('fails closed with an alert when pg_dump runs out of tmpfs after preflight passed', () => {
+    const result = run({ FAIL_PG_DUMP_ENOSPC: '1' });
+
+    expect(result.status).not.toBe(0);
+    const log = readFileSync(commandLog, 'utf8');
+    expect(log).toContain('pg_dump ');
+    expect(log).not.toContain('pg_restore ');
+    expect(log).not.toContain('rclone ');
+    expect(log).toContain('curl alert');
+    expect(readdirSync(remoteDir)).toEqual([]);
     expect(readdirSync(tmpfsDir)).toEqual(['.cc-memory-backup.lock']);
   });
 
