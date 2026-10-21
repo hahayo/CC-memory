@@ -139,6 +139,7 @@ cc_memory_search / cc_memory_list
 2. **Source** 接這個 GitHub repo，**Compose file path** 填 `docker-compose.coolify.yml`
 3. 設定 `SERVICE_PASSWORD_POSTGRES`、`CC_MEMORY_*`、`AWS_*` 與 age recipient 公鑰；秘密不得提交到 Git。`POSTGRES_DB` 維持 `cc_memory_personal`
 4. **Deploy** —— `SERVICE_PASSWORD_POSTGRES` 會在第一次部署時隨機生成並寫回 Coolify Environment Variables（之後 restart 不變）
+   > ⚠️ **自動部署已關閉（2026-10-21 使用者拍板）**：這個 app 只有 postgres 與兩個備份容器，之前每次 merge 到 main 都會整組重建、正式 PG 跟著重啟約 10 秒（9 月多次「不明原因重啟」的真相）。改成只有 `docker-compose.coolify.yml` 或 `ops/backup/` 有變更時才手動部署：`coolify --context hahauccu deploy uuid flsj0tf80nz1uomrmaeffdvw`。備份排程跑的時候（每天 03:00／03:30 台北）不要部署。查看／切換開關：Coolify API `settings.is_auto_deploy_enabled`。
 5. 依 migration／restore 流程建立 `cc_memory_project`；兩個備份 service 的 `PGDATABASE` 已固定，不可由環境變數覆寫
 6. 依 `docs/auto-capture-v0.5/memory-ops-cutover.md` §1.4.1，在兩個 backup service 建立錯開至少 30 分鐘的每日 Scheduled Tasks
 
