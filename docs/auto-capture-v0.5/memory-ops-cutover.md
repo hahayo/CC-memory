@@ -148,7 +148,7 @@ production 實際拓樸是一套 Coolify PostgreSQL stack 內的 `cc_memory_proj
 /app/cc-memory-backup.sh run
 ```
 
-兩筆排程必須錯開至少 30 分鐘，並先確認 Coolify instance 使用的排程 timezone（時區）；`TZ=Asia/Taipei` 只控制容器內時間，不替 Coolify scheduler（排程器）改時區。兩個 service 各自擁有獨立 tmpfs 與 flock，因此腳本鎖只防同一 container 重入，不能阻止兩個 container 同時 dump。部署後須各觀察至少一個自動週期，確認兩個新 manifest 與 freshness checker 都 PASS。
+兩筆排程必須錯開至少 30 分鐘，並先確認 Coolify instance 使用的排程 timezone（時區）；app 的自動部署自 2026-10-21 起關閉（merge 到 main 不再重建 stack、PG 不再隨之重啟），compose 或備份 image 有變更時手動 `coolify --context hahauccu deploy uuid flsj0tf80nz1uomrmaeffdvw`，避開備份時段；`TZ=Asia/Taipei` 只控制容器內時間，不替 Coolify scheduler（排程器）改時區。兩個 service 各自擁有獨立 tmpfs 與 flock，因此腳本鎖只防同一 container 重入，不能阻止兩個 container 同時 dump。部署後須各觀察至少一個自動週期，確認兩個新 manifest 與 freshness checker 都 PASS。
 
 全新建立或災難重建 stack 時，PostgreSQL image 只會自動建立 `POSTGRES_DB` 指定的 personal DB；啟用 `backup-project` 排程前，必須依既有 migration／restore 流程建立 `cc_memory_project`。`POSTGRES_DB` 不得偏離 `cc_memory_personal`。若 project DB 不存在，備份會 fail-closed 並告警，不會產生 manifest。
 
