@@ -18,6 +18,7 @@ import {
   sql,
   cosineDistance,
   isNotNull,
+  or,
   count,
   min,
   max,
@@ -26,6 +27,7 @@ import {
 
 import { projectMemories, type Memory, type NewMemory } from '../db/schema.js';
 import { reservedExclusionCondition } from './scope-policy.js';
+import { keywordLikePatterns } from '../utils/keyword-like.js';
 import {
   keywordObservationIndexCandidates,
   semanticObservationIndexCandidates,
@@ -306,30 +308,27 @@ async function keywordSearchRows(
   limit: number,
   excludeReserved: boolean
 ): Promise<Memory[]> {
-  const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
-
+  // 2026-10-23 前這裡是「先抓最新 limit×2 筆再在 JS 裡 includes 過濾」，超過幾天前的主題一律查不到
+  // （盲測 Q4／Q8 的資料都在 DB，keyword 模式卻 0 筆）。改成 DB 端 ILIKE 掃整個範圍；
+  // 任一關鍵字命中即算命中、最新優先，與舊 JS 過濾的語意一致。
   const conditions: SQL[] = [eq(projectMemories.status, 'active')];
   if (projectId) conditions.push(eq(projectMemories.projectId, projectId));
   if (type) conditions.push(eq(projectMemories.type, type));
   const reserved = reservedExclusionCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
-
-  const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
+  const patterns = keywordLikePatterns(query);
+  if (patterns.length > 0) {
+    const haystack = sql`(${projectMemories.summary} || ' ' || array_to_string(coalesce(${projectMemories.keywords}, '{}'::text[]), ' '))`;
+    conditions.push(or(...patterns.map((pattern) => sql`${haystack} ILIKE ${pattern}`))!);
+  }
 
   const rows = (await db
     .select()
     .from(projectMemories)
-    .where(whereClause)
+    .where(and(...conditions))
     .orderBy(desc(projectMemories.createdAt))
-    .limit(limit * 2)) as Memory[];
-
-  if (keywords.length === 0) return rows.slice(0, limit);
-
-  const filtered = rows.filter((memory) => {
-    const text = `${memory.summary} ${(memory.keywords ?? []).join(' ')}`.toLowerCase();
-    return keywords.some((kw) => text.includes(kw));
-  });
-  return filtered.slice(0, limit);
+    .limit(limit)) as Memory[];
+  return rows;
 }
 
 /**
@@ -448,7 +447,7 @@ export async function searchMemories(
   const limit = input.limit ?? 10;
   const querySurface = input.querySurface ?? 'mcp';
 
-  // limit 非負整數預檢（limit 會用於 limit*2 等運算，負數會產出無效 SQL → INTERNAL）。
+  // limit 非負整數預檢（負數會產出無效 SQL → INTERNAL）。
   if (!Number.isInteger(limit) || limit < 0) {
     throw new InvalidArgumentError('searchMemories: limit 必須為非負整數', { limit });
   }
@@ -633,8 +632,8 @@ const DEFAULT_SESSION_RECENCY: SessionRecencyConfig = {
 const SESSION_RECENCY_OVERSAMPLE_K = 3;
 
 /**
- * Hard cap on over-sampled fetch per source, matching the widest existing
- * per-source fetch in observations.ts (limit * 4 → keywordObservationIndexCandidates).
+ * Hard cap on over-sampled fetch per source（沿用 2026-10-23 前 keyword 路徑 limit×4 的上限；
+ * keyword 過濾已改在 SQL 端做，此值只管超額撈取的上限）。
  */
 const SESSION_RECENCY_OVERSAMPLE_CAP = 100;
 

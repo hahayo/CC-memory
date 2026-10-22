@@ -827,6 +827,62 @@ describe('searchMemoryIndexes v0.5 search contract (integration, real PG)', () =
     if (sql) await sql.end();
   });
 
+  it('keyword mode finds old rows even when many newer non-matching rows exist (2026-10-23 Q4/Q8 regression)', async () => {
+    // 舊實作只抓最新 fetchLimit×2 筆摘要／fetchLimit×4 筆觀察再在 JS 過濾（fetchLimit＝limit＋超額撈取，
+    // limit 5 時為 15）：塞 limit×20 筆不相干的新資料後，舊的命中列就被擠出視窗、整個 keyword 搜尋回 0 筆。
+    const projectId = `${V05_SEARCH_PREFIX}-old-hit`;
+    const keyword = `oldhit-${randomUUID()}`;
+    const seeded = await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    const limit = 5;
+    for (let i = 0; i < limit * 20; i++) {
+      const fillerSession = `session-filler-${randomUUID()}`;
+      await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: `filler rollup ${i} with nothing relevant`,
+        keywords: ['filler'],
+        writerHost: 'v05-search-test',
+      });
+      await seedObservationIndex(sql, {
+        projectId,
+        sessionId: fillerSession,
+        type: 'discovery',
+        keyword: 'filler',
+        title: `filler observation ${i}`,
+        observedAt: new Date(Date.now() + i * 1000),
+      });
+    }
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit,
+    });
+
+    const ids = envelope.results.map((r) => r.id);
+    expect(ids).toContain(seeded.manualId);
+    expect(ids).toContain(seeded.rollupId);
+    expect(ids.some((id) => id === seeded.decisionObservationId || id === seeded.featureObservationId)).toBe(true);
+    for (const r of envelope.results) {
+      expect(r.title.toLowerCase()).toContain(keyword);
+    }
+  });
+
+  it('keyword mode escapes LIKE wildcards in the query', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-escape`;
+    const keyword = `esc-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: '%',
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+    expect(envelope.results).toHaveLength(0);
+  });
+
   it('returns 1-based rankPositions with one entry per index result', async () => {
     const projectId = `${V05_SEARCH_PREFIX}-rank`;
     const keyword = `rank-${randomUUID()}`;

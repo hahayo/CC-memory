@@ -97,8 +97,8 @@ describe('searchMemories', () => {
 
     await searchMemories(mockDb as any, input);
 
-    // keyword 模式會取 limit * 2 以便過濾後仍有足夠結果
-    expect(mockLimit).toHaveBeenCalledWith(10);
+    // 2026-10-23 起 keyword 過濾在 SQL 端做，DB limit 就是呼叫端的 limit
+    expect(mockLimit).toHaveBeenCalledWith(5);
   });
 
   it('should default to limit 10', async () => {
@@ -109,8 +109,8 @@ describe('searchMemories', () => {
 
     await searchMemories(mockDb as any, input);
 
-    // keyword 模式會取 limit * 2 (預設 10 * 2 = 20)
-    expect(mockLimit).toHaveBeenCalledWith(20);
+    // 預設 limit 10，不再 ×2
+    expect(mockLimit).toHaveBeenCalledWith(10);
   });
 
   it('should filter results by keyword match', async () => {

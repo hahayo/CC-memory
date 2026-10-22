@@ -15,11 +15,13 @@ import {
   lt,
   lte,
   notInArray,
+  or,
   sql,
   type SQL,
 } from 'drizzle-orm';
 
 import { observations, projectMemories, type Observation } from '../db/schema.js';
+import { keywordLikePatterns } from '../utils/keyword-like.js';
 import { generateQueryEmbedding, isEmbeddingEnabled } from '../utils/embedding.js';
 import { InvalidArgumentError, NotFoundError } from './errors.js';
 import { RESERVED_PROJECT_ID_LIST } from './scope-policy.js';
@@ -191,17 +193,6 @@ function observationIndexResult(row: Observation): MemoryIndexResult {
   };
 }
 
-function observationSearchText(row: Observation): string {
-  return [
-    row.title,
-    row.subtitle ?? '',
-    ...(row.facts ?? []),
-    ...(row.concepts ?? []),
-    ...(row.files ?? []),
-    row.narrative,
-  ].join(' ').toLowerCase();
-}
-
 function rankPositions(length: number): number[] {
   return Array.from({ length }, (_, index) => index + 1);
 }
@@ -300,25 +291,22 @@ export async function keywordObservationIndexCandidates(
   if (typeCondition) conditions.push(typeCondition);
   const reserved = observationExcludeReservedCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
+  // 2026-10-23 前是「先抓最新 limit×4 筆再在 JS 裡 includes 過濾」，舊主題永遠查不到。
+  // 改成 DB 端 ILIKE，欄位與舊 JS 過濾相同（title／subtitle／facts／concepts／files／narrative）。
+  const patterns = keywordLikePatterns(input.query);
+  if (patterns.length > 0) {
+    const haystack = sql`(${observations.title} || ' ' || coalesce(${observations.subtitle}, '') || ' ' || array_to_string(${observations.facts}, ' ') || ' ' || array_to_string(${observations.concepts}, ' ') || ' ' || array_to_string(${observations.files}, ' ') || ' ' || ${observations.narrative})`;
+    conditions.push(or(...patterns.map((pattern) => sql`${haystack} ILIKE ${pattern}`))!);
+  }
 
   const rows = (await db
     .select()
     .from(observations)
     .where(and(...conditions))
     .orderBy(desc(observations.observedAt))
-    // known limitation：先撈最新 limit*4 再文字過濾，較舊命中可能漏（同 keywordSearchRows 模式；M6 benchmark 後評估推進 SQL）
-    .limit(limit * 4)) as Observation[];
+    .limit(limit)) as Observation[];
 
-  const keywords = input.query.toLowerCase().split(/\s+/).filter(Boolean);
-  const filtered =
-    keywords.length === 0
-      ? rows
-      : rows.filter((row) => {
-          const text = observationSearchText(row);
-          return keywords.some((keyword) => text.includes(keyword));
-        });
-
-  return filtered.slice(0, limit).map((row) => ({
+  return rows.map((row) => ({
     result: observationIndexResult(row),
     baseScore: 1,
     semanticScore: null,
