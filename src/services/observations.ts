@@ -15,13 +15,13 @@ import {
   lt,
   lte,
   notInArray,
-  or,
   sql,
   type SQL,
+  getTableColumns,
 } from 'drizzle-orm';
 
 import { observations, projectMemories, type Observation } from '../db/schema.js';
-import { keywordLikePatterns } from '../utils/keyword-like.js';
+import { keywordMatchSql } from '../utils/keyword-like.js';
 import { generateQueryEmbedding, isEmbeddingEnabled } from '../utils/embedding.js';
 import { InvalidArgumentError, NotFoundError } from './errors.js';
 import { RESERVED_PROJECT_ID_LIST } from './scope-policy.js';
@@ -276,6 +276,13 @@ function combineHybridCandidates(
   return sortCandidates(Array.from(combined.values())).slice(0, limit);
 }
 
+/** keyword 路徑的 SELECT 欄位：整列去掉 embedding（向量很大、結果用不到）。 */
+function omitEmbedding<T extends Record<string, unknown>>(columns: T): Omit<T, 'embedding'> {
+  const { embedding: _embedding, ...rest } = columns;
+  void _embedding;
+  return rest;
+}
+
 export async function keywordObservationIndexCandidates(
   db: DbClient,
   input: SearchMemoriesInput,
@@ -292,23 +299,42 @@ export async function keywordObservationIndexCandidates(
   const reserved = observationExcludeReservedCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
   // 2026-10-23 前是「先抓最新 limit×4 筆再在 JS 裡 includes 過濾」，舊主題永遠查不到。
-  // 改成 DB 端 ILIKE，欄位與舊 JS 過濾相同（title／subtitle／facts／concepts／files／narrative）。
-  const patterns = keywordLikePatterns(input.query);
-  if (patterns.length > 0) {
-    const haystack = sql`(${observations.title} || ' ' || coalesce(${observations.subtitle}, '') || ' ' || array_to_string(${observations.facts}, ' ') || ' ' || array_to_string(${observations.concepts}, ' ') || ' ' || array_to_string(${observations.files}, ' ') || ' ' || ${observations.narrative})`;
-    conditions.push(or(...patterns.map((pattern) => sql`${haystack} ILIKE ${pattern}`))!);
-  }
-
-  const rows = (await db
-    .select()
+  // 改成 DB 端掃整個範圍，欄位與舊 JS 過濾相同（title／subtitle／facts／concepts／files／narrative）；
+  // 排序＝命中關鍵字數多者優先、再最新優先。子查詢只帶 id／時間／折疊後文字（OFFSET 0 擋 pull-up），
+  // 排完前 limit 筆再 join 回原表拿整列（含向量的整列進排序實測 14 秒）。
+  const base = db
+    .select({
+      id: observations.id,
+      observedAt: observations.observedAt,
+      hay: sql<string>`lower(${observations.title} || ' ' || coalesce(${observations.subtitle}, '') || ' ' || array_to_string(${observations.facts}, ' ') || ' ' || array_to_string(${observations.concepts}, ' ') || ' ' || array_to_string(${observations.files}, ' ') || ' ' || ${observations.narrative})`.as(
+        'hay'
+      ),
+    })
     .from(observations)
     .where(and(...conditions))
-    .orderBy(desc(observations.observedAt))
-    .limit(limit)) as Observation[];
+    .offset(sql`0`)
+    .as('o');
+  const match = keywordMatchSql(sql`${base.hay}`, input.query);
+  const hits = match ? match.hits : sql<number>`1`;
+  const total = match ? match.total : 1;
+  const top = db
+    .select({ id: base.id, hits: hits.as('hits'), observedAt: base.observedAt })
+    .from(base)
+    .where(match ? match.where : undefined)
+    .orderBy(desc(hits), desc(base.observedAt))
+    .limit(limit)
+    .as('t');
 
-  return rows.map((row) => ({
-    result: observationIndexResult(row),
-    baseScore: 1,
+  const rows = (await db
+    // 不撈 embedding：keyword 結果用不到，30 筆向量約 600–800 KB，經 SSH tunnel 實測多花 3–7 秒。
+    .select({ ...omitEmbedding(getTableColumns(observations)), keywordHits: top.hits })
+    .from(observations)
+    .innerJoin(top, eq(observations.id, top.id))
+    .orderBy(desc(top.hits), desc(observations.observedAt))) as Array<Observation & { keywordHits: number | string }>;
+
+  return rows.map(({ keywordHits, ...row }) => ({
+    result: observationIndexResult({ ...row, embedding: null } as Observation),
+    baseScore: Number(keywordHits) / total,
     semanticScore: null,
     sourceOrder: row.type === 'decision' ? 2 : 3,
   }));

@@ -1,5 +1,6 @@
 // tests/tools/search.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 
 // 隔離 embedding 模組，避免測試打真 Gemini API（不依賴 GEMINI_API_KEY 環境變數）
 // isEmbeddingEnabled=false 強制走 keyword 路徑，跟既有測試的 mockDb 鏈對齊
@@ -47,11 +48,15 @@ describe('searchMemories', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // 2026-10-23 起 keyword 路徑是「子查詢排序 id → join 回原表」：鏈上多了 offset／as／innerJoin，
+    // 子查詢別名的欄位用 Proxy 回 sql.raw，讓 drizzle 的 sql 模板能嵌進去；最後一段沒有 limit，靠 then 收。
+    const subAlias = new Proxy({}, { get: (_t, k) => sql.raw(String(k)) });
+    const tail = { limit: mockLimit, then: (res: (v: unknown) => void) => res(mockMemories) };
     mockSelect.mockReturnValue({ from: mockFrom });
-    mockFrom.mockReturnValue({ where: mockWhere });
-    mockWhere.mockReturnValue({ orderBy: mockOrderBy });
-    mockOrderBy.mockReturnValue({ limit: mockLimit });
-    mockLimit.mockResolvedValue(mockMemories);
+    mockFrom.mockReturnValue({ where: mockWhere, innerJoin: () => ({ orderBy: mockOrderBy }) });
+    mockWhere.mockReturnValue({ orderBy: mockOrderBy, offset: () => ({ as: () => subAlias }) });
+    mockOrderBy.mockReturnValue(tail);
+    mockLimit.mockReturnValue({ as: () => subAlias, then: (res: (v: unknown) => void) => res(mockMemories) });
   });
 
   it('should search by query keywords', async () => {
@@ -113,20 +118,30 @@ describe('searchMemories', () => {
     expect(mockLimit).toHaveBeenCalledWith(10);
   });
 
-  it('should filter results by keyword match', async () => {
+  it('should push the keyword filter into the SQL where clause (2026-10-23)', async () => {
     const input: SearchInput = {
       query: 'drizzle',
       projectId: 'my-project',
     };
 
-    const results = await searchMemories(mockDb as any, input);
+    await searchMemories(mockDb as any, input);
 
-    // Should only return the Drizzle-related memory
-    const drizzleResults = results.filter(r =>
-      r.summary.toLowerCase().includes('drizzle') ||
-      r.keywords?.some(k => k.toLowerCase().includes('drizzle'))
-    );
-    expect(drizzleResults.length).toBeGreaterThan(0);
+    // 過濾已移到 DB 端：where 條件必須含 LIKE lower(；真實比對行為由 tests/services/memories.test.ts 的 PG 整合測試覆蓋
+    expect(mockWhere).toHaveBeenCalled();
+    const flatten = (node: unknown, out: string[] = []): string[] => {
+      if (node == null) return out;
+      if (typeof node === 'string') out.push(node);
+      else if (Array.isArray(node)) node.forEach((n) => flatten(n, out));
+      else if (typeof node === 'object') {
+        const o = node as { queryChunks?: unknown; value?: unknown };
+        if ('queryChunks' in o) flatten(o.queryChunks, out);
+        else if ('value' in o) flatten(o.value, out);
+      }
+      return out;
+    };
+    const chunks = mockWhere.mock.calls.map((call) => flatten(call[0]).join(' ')).join(' | ');
+    expect(chunks).toContain('LIKE lower(');
+    expect(chunks).toContain('%drizzle%');
   });
 
   // Guard：確保 embedding 模組被 vi.mock 攔截，避免未來有人移掉 mock 後測試回到打真 API
