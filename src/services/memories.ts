@@ -22,10 +22,12 @@ import {
   min,
   max,
   type SQL,
+  getTableColumns,
 } from 'drizzle-orm';
 
 import { projectMemories, type Memory, type NewMemory } from '../db/schema.js';
 import { reservedExclusionCondition } from './scope-policy.js';
+import { keywordMatchSql } from '../utils/keyword-like.js';
 import {
   keywordObservationIndexCandidates,
   semanticObservationIndexCandidates,
@@ -298,6 +300,19 @@ interface ScoredSearchItem {
 // predicate 抽到 scope-policy.ts 作單一 SoT（Codex A7）——service 與
 // scope-probe integration test 共用，防兩邊 SQL 漂移。
 
+/** keyword 路徑的 SELECT 欄位：整列去掉 embedding（向量很大、結果用不到）。 */
+function omitEmbedding<T extends Record<string, unknown>>(columns: T): Omit<T, 'embedding'> {
+  const { embedding: _embedding, ...rest } = columns;
+  void _embedding;
+  return rest;
+}
+
+/** keyword 命中列＋命中關鍵字比例（1 = 全部關鍵字都命中）。 */
+interface KeywordScoredRow {
+  row: Memory;
+  score: number;
+}
+
 async function keywordSearchRows(
   db: DbClient,
   query: string,
@@ -305,31 +320,50 @@ async function keywordSearchRows(
   type: string | undefined,
   limit: number,
   excludeReserved: boolean
-): Promise<Memory[]> {
-  const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
-
+): Promise<KeywordScoredRow[]> {
+  // 2026-10-23 前這裡是「先抓最新 limit×2 筆再在 JS 裡 includes 過濾」，超過幾天前的主題一律查不到
+  // （盲測 Q4／Q8 的資料都在 DB，keyword 模式卻 0 筆）。改成 DB 端掃整個範圍：
+  // 任一關鍵字命中即算命中（與舊語意一致），排序＝命中關鍵字數多者優先、再最新優先。
+  // 做法：子查詢只帶 id／時間／折疊後文字（OFFSET 0 擋 planner pull-up，文字每列只算一次），
+  // 排完取前 limit 筆 id，再 join 回原表拿整列——子查詢若帶全部欄位（含向量）實測要 14 秒。
   const conditions: SQL[] = [eq(projectMemories.status, 'active')];
   if (projectId) conditions.push(eq(projectMemories.projectId, projectId));
   if (type) conditions.push(eq(projectMemories.type, type));
   const reserved = reservedExclusionCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
-
-  const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
+  const base = db
+    .select({
+      id: projectMemories.id,
+      createdAt: projectMemories.createdAt,
+      hay: sql<string>`lower(${projectMemories.summary} || ' ' || array_to_string(coalesce(${projectMemories.keywords}, '{}'::text[]), ' '))`.as(
+        'hay'
+      ),
+    })
+    .from(projectMemories)
+    .where(and(...conditions))
+    .offset(sql`0`)
+    .as('m');
+  const match = keywordMatchSql(sql`${base.hay}`, query);
+  const hits = match ? match.hits : sql<number>`1`;
+  const total = match ? match.total : 1;
+  const top = db
+    .select({ id: base.id, hits: hits.as('hits'), createdAt: base.createdAt })
+    .from(base)
+    .where(match ? match.where : undefined)
+    .orderBy(desc(hits), desc(base.createdAt))
+    .limit(limit)
+    .as('t');
 
   const rows = (await db
-    .select()
+    // 不撈 embedding：keyword 結果用不到，30 筆向量約 600–800 KB，經 SSH tunnel 實測多花 3–7 秒。
+    .select({ ...omitEmbedding(getTableColumns(projectMemories)), keywordHits: top.hits })
     .from(projectMemories)
-    .where(whereClause)
-    .orderBy(desc(projectMemories.createdAt))
-    .limit(limit * 2)) as Memory[];
-
-  if (keywords.length === 0) return rows.slice(0, limit);
-
-  const filtered = rows.filter((memory) => {
-    const text = `${memory.summary} ${(memory.keywords ?? []).join(' ')}`.toLowerCase();
-    return keywords.some((kw) => text.includes(kw));
-  });
-  return filtered.slice(0, limit);
+    .innerJoin(top, eq(projectMemories.id, top.id))
+    .orderBy(desc(top.hits), desc(projectMemories.createdAt))) as Array<Memory & { keywordHits: number | string }>;
+  return rows.map(({ keywordHits, ...row }) => ({
+    row: { ...row, embedding: null } as Memory,
+    score: Number(keywordHits) / total,
+  }));
 }
 
 /**
@@ -398,7 +432,7 @@ async function hybridSearchScoredWithEmbedding(
   excludeReserved: boolean
 ): Promise<ScoredSearchItem[]> {
   const [keywordRows, semanticItems] = await Promise.all([
-    keywordSearchRows(db, query, projectId, type, limit, excludeReserved),
+    keywordSearchRows(db, query, projectId, type, limit, excludeReserved).then((items) => items.map((i) => i.row)),
     semanticSearchScoredWithEmbedding(db, queryEmbedding, projectId, type, limit, excludeReserved),
   ]);
 
@@ -448,7 +482,7 @@ export async function searchMemories(
   const limit = input.limit ?? 10;
   const querySurface = input.querySurface ?? 'mcp';
 
-  // limit 非負整數預檢（limit 會用於 limit*2 等運算，負數會產出無效 SQL → INTERNAL）。
+  // limit 非負整數預檢（負數會產出無效 SQL → INTERNAL）。
   if (!Number.isInteger(limit) || limit < 0) {
     throw new InvalidArgumentError('searchMemories: limit 必須為非負整數', { limit });
   }
@@ -476,7 +510,9 @@ export async function searchMemories(
   let scores: number[] | null;
 
   if (effectiveMode === 'keyword') {
-    results = await keywordSearchRows(db, input.query, input.projectId, input.type, limit, excludeReserved);
+    results = (await keywordSearchRows(db, input.query, input.projectId, input.type, limit, excludeReserved)).map(
+      (item) => item.row
+    );
     scores = null;
   } else if (effectiveMode === 'semantic') {
     const items = await semanticSearchScoredWithEmbedding(
@@ -633,8 +669,8 @@ const DEFAULT_SESSION_RECENCY: SessionRecencyConfig = {
 const SESSION_RECENCY_OVERSAMPLE_K = 3;
 
 /**
- * Hard cap on over-sampled fetch per source, matching the widest existing
- * per-source fetch in observations.ts (limit * 4 → keywordObservationIndexCandidates).
+ * Hard cap on over-sampled fetch per source（沿用 2026-10-23 前 keyword 路徑 limit×4 的上限；
+ * keyword 過濾已改在 SQL 端做，此值只管超額撈取的上限）。
  */
 const SESSION_RECENCY_OVERSAMPLE_CAP = 100;
 
@@ -740,9 +776,9 @@ async function keywordMemoryIndexCandidates(
     limit,
     excludeReserved
   );
-  return rows.map((row) => ({
+  return rows.map(({ row, score }) => ({
     result: memoryIndexResult(row),
-    baseScore: 1,
+    baseScore: score,
     semanticScore: null,
     sourceOrder: memorySourceOrder(row),
   }));

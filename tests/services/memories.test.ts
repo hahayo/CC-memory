@@ -13,6 +13,7 @@
 // Unit 測試 mock drizzle client（embedding 模組 vi.mock 避免打真 Gemini API）。
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { connectTestDb, type Sql } from '../helpers/db.js';
@@ -827,6 +828,118 @@ describe('searchMemoryIndexes v0.5 search contract (integration, real PG)', () =
     if (sql) await sql.end();
   });
 
+  it('keyword mode finds old rows even when many newer non-matching rows exist (2026-10-23 Q4/Q8 regression)', async () => {
+    // 舊實作只抓最新 fetchLimit×2 筆摘要／fetchLimit×4 筆觀察再在 JS 過濾（fetchLimit＝limit＋超額撈取，
+    // limit 5 時為 15）：塞 limit×20 筆不相干的新資料後，舊的命中列就被擠出視窗、整個 keyword 搜尋回 0 筆。
+    const projectId = `${V05_SEARCH_PREFIX}-old-hit`;
+    const keyword = `oldhit-${randomUUID()}`;
+    const seeded = await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    const limit = 5;
+    for (let i = 0; i < limit * 20; i++) {
+      const fillerSession = `session-filler-${randomUUID()}`;
+      await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: `filler rollup ${i} with nothing relevant`,
+        keywords: ['filler'],
+        writerHost: 'v05-search-test',
+      });
+      await seedObservationIndex(sql, {
+        projectId,
+        sessionId: fillerSession,
+        type: 'discovery',
+        keyword: 'filler',
+        title: `filler observation ${i}`,
+        observedAt: new Date(Date.now() + i * 1000),
+      });
+    }
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: keyword,
+      projectId,
+      mode: 'keyword',
+      limit,
+    });
+
+    const ids = envelope.results.map((r) => r.id);
+    expect(ids).toContain(seeded.manualId);
+    expect(ids).toContain(seeded.rollupId);
+    expect(ids.some((id) => id === seeded.decisionObservationId || id === seeded.featureObservationId)).toBe(true);
+    for (const r of envelope.results) {
+      expect(r.title.toLowerCase()).toContain(keyword);
+    }
+  });
+
+  it('keyword mode ranks rows hitting more terms first, even when a short common term floods newer rows', async () => {
+    // Antigravity review 2026-10-23 high：`Step B 殘餘 1,112` 切出 `B`，幾乎每筆英文觀察都含 b，
+    // 若只按時間倒序截斷，最新幾十筆就塞滿 limit。排序改成「命中關鍵字數」優先後，
+    // 同時命中兩個詞的舊紀錄要排在只命中 `b` 的新 filler 前面。
+    const projectId = `${V05_SEARCH_PREFIX}-multi`;
+    const keyword = `multi-${randomUUID()}`;
+    const seeded = await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    const limit = 5;
+    for (let i = 0; i < limit * 20; i++) {
+      await seedObservationIndex(sql, {
+        projectId,
+        sessionId: `session-filler-${randomUUID()}`,
+        type: 'discovery',
+        keyword: 'filler',
+        title: `filler observation ${i}`, // 含 b
+        observedAt: new Date(Date.now() + i * 1000),
+      });
+    }
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: `b ${keyword}`,
+      projectId,
+      mode: 'keyword',
+      limit,
+    });
+
+    const ids = envelope.results.map((r) => r.id);
+    expect(ids).toContain(seeded.decisionObservationId);
+    expect(ids).toContain(seeded.featureObservationId);
+    expect(ids).toContain(seeded.rollupId);
+    expect(ids).toContain(seeded.manualId);
+  });
+
+  it('old searchMemories API finds a literal underscore term across the whole project', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-legacy`;
+    const keyword = `legacy_${randomUUID().slice(0, 8)}`;
+    const seeded = await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+    for (let i = 0; i < 30; i++) {
+      await saveMemory(db, {
+        projectId,
+        type: 'session',
+        summary: `filler rollup ${i} legacyXnope`, // `_` 若沒跳脫會當萬用字元吃到這些
+        keywords: ['filler'],
+        writerHost: 'v05-search-test',
+      });
+    }
+
+    const envelope = await searchMemories(db, { query: keyword, projectId, mode: 'keyword', limit: 10 });
+    const results = envelope.results;
+    const ids = results.map((r) => r.id);
+    expect(ids).toContain(seeded.manualId);
+    expect(ids).toContain(seeded.rollupId);
+    expect(ids).toHaveLength(2);
+    expect(results[0]).not.toHaveProperty('keywordHits');
+  });
+
+  it('keyword mode escapes LIKE wildcards in the query', async () => {
+    const projectId = `${V05_SEARCH_PREFIX}-escape`;
+    const keyword = `esc-${randomUUID()}`;
+    await seedMixedSearchCorpus(db, sql, { projectId, keyword });
+
+    const envelope = await searchMemoryIndexes(db, {
+      query: '%',
+      projectId,
+      mode: 'keyword',
+      limit: 10,
+    });
+    expect(envelope.results).toHaveLength(0);
+  });
+
   it('returns 1-based rankPositions with one entry per index result', async () => {
     const projectId = `${V05_SEARCH_PREFIX}-rank`;
     const keyword = `rank-${randomUUID()}`;
@@ -1050,11 +1163,15 @@ describe('searchMemories envelope shape (unit)', () => {
     vi.mocked(embedding.isEmbeddingEnabled).mockReturnValue(false);
     vi.mocked(embedding.generateQueryEmbedding).mockResolvedValue(null);
 
+    // 2026-10-23 起 keyword 路徑是「子查詢排序 id → join 回原表」：鏈上多了 offset／as／innerJoin，
+    // 子查詢別名的欄位用 Proxy 回 sql.raw，讓 drizzle 的 sql 模板能嵌進去；最後一段沒有 limit，靠 then 收。
+    const subAlias = new Proxy({}, { get: (_t, k) => sql.raw(String(k)) });
+    const tail = { limit: mockLimit, then: (res: (v: unknown) => void) => res(mockMemories) };
     mockSelect.mockReturnValue({ from: mockFrom });
-    mockFrom.mockReturnValue({ where: mockWhere });
-    mockWhere.mockReturnValue({ orderBy: mockOrderBy });
-    mockOrderBy.mockReturnValue({ limit: mockLimit });
-    mockLimit.mockResolvedValue(mockMemories);
+    mockFrom.mockReturnValue({ where: mockWhere, innerJoin: () => ({ orderBy: mockOrderBy }) });
+    mockWhere.mockReturnValue({ orderBy: mockOrderBy, offset: () => ({ as: () => subAlias }) });
+    mockOrderBy.mockReturnValue(tail);
+    mockLimit.mockReturnValue({ as: () => subAlias, then: (res: (v: unknown) => void) => res(mockMemories) });
   });
 
   it('requested hybrid + embedding disabled → effectiveMode=keyword, scores=null', async () => {
