@@ -109,6 +109,22 @@ describe('orderSessionsForTick', () => {
     expect(paths(quietHeld).sort()).toEqual(['/s/b/1.jsonl', '/s/d/1.jsonl', '/s/e/1.jsonl']);
     expect(paths(ordered)).toEqual(['/s/a/1.jsonl', '/s/c/1.jsonl']);
   });
+
+  // 2026-10-25：有結束記號（/session-close）的 spool 原本被改成 mtime=0 → 落到 stale 層，
+  // 而每輪只處理 4 個 session、fresh 層永遠超過 4 個 → 永遠輪不到（正式環境 4 個卡 2 天）。
+  it('puts explicitly closed sessions first, bypassing the quiet hold, without advancing the cursor', () => {
+    const closed = new Set(['/s/c/1.jsonl', '/s/e/1.jsonl']); // c 是 200h 前的舊檔，e 還在 quiet 期
+    const { ordered, freshPaths, quietHeld } = orderSessionsForTick(
+      list, '/s/a/1.jsonl', NOW, 72 * HOUR, 2 * HOUR, closed,
+    );
+    expect(paths(ordered)).toEqual([
+      '/s/e/1.jsonl', '/s/c/1.jsonl', // closed 層：新到舊、不受 quiet 影響
+      '/s/b/1.jsonl', // fresh（d 仍在 quiet）
+      '/s/a/1.jsonl', // stale
+    ]);
+    expect(paths(quietHeld)).toEqual(['/s/d/1.jsonl']);
+    expect(freshPaths.has('/s/c/1.jsonl')).toBe(true); // closed 不推進 round-robin cursor
+  });
 });
 
 describe('captureQuietPeriodMs', () => {

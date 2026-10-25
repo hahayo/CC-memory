@@ -2036,11 +2036,19 @@ export function orderSessionsForTick(
   nowMs: number,
   freshWindowMs: number,
   quietPeriodMs = 0,
+  closedPaths: ReadonlySet<string> = new Set(),
 ): { ordered: SpoolSession[]; freshPaths: Set<string>; quietHeld: SpoolSession[] } {
+  const closed: SpoolSession[] = [];
   const fresh: SpoolSession[] = [];
   const stale: SpoolSession[] = [];
   const quietHeld: SpoolSession[] = [];
   for (const session of sessions) {
+    // 明確結束（/session-close）：排最前、不受 quiet hold 影響。已抽完的 spool 在 worker 迴圈計數前就會跳過，
+    // 不會佔每輪的 session 名額。
+    if (closedPaths.has(session.path)) {
+      closed.push(session);
+      continue;
+    }
     // quiet period：mtime 太新（含時鐘跳動造成的未來 mtime）＝還在聊，本 tick 整個略過；
     // 不動 cursor，等它安靜下來自然落入 fresh 層。
     if (quietPeriodMs > 0 && nowMs - session.mtimeMs < quietPeriodMs) {
@@ -2050,10 +2058,13 @@ export function orderSessionsForTick(
     if (freshWindowMs > 0 && nowMs - session.mtimeMs <= freshWindowMs) fresh.push(session);
     else stale.push(session);
   }
-  fresh.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+  const newestFirst = (a: SpoolSession, b: SpoolSession): number => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path);
+  fresh.sort(newestFirst);
+  closed.sort(newestFirst);
   return {
-    ordered: [...fresh, ...rotateSessionsAfterCursor(stale, cursorPath)],
-    freshPaths: new Set(fresh.map((s) => s.path)),
+    ordered: [...closed, ...fresh, ...rotateSessionsAfterCursor(stale, cursorPath)],
+    // closed 與 fresh 都不推進 round-robin cursor（cursor 只在 stale 層輪流）
+    freshPaths: new Set([...closed, ...fresh].map((s) => s.path)),
     quietHeld,
   };
 }
@@ -2149,13 +2160,12 @@ export async function runCaptureWorkerOnce(
   if (rawSessions.length === 0) return result;
   await archiveLegacySidecars(root, getNowMs());
   const cursor = await loadTickCursor(root);
-  // Explicit close requests bypass extraction quiet hold so their pending bytes can catch up.
+  // Explicit close requests go first and bypass the quiet hold so their pending bytes can catch up.
+  // （原本改 mtime=0 會掉到 stale 層，每輪 session 上限一到就永遠輪不到。）
   const closePaths = new Set<string>();
   for (const spool of rawSessions) if (await hasCloseMarker(spool.path)) closePaths.add(spool.path);
-  const schedulingSessions = rawSessions.map(spool => closePaths.has(spool.path)
-    ? { ...spool, mtimeMs: 0 } : spool);
   const { ordered: sessions, freshPaths, quietHeld } = orderSessionsForTick(
-    schedulingSessions, cursor, getNowMs(), captureFreshWindowMs(env), captureQuietPeriodMs(env),
+    rawSessions, cursor, getNowMs(), captureFreshWindowMs(env), captureQuietPeriodMs(env), closePaths,
   );
   if (quietHeld.length > 0) {
     stdout.write(`[cc-memory] auto-capture info: quiet-held=${quietHeld.length}\n`);
