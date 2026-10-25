@@ -17,22 +17,8 @@ const MIN_PRIOR_LENGTH = 200;
  */
 const DEGRADATION_RATIO = 0.4;
 
-/**
- * Determine whether `nextSummary` is a degraded replacement for `priorSummary`.
- *
- * Returns `true` when:
- *  1. `priorSummary` exists and its effective length is at least {@link MIN_PRIOR_LENGTH} characters, AND
- *  2. `nextSummary` length is strictly less than {@link DEGRADATION_RATIO} of the effective prior length.
- *
- * When `maxSummaryLength` is provided, the prior summary length is clamped to
- * that value before the ratio comparison.  This prevents an oversized prior
- * (which can exceed the schema limit if it was written before validation was
- * added) from permanently blocking any spec-compliant replacement.
- *
- * Pure function, safe to call from any context.
- */
 /** 中日韓文字與全形標點：同樣內容的字數約是英文的 1/3，算長度時每字計 {@link CJK_CHAR_WEIGHT}。 */
-const CJK_CHAR = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/gu;
+const CJK_CHAR = /[\u3000-\u303f\u3040-\u30ff\u3100-\u312f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/gu;
 const CJK_CHAR_WEIGHT = 2;
 
 /**
@@ -45,6 +31,22 @@ export function summaryContentLength(text: string): number {
   return text.length + cjk * (CJK_CHAR_WEIGHT - 1);
 }
 
+/**
+ * Determine whether `nextSummary` is a degraded replacement for `priorSummary`.
+ *
+ * Lengths are content lengths ({@link summaryContentLength}): CJK characters count double.
+ *
+ * Returns `true` when:
+ *  1. `priorSummary` exists and its effective length is at least {@link MIN_PRIOR_LENGTH} characters, AND
+ *  2. `nextSummary` length is strictly less than {@link DEGRADATION_RATIO} of the effective prior length.
+ *
+ * When `maxSummaryLength` is provided, the prior summary length is clamped to
+ * that value before the ratio comparison.  This prevents an oversized prior
+ * (which can exceed the schema limit if it was written before validation was
+ * added) from permanently blocking any spec-compliant replacement.
+ *
+ * Pure function, safe to call from any context.
+ */
 export function isSummaryDegraded(
   priorSummary: string | null | undefined,
   nextSummary: string,
@@ -53,8 +55,9 @@ export function isSummaryDegraded(
   if (!priorSummary) return false;
   const priorLength = summaryContentLength(priorSummary);
   if (priorLength < MIN_PRIOR_LENGTH) return false;
+  // 上限是字元數：先截字串再算加權長度，單位才一致（PR #53 複審）
   const effectiveLength = maxSummaryLength !== undefined
-    ? Math.min(priorLength, maxSummaryLength)
+    ? summaryContentLength(priorSummary.slice(0, maxSummaryLength))
     : priorLength;
   if (effectiveLength < MIN_PRIOR_LENGTH) return false;
   return summaryContentLength(nextSummary) < effectiveLength * DEGRADATION_RATIO;

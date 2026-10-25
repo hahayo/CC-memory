@@ -15,6 +15,15 @@ describe('isSummaryDegraded', () => {
     expect(isSummaryDegraded(prior, next)).toBe(false);
   });
 
+  // 上限截斷要先截字串再算加權長度，否則中文長摘要的門檻會被鎖在固定字數（PR #53 複審）
+  it('keeps the 40% rule for long Chinese priors when maxSummaryLength is given', () => {
+    const prior = '累積摘要內容'.repeat(250); // 1500 字
+    const next = '縮水摘要'.repeat(75); // 300 字，20%
+    expect(isSummaryDegraded(prior, next, 1500)).toBe(true);
+    expect(isSummaryDegraded('累積摘要內容'.repeat(134), '縮水摘要'.repeat(75), 1500)).toBe(true); // 804 字 → 300 字，37%
+    expect(isSummaryDegraded(prior, '完整改寫'.repeat(160), 1500)).toBe(false); // 640 字，43%
+  });
+
   it('still flags a genuinely short Chinese replacement of a long English prior', () => {
     const prior = 'Detailed summary about the session including root cause analysis, decisions made, and next steps. '.repeat(5);
     const next = '只寫了最後一步。';
