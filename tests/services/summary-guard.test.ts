@@ -6,6 +6,21 @@ import { describe, expect, it } from 'vitest';
 import { isSummaryDegraded, mergeGuardPending } from '../../src/services/summary-guard.js';
 
 describe('isSummaryDegraded', () => {
+  // 2026-10-25：抽取改用對話語言後，英文舊摘要會被改寫成中文；同內容中文字數約英文的 1/3，
+  // 不能被當成退化（PR #53 審查 F2）
+  it('does not flag a same-content Traditional Chinese rewrite of an English prior as degraded', () => {
+    const prior = 'The main suspect for the form outage is a database write spike; the registration drift theory was ruled out. '.repeat(4);
+    const next = '表單故障的主嫌是資料庫寫入尖峰，註冊漂移的說法已被排除。'.repeat(4);
+    expect(next.length).toBeLessThan(prior.length * 0.4); // 原始字數已低於門檻
+    expect(isSummaryDegraded(prior, next)).toBe(false);
+  });
+
+  it('still flags a genuinely short Chinese replacement of a long English prior', () => {
+    const prior = 'Detailed summary about the session including root cause analysis, decisions made, and next steps. '.repeat(5);
+    const next = '只寫了最後一步。';
+    expect(isSummaryDegraded(prior, next)).toBe(true);
+  });
+
   it('returns false when there is no prior summary (first window)', () => {
     expect(isSummaryDegraded(null, 'New session summary about the feature.')).toBe(false);
   });

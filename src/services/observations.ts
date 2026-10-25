@@ -392,7 +392,8 @@ export async function semanticObservationIndexCandidates(
     .limit(limit)) as Array<Observation & { similarity: number }>;
 
   return rows.map(({ similarity: score, ...row }) => ({
-    result: observationIndexResult(row as Observation),
+    // 與 keyword 路徑一致：沒撈的向量明確給 null（PR #53 審查 F3）
+    result: observationIndexResult({ ...row, embedding: null } as Observation),
     baseScore: score,
     semanticScore: score,
     sourceOrder: row.type === 'decision' ? 2 : 3,

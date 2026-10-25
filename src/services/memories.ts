@@ -418,7 +418,8 @@ async function semanticSearchScoredWithEmbedding(
 
   return rows.map((r) => {
     const { similarity: s, ...row } = r;
-    return { row: row as Memory, score: s };
+    // 與 keyword 路徑一致：沒撈的向量明確給 null，不留 undefined（PR #53 審查 F3）
+    return { row: { ...row, embedding: null } as Memory, score: s };
   });
 }
 

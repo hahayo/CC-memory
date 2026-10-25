@@ -31,17 +31,33 @@ const DEGRADATION_RATIO = 0.4;
  *
  * Pure function, safe to call from any context.
  */
+/** 中日韓文字與全形標點：同樣內容的字數約是英文的 1/3，算長度時每字計 {@link CJK_CHAR_WEIGHT}。 */
+const CJK_CHAR = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/gu;
+const CJK_CHAR_WEIGHT = 2;
+
+/**
+ * 摘要的「內容長度」：中日韓字元加權，其他字元計 1。
+ * 抽取改成照對話語言寫之後，英文舊摘要會被改寫成中文；用原始字數比會把同內容的中文改寫誤判成退化
+ * （PR #53 審查 F2）。
+ */
+export function summaryContentLength(text: string): number {
+  const cjk = text.match(CJK_CHAR)?.length ?? 0;
+  return text.length + cjk * (CJK_CHAR_WEIGHT - 1);
+}
+
 export function isSummaryDegraded(
   priorSummary: string | null | undefined,
   nextSummary: string,
   maxSummaryLength?: number,
 ): boolean {
-  if (!priorSummary || priorSummary.length < MIN_PRIOR_LENGTH) return false;
+  if (!priorSummary) return false;
+  const priorLength = summaryContentLength(priorSummary);
+  if (priorLength < MIN_PRIOR_LENGTH) return false;
   const effectiveLength = maxSummaryLength !== undefined
-    ? Math.min(priorSummary.length, maxSummaryLength)
-    : priorSummary.length;
+    ? Math.min(priorLength, maxSummaryLength)
+    : priorLength;
   if (effectiveLength < MIN_PRIOR_LENGTH) return false;
-  return nextSummary.length < effectiveLength * DEGRADATION_RATIO;
+  return summaryContentLength(nextSummary) < effectiveLength * DEGRADATION_RATIO;
 }
 
 export interface GuardPendingSummary {
