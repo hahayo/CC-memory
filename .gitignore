@@ -42,3 +42,6 @@ tests/tmp-migrations/
 
 # 正式環境 benchmark（基準測試）報告含真實 query（查詢）／memory title（記憶標題），只保留本機證據
 docs/auto-capture-v0.5/benchmark-[0-9]*.md
+
+# recall-exam 固定題庫含各專案內部內容，放 ~/.cache/cc-memory/recall-exam/
+scripts/recall-exam/fixed-set.json
