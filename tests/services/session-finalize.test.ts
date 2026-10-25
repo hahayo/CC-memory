@@ -236,3 +236,49 @@ it('lets uncaptured transcript tail and deleted transcripts age into quiet time 
     await run(Date.now()); expect(called).toEqual(['deleted', 'tail']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// 2026-10-25：spool 還沒被採集過時沒有 capture-state.json，讀檔丟例外被記成 failed，
+// 同一批標記每輪重報（實測每輪 failed=4、unit 每輪 exit 1）。應視為「還沒準備好」略過並保留標記。
+it('treats a missing capture-state file as not ready instead of failing every tick', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-nostate-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    for (const id of ['nostate', 'ready']) {
+      const spool = join(dir, `${id}.jsonl`);
+      await writeFile(spool, ''); await writeFile(`${spool}.close`, '');
+      if (id === 'ready') {
+        await writeFile(spool.replace('.jsonl', '.capture-state.json'), JSON.stringify({
+          version: 2, projectId: 'project', spool: { cursor: 0 }, transcripts: {}, retries: {},
+        }));
+      }
+      await enrollFinalization(spool, 'project', id);
+    }
+    const { access } = await import('node:fs/promises');
+    const called: string[] = []; const reported: string[] = [];
+    await runFinalizers({ root, env: {}, nowMs: Date.now, hasBudget: () => true,
+      acquireLock: async () => async () => {}, report: (s) => reported.push(s),
+      finalize: async ({ sessionId }) => {
+        called.push(sessionId); return { attempted: true, status: 'finalized' };
+      } });
+    expect(called).toEqual(['ready']);
+    // 不算失敗，但要留一個看得見的訊號：沒有狀態檔可能是排程餓死，不能完全無聲（PR #55 審查）
+    expect(reported).toEqual(['waiting', 'finalized']);
+    await expect(access(join(dir, 'nostate.jsonl.finalize.json'))).resolves.toBeUndefined();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it('still reports failed when the capture-state file exists but is corrupt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-badstate-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    const spool = join(dir, 'bad.jsonl');
+    await writeFile(spool, ''); await writeFile(`${spool}.close`, '');
+    await writeFile(spool.replace('.jsonl', '.capture-state.json'), 'not json');
+    await enrollFinalization(spool, 'project', 'bad');
+    const reported: string[] = [];
+    await runFinalizers({ root, env: {}, nowMs: Date.now, hasBudget: () => true,
+      acquireLock: async () => async () => {}, report: (s) => reported.push(s),
+      finalize: async () => ({ attempted: true, status: 'finalized' }) });
+    expect(reported).toEqual(['failed']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
