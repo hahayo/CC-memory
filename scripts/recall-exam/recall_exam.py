@@ -57,7 +57,7 @@ ASK_PROMPT = """任務：讀一份 Claude Code 原始對話檔（JSONL），出�
 
 ANSWER_PROMPT = """你是記憶檢索作答者。你只能用現在可用的工具查「記憶系統」，不能猜、不能讀檔案。
 最多查 {max_queries} 次。查不到就老實說查不到，不要編。
-這題的事發生在專案 `{project}`。工具若有專案篩選參數（例如 project_id），值就填 `{project}`，不要猜路徑；
+這題的事發生在專案 `{project}`。工具若有專案篩選參數（可能叫 project 或 project_id），值就填 `{project}`，不要猜路徑；
 先在這個專案範圍內查，查不到再放寬到不限專案。
 
 問題：{question}
@@ -124,7 +124,8 @@ def make_questions(samples: list[dict[str, Any]], run_dir: Path) -> list[dict[st
             print(f'[ask] {s["session_id"][:8]} 出題失敗（cost={run.cost_usd:.2f}）', file=sys.stderr, flush=True)
             continue
         out.append({'id': f'R-{s["session_id"][:8]}', 'source': 'rolling', 'session_id': s['session_id'],
-                    'project': s['project'], 'transcript': s['transcript'], 'question': obj['question'],
+                    'project': s['project'], 'cm_project': s.get('cm_project'), 'transcript': s['transcript'],
+                    'question': obj['question'],
                     'gold': obj['gold'], 'evidence': obj.get('evidence', ''),
                     'gold_confidence': obj.get('gold_confidence', '?'), 'overturned': obj.get('overturned', ''),
                     'ask_cost_usd': run.cost_usd})
@@ -137,8 +138,10 @@ def answer_all(questions: list[dict[str, Any]], run_dir: Path, mcp: dict[str, Pa
     for q in questions:
         rec: dict[str, Any] = {'id': q['id'], 'answers': {}}
         for system in lib.SYSTEMS:
+            # 固定題兩邊專案名已逐題比對一致；rolling 題 claude-mem 用它自己記的專案名（PR #52 審查 F4）
+            project = (q.get('cm_project') if system == 'claude-mem' else None) or q.get('project') or '未知'
             run = lib.run_claude(ANSWER_PROMPT.format(max_queries=MAX_QUERIES, question=q['question'],
-                                                      project=q.get('project') or '未知'),
+                                                      project=project),
                                  model=ANSWER_MODEL, cwd=run_dir, mcp_config=mcp[system], tools='',
                                  allowed='mcp__*', budget_usd=ANSWER_BUDGET)
             rec['answers'][system] = {'text': run.result, 'cost_usd': run.cost_usd, 'turns': run.turns,

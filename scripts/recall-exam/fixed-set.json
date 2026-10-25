@@ -95,7 +95,7 @@
    "project": "AI_Teacher",
    "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-AI-Teacher/24fc65ed-faf6-457e-9ff3-720aad658087.jsonl",
    "question": "AI_Teacher 專案：n8n 表單（form trigger）提交後資料遺失／不穩定，最後的主要嫌疑是什麼？中途哪個診斷被推翻？關鍵字：n8n、form trigger、webhook、Postgres、checkpoint、寫入尖峰。",
-   "gold": "- 中途診斷「webhook 註冊漂移（註冊消失）」已被 GET 實測推翻：webhook 沒註冊時連表單頁都開不出來，使用者當時能開、能送，代表註冊是在的。\n- 之後主嫌轉向：form trigger「先回應、後寫入」，加上 Postgres checkpoint 36–49 秒的寫入尖峰，提交顯示成功但 execution 沒建立。\n- 這是主要假設、不是定案：對話結束時根因仍未確認，還在收集 runtime 證據。",
+   "gold": "- 中途診斷「webhook 註冊漂移（註冊消失）」已被 GET 實測推翻：webhook 沒註冊時連表單頁都開不出來，使用者當時能開、能送，代表註冊是在的。\n- 之後主嫌轉向：form trigger「先回應、後寫入」，加上 Postgres checkpoint 31–49 秒的寫入尖峰（最慢 49.2 秒），提交顯示成功但 execution 沒建立。\n- 這是主要假設、不是定案：對話結束時根因仍未確認，還在收集 runtime 證據。",
    "evidence": "transcript 24fc65ed… 2026-08-16T06:41 與 07:12 兩則助手回覆（2026-10-25 逐字核對）",
    "gold_confidence": "高",
    "origin": "2026-10-25 依 transcript 逐字核對改寫（原版寫成「最後定案」，與對話結尾的未定案狀態不符）"

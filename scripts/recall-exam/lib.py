@@ -209,7 +209,8 @@ def sample_pool(days: int, n: int, *, cc_min_obs: int = 15, cm_min_obs: int = 5,
         for p in projects:
             if by_project[p] and len(picked) < n:
                 sid = by_project[p].pop()
-                picked.append({'session_id': sid, 'project': p, 'cc_obs': cc[sid]['obs'],
+                # 兩套系統的專案命名規則不同（cc-memory 讀 CLAUDE.md 標記、claude-mem 用目錄名），各帶自己的
+                picked.append({'session_id': sid, 'project': p, 'cm_project': cm[sid]['project'], 'cc_obs': cc[sid]['obs'],
                                'cm_obs': cm[sid]['obs'], 'transcript': str(transcript_path(sid))})
     return picked, counts
 
