@@ -400,7 +400,7 @@ async function semanticSearchScoredWithEmbedding(
       keywords: projectMemories.keywords,
       decisions: projectMemories.decisions,
       nextSteps: projectMemories.nextSteps,
-      embedding: projectMemories.embedding,
+      // 不撈 embedding：向量很大、搜尋結果用不到（與 keyword 路徑的 omitEmbedding 同理）
       status: projectMemories.status,
       mergedInto: projectMemories.mergedInto,
       idempotencyKey: projectMemories.idempotencyKey,

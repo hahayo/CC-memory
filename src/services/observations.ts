@@ -374,7 +374,7 @@ export async function semanticObservationIndexCandidates(
       concepts: observations.concepts,
       files: observations.files,
       narrative: observations.narrative,
-      embedding: observations.embedding,
+      // 不撈 embedding：1536 維向量經 SSH tunnel 傳回是 hybrid 13–20 秒的主因，索引結果用不到
       discoveryTokens: observations.discoveryTokens,
       sourceHook: observations.sourceHook,
       contentHash: observations.contentHash,
