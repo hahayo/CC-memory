@@ -460,6 +460,9 @@ describe('claude-cli extraction subprocess contract', () => {
     expect(systemPrompt).toContain(
       'Allowed observation type values: decision, bugfix, feature, refactor, discovery, change.'
     );
+    // 2026-10-25 盲測：中文人名被轉成拼音（游宗霖→You Zong-lin／Yu Tsung-lin），用中文查不到
+    expect(systemPrompt).toContain('Never translate or transliterate person names');
+    expect(systemPrompt).toContain('same language as the transcript');
     expect(systemPrompt).toContain('at most 8 observations');
     expect(systemPrompt).toContain('Merge closely related events');
     expect(systemPrompt).not.toContain(transcript);
