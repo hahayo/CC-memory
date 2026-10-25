@@ -1,0 +1,104 @@
+{
+ "note": "固定回歸題。Q1–Q8 來自 2026-09-19 盲測；這些 session 早於 2026-10-21 session-finalize 上線且未回溯收尾，測的是搜尋／抽取品質。Q3 標準答案把握度中高、Q10 中。Q9/Q11 無 transcript 路徑紀錄，未收。",
+ "questions": [
+  {
+   "id": "Q1",
+   "session_id": "42dbab5b-132f-49c7-bad0-11693c2fb8e7",
+   "project": "gov-recycle-ai",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-gov-recycle-ai/42dbab5b-132f-49c7-bad0-11693c2fb8e7.jsonl",
+   "question": "gov-recycle-ai 專案：沒偵測到人（person-gate）、或偵測器失敗（detector failure）時，照片保留（photo retention）規則怎麼定的？關鍵字：person-gate、detector、retention、保留、FR-C-003、FR-C-062。",
+   "gold": "標準答案：\n- 「人像/不當內容照片」前置判定（012 FR-C-003、FR-C-062）：命中即短路，不進模型辨識、不落地保存、不進任何池。\n- 9/3～9/4 翻案（決策卡 DEC-20260903T012500Z）：改為「含人照樣辨識回答，但一律不留存、不進訓練池」，功能開關 `RECOG_PERSON_ANSWER_NO_RETAIN` 預設開。\n- 關鍵：**偵測器失敗時的保留規則**——Codex 審 PR #171 抓到 bug：人像偵測器已回傳 True（已確認有人）後，若下一個偵測器（色情內容偵測）拋出例外，管線會把已確認的 has_person 結果丟失、產生 has_person=False 的占位訊號，導致照片被誤保存。落修後改為：兩個偵測器各自 try/except，**只要有一個偵測器已回報 True 就保留該狀態**（不會被後面偵測器的例外覆蓋掉），兩邊都失敗才往上拋例外；也就是「detector failure 不得清掉已確認的『有人／不當內容』訊號，寧可誤判有人（不保存）也不誤判無人（保存）」——fail-closed（失效時偏向不保存）。\n- migration 同時把 `collection_unlock.first_photo_ref` 改 nullable，downgrade 路徑也做成 fail-closed。\n出處：line 1783（Codex REVISE finding 2，含重現指令與輸出）、line 1838（fix171 agent 回報落修內容：「person=True 已確認後 NSFW 拋例外 → has_person 保留 True」）、line 1486（決策卡 body：FR-C-003/FR-C-062 原始定義＋翻案內容）。\n把握度：高（有 Codex 重現實驗與落修 commit 2aa4288c 佐證，非推測）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（有 Codex 重現實驗與落修 commit 2aa4288c 佐證，非推測）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q2",
+   "session_id": "22ad5b26-5576-4ed6-b688-2891bbfd38f7",
+   "project": "CC_project",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project/22ad5b26-5576-4ed6-b688-2891bbfd38f7.jsonl",
+   "question": "transcribe-relay 的整體架構是什麼？n8n、Hermes 各做什麼？檔案存哪？關鍵字：transcribe-relay、n8n、Hermes、webhook、Drive、rclone、Sheets。",
+   "gold": "標準答案（以最後定案 line 1077 為準，早期草案 line 291/428 已被取代）：\n- Repo：`~/CC_project/transcribe-relay`（專案地圖編號 68）。\n- 流程：使用者透過 n8n 表單上傳音檔（email＋檔名＋音檔）→ n8n 存進 Google Drive「逐字稿收件」資料夾、Google Sheet 記一筆 job、Gmail 回「已收到」→ n8n 用 HTTP POST 把 job_id 與 base64url 編碼 payload 打到 **Hermes** 內建 webhook（不是 Telegram/LINE bot，因為 bot 收不到另一個 bot 的訊息）→ Hermes 新 profile `transcribe`（systemd 常駐，經既有 cloudflared 隧道對外網址 `transcribe.hahauccu.com`）收到後只跑固定腳本 `bin/relay.sh`：用 rclone 拉檔、跑 whisper（Windows GPU）產生逐字稿＋`--json`、跑分說話者（diarize，WSL）→ rclone 把結果傳回 Drive「逐字稿完成」子夾 → relay.sh 回呼 n8n 第二條 workflow → n8n 從 Drive 抓結果、用 Gmail 附件寄給提交者（附件名＝表單填的檔名）。第三條 workflow 每日清檔（完成 7 天後刪 Drive 錄音）。\n- Hermes 定位：只當「收 webhook、跑一支腳本、回報」的執行者，不讓 LLM 自由推理（省 token、避免偏離），每個 job 用 flock 序列處理。寄信留在 n8n（Gmail 憑證在 n8n，Hermes 不碰信箱權限）。\n- 安全修補：表單 email／檔名原本原樣進 Hermes 要跑的 bash 指令＝RCE 漏洞，已修成指令列只帶 job_id＋base64url payload，relay.sh 先驗格式再解碼。\n出處：line 1077（最終完工報告，含架構全文與驗證證據）。\n把握度：高（最終定案＋已驗證上線，不是早期草案）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（最終定案＋已驗證上線，不是早期草案）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q3",
+   "session_id": "873dcd2a-ffa5-4a18-b2fd-a9ed8f5737a9",
+   "project": "AI_Copilot",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-AI-Copilot/873dcd2a-ffa5-4a18-b2fd-a9ed8f5737a9.jsonl",
+   "question": "AI_Copilot 專案：用瀏覽器填公司 BPM「人員增補」表單時，填好的資料為什麼會被清空／遺失？根本原因是什麼？關鍵字：BPM、增補、iframe、頁籤、清空、遺失、逾時、事件、change、model。",
+   "gold": "標準答案（根本原因隨對話演進，以最後一次技術發現 line 1507 為準，但 line 1028 的實驗結果同樣是被確認的事實、非推測）：\n- line 1028 決定性實驗：**連真人鍵盤輸入都留不住**——手動打字進欄位、切頁籤再切回，欄位變空。證實這不是自動化工具的問題，是「這張 BPM 表單本身在切換頁籤（分頁）時，會捨棄尚未存檔（存草稿）的內容」。\n- line 845：表單框架有 `saveTempAppForm`（暫存到記憶體）與 `saveDraft`（存到伺服器）兩種存檔機制；切頁籤前若未觸發存檔，資料就遺失。\n- line 1206 初判：切頁籤動作會彈出瀏覽器對話框（疑似「未儲存資料要不要放棄」），凍結整個分頁 JS，若手動按掉且選了放棄，等於同意丟棄未存檔資料。\n- line 1507（最後定案，推翻 1206 的部分判斷）：這個凍結對話框**不是**網頁程式呼叫的 `confirm()`（程式攔截 alert/confirm/prompt 也攔不住），而是瀏覽器原生的「離開此頁？」提示（`beforeunload`），自動化工具完全無法程式化處理，必須真人手動點掉。\n- 結論（根本原因）：BPM 表單的頁籤切換會觸發瀏覽器原生 beforeunload 提示且清空未存檔的表單狀態；正確流程是**填完一頁必須先按「儲存草稿」，系統跳出「請輸入流程草稿主旨」，填完存檔成功（畫面出現「刪除草稿」按鈕）後才能切頁籤**，否則不論是自動化填寫還是真人手動輸入，未存檔內容都會被清空。\n出處：line 1028（決定性鍵盤實驗結果）、line 1507（推翻程式化 confirm 假說、確認為原生 beforeunload）、line 1206（存草稿判準與正確流程）。\n把握度：中高——技術機制（beforeunload＋未存檔即遺失）證據紮實；但「按對話框哪個選項一定會丟資料」這點是 line 1206 的合理推論，非逐字確認的官方文件，故此細節標「推論」。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "中高——技術機制（beforeunload＋未存檔即遺失）證據紮實；但「按對話框哪個選項一定會丟資料」這點是 line 1206 的合理推論，非逐字確認的官方文件，故此細節標「推論」。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q4",
+   "session_id": "530f0cb6-a4c2-47ca-91d8-39708461500b",
+   "project": "CC-memory",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-CC-memory/530f0cb6-a4c2-47ca-91d8-39708461500b.jsonl",
+   "question": "CC-memory 專案：Step B 做完後剩下的 1,112 列，被分成哪幾類？（每類名稱／定義／筆數）關鍵字：1,112、1112、殘餘、residual、類 1、類別、category。",
+   "gold": "標準答案：Step B 殘餘 1,112 列（1,055 observations＋57 project_memories rollup），分 4 類：\n1. **需人工合併／已有 active rollup**：同一 session 在新 project id 底下已存在 active rollup，需先定義 capture metadata（observation_ids／transcript_sources／summarize_count／embedding）合併規則才能動。30 個 session：38 個 rollup＋747 筆 observations。\n2. **表內自撞**：同一 session 被舊 hook 拆在多個崩塌 id 下，若直接搬會撞 `project_memories_idempotency_idx`（唯一鍵衝突）。3 個 session：6 個 rollup＋96 筆 observations。\n3. **只有 encoded-dir 證據**：只能靠目錄名編碼判斷候選 project（不可逆），transcript 已刪，需人工核准候選 id（多數候選是 AI_Copilot）。7 個 session：8 個 rollup＋98 筆 observations（合計 106 列）。\n4. **transcript 已刪、目錄名對不到唯一真實路徑**：3 個 session（皆屬已刪除的 recycling-recognition-tender-pmo），5 個 rollup＋114 筆 observations（合計 119 列）。\n四類合計 38+96+8+5=147 個 rollup ＋ 747+96+98+114=1,055 個 observations，與 1,112 總數一致（1,690 列對照表中 578 列已在 Step B 執行更新，1,112 列為殘餘留人工裁決）。\n出處：line 66/223（四類定義與 session/rollup/obs 三層計數彙整）、line 101（reason 字串逐條計數，加總＝1,112，交叉驗證一致）。\n把握度：高（多處彙整數字互相印證，非單一來源推測）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（多處彙整數字互相印證，非單一來源推測）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q5",
+   "session_id": "6d472c65-1b49-4a2e-b1c9-671d2202d2ba",
+   "project": "CC-memory",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-CC-memory/6d472c65-1b49-4a2e-b1c9-671d2202d2ba.jsonl",
+   "question": "CC-memory 專案：auto-capture 的 project_id 崩塌（很多記憶被歸到錯的專案）根因是什麼、怎麼修的？關鍵字：project_id、崩塌、collapse、cwd、resolveProjectId、remap、T1、PR。",
+   "gold": "標準答案：\n- 根因：舊版 capture hook（2026-09-02 22:10 Asia/Taipei 前部署）把 cwd basename 去除非 ASCII 字元後當 project_id，大豐相關 repo 多為中文目錄名，去非 ASCII 後幾乎剝光只剩底線，導致不同中文專案全崩成同一組 id（`__`、`___`、`_raw` 等）；另 MCP server 端 resolveProjectId 第4層原本用 git-origin owner/repo 推導，跟 hook 邏輯不一致，也是一部分成因。\n- 修法分三層：PR #21 改兩支 capture hook 的解析順序（往上找 git 根目錄/CLAUDE.md marker 優先，project_id 保留原始中文字串，spool 目錄名改用可逆逐字元編碼 `_uXXXX`），只對 2026-09-02T22:10+0800 之後新紀錄有效；PR #22 讓 resolveProjectId 第4層改用 git 根目錄名對齊 hook 邏輯；PR #23（本 session，T1 Step A）修 worker 對「舊 backlog」（約 12,800 個帶崩塌 id 的舊 spool 檔）的邏輯——用記錄行 timestamp 判斷是否早於 cutoff，早於就改讀 transcript 開頭 256KiB 的第一個 cwd 重新推導正確 project_id，已 merge（vitest 1395 passed，Codex review 全採納）；PR #25 補一行 db-write-failed 診斷 log（附帶修復，非本體）。\n- 資料庫內既有已崩塌資料的重新歸屬（Step B，實際 UPDATE）在本 transcript 結束時**尚未完成**，被交棒給另一個接力 session，本檔看不到最終結果。\n出處：line 37（handoff 文件）、line 306（memory-ops-cutover.md §4.1）、line 1055（PR #23 body 草稿）、line 1993（PR #25）、line 2340（結尾交棒訊息）。\n把握度：高（root cause + PR #21/22/23 修法三處互相印證）；DB 層 Step B 完成與否把握度中（本檔看不到結果）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（root cause + PR #21/22/23 修法三處互相印證）；DB 層 Step B 完成與否把握度中（本檔看不到結果）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q6",
+   "session_id": "ba431c05-509f-426c-b7b5-cd7659acbf05",
+   "project": "marketing-pm-system",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-marketing-pm-system/ba431c05-509f-426c-b7b5-cd7659acbf05.jsonl",
+   "question": "marketing-pm-system 專案：任務「完成」的操作流程改了什麼？（UI 與 API 兩面）關鍵字：完成、checkbox、hotzone、熱區、TaskModal、KanbanBoard、/my-tasks、role_in_project、PUT /tasks。",
+   "gold": "標準答案：\nUI 面：\n- KanbanBoard 完成鈕 `<span onClick>` 改 `<button>`，圓圈 17px→22px、外包 30px 透明熱區，避免點偏誤觸卡片 onClick 跳出編輯視窗；補 aria-pressed/aria-label。\n- TaskModal 標題列新增「標示完成／取消完成」鈕，只送 status 欄位立即存檔不關視窗（原本要在表單中選狀態+捲到底儲存，共五步）。\n- MyWork（我的工作／/my-tasks 頁）原本無完成操作，補上同款完成鈕，完成後重抓清單（週期任務會產生下一期）。\n- 三入口都加送出中鎖定（in-flight lock），避免熱區放大後連點觸發週期任務重複產生下一期的既有已知問題。\nAPI 面：\n- `/my-tasks`（GET）多回傳 `pm.role_in_project`，前端據此對 client 角色隱藏完成鈕（因為 PUT /tasks/:taskId 權限本就限 owner/manager，systemAdmin 視同 owner）。\n- PUT /tasks/:taskId 權限邏輯本身沒改，只是前端改成只送 status 一個欄位（部分更新）。\n- 新增測試 tests/permissions.test.js：role_in_project 契約回歸、client 403、owner 200、未登入 401。\n- Codex 對審後追加修正（commit bd74b0b）：快捷完成與底部完整表單儲存的覆蓋衝突、覆蓋未存檔的實際完成日欄位等5項。\n- 已知未修：週期任務完成非冪等/非原子（雙分頁/雙人同時按可能各自產生重複下一期任務）——README 既有缺陷，本次只是提高觸發機率，Codex 建議先修，作者決定留給獨立票。\n出處：2026-08-28T05:46:44Z（line 97，初診）、line 496（README 已知問題）、2026-08-29T00:54:24Z line 520（本輪總結表格）、line 953（commit message a365e49）、2026-08-29T07:50:39Z line 1338（PR body 最終版，含 Codex 修正與已知限制）。\n把握度：高（三處說法一致遞增，PR body 為最終版本已採用）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（三處說法一致遞增，PR body 為最終版本已採用）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q7",
+   "session_id": "995ba2eb-1e59-43b3-a141-461cc19c1997",
+   "project": "POS",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-POS/995ba2eb-1e59-43b3-a141-461cc19c1997.jsonl",
+   "question": "POS 專案：訂單同步 ERP 的排程在正式環境多久跑一次？finishSoSync 實際更新哪些欄位？關鍵字：scheduler、cron、LinkAction、onDaily、finishSoSync、syncFlag、updTime、getSoUnSync。",
+   "gold": "標準答案：\n- 正式環境排程：`profiles/prod/spring/scheduler-link.xml` Quartz cron `0 0/10 1-22 * * ?`，即每天 01:00–22:00 間每 10 分鐘觸發一次 linkAction.onDaily()，concurrent=false（上輪未跑完不會同時啟動）。\n- 排除項：程式碼中被註解掉的 `0 0 2 * * ?`（每日凌晨2點）與 `0 0/5 9-19 * * ?`（9-19點每5分）是舊/非生效設定，不是目前正式排程。\n- finishSoSync 只更新 syncFlag 一個欄位；setUpdTime(new Date())、setUpdWho(\"erp\") 都被註解掉，updateOneByPk 也改成只帶 IncludeColumns(QSo.$.syncFlag)——代表 upd_time／upd_who 實際不會被寫入。\n- 姊妹方法 finishSaleOrder（處理 SP 單）同款寫法，也只更新 syncFlag，updTime/updWho 同樣被註解掉。\n- getSoUnSync／getSaleOrderModelUnSync 撈單條件為 syncFlag=NO 或 FAIL，失敗單會在下個10分鐘週期被重新撈出重試。\n出處：line 339（scheduler-link.xml tool_result，cronExpression 原文）、line 450（DafonLinkServiceImpl.java:1565-1572 finishSoSync 原始碼片段）、line 509（assistant 最終結論文字）、line 468（getSaleOrderModelUnSync 條件）。\n把握度：高（排程與欄位更新皆直接來自程式碼原文，前後結論一致）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（排程與欄位更新皆直接來自程式碼原文，前後結論一致）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q8",
+   "session_id": "ef827f91-0cd0-4dca-aa9b-a7080bb751e6",
+   "project": "CC_project",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project/ef827f91-0cd0-4dca-aa9b-a7080bb751e6.jsonl",
+   "question": "line-desktop-mcp 安全評估的結論／主要風險是什麼？關鍵字：line-desktop-mcp、安全、風險、結論、記憶體、DLL、加密、report。",
+   "gold": "標準答案：\n- 主結論：工具讓 AI 代理讀取 LINE Desktop 本機加密聊天資料庫並可透過 GUI 自動化送訊息；本身無直接對外網路連線（純 stdio），但聊天內容經 MCP 工具結果回傳給 AI 客戶端再送往其模型供應商；靠讀取 LINE.exe 程序記憶體取得資料庫解密金鑰，此行為必被 EDR（端點偵測與回應系統）標記。\n- 最高嚴重度風險：讀取 LINE.exe 記憶體取金鑰，屬 EDR 眼中的 credential dumping（憑證傾印）行為，證據為 line-schema-probe.py:306（PROCESS_VM_READ）。\n- 中等風險：send_message_auto 無程式碼層人工確認閘門（只是描述提示非強制）；LINE 訊息原文未過濾直接進 AI context（prompt injection 風險）；AutoHotkey 是 EDR 高關注工具；可能違反 LINE 服務條款遭停權；CHAT_LOG_ON=true 時明文聊天記錄會寫入 logs/（預設關閉）。\n- 低風險：Python 依賴未釘版本；AutoHotkey 字串跳脫不完整（影響有限）。\n- 建議方案：改用 LINE_MCP_EXTENSIONS=1 純資料庫讀取模式＋LINE_MCP_CUA_DRIVER（trycua/cua 固定雜湊執行檔）取代 AutoHotkey 送訊息，且不開 CHAT_LOG_ON；白名單建議精確到這兩條規則的檔案路徑而非泛用 AutoHotkey 直譯器。\n- 注意：transcript 中 assistant 曾自行發現並修正一處事實錯誤（extensions 模式是否仍需 AutoHotkey送訊息，答案為否，走 CUA driver），本答案採最終修正版本（對應磁碟上 docs/line-desktop-mcp資安評估報告_2026-09-18.md 最終版）。\n出處：報告檔第9-11行「## 1. 結論」、第68-79行「## 7. 風險表」、第87-103行「## 9. 建議使用模式」；transcript 2026-09-18T15:00Z（line 1195）修正記錄。\n把握度：高（結論取自最終落盤報告，且有明確修正記錄佐證此為定案版本）。",
+   "evidence": "見 gold 內「出處」",
+   "gold_confidence": "高（結論取自最終落盤報告，且有明確修正記錄佐證此為定案版本）。",
+   "origin": "2026-09-19 truth-a/truth-b sonnet agents 只讀 transcript 產出"
+  },
+  {
+   "id": "Q10",
+   "session_id": "24fc65ed-faf6-457e-9ff3-720aad658087",
+   "project": "AI_Teacher",
+   "transcript": "/home/haha/.claude/projects/-home-haha-CC-project-AI-Teacher/24fc65ed-faf6-457e-9ff3-720aad658087.jsonl",
+   "question": "AI_Teacher 專案：n8n 表單（form trigger）提交後資料遺失／不穩定的根本原因最後定案是什麼？中途哪個診斷被推翻？關鍵字：n8n、form trigger、webhook、Postgres、checkpoint、寫入尖峰。",
+   "gold": "- 最後定案：Postgres checkpoint 造成 36–49 秒的寫入尖峰，加上 form trigger「先回應、後寫入」的時序，導致提交看似成功但資料未落地。\n- 中途診斷「webhook 註冊漂移（註冊消失）」已被 GET 實測推翻，不是根因。",
+   "evidence": "memory recall-quality-improvements-2026-09.md §2026-09-20 14:00 Q10 拆解；未重新對照 transcript",
+   "gold_confidence": "中",
+   "origin": "2026-09-20 重測紀錄（memory），標準答案未經 transcript 逐字核對"
+  }
+ ]
+}
