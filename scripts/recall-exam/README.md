@@ -36,6 +36,7 @@ python3 scripts/recall-exam/recall_exam.py run --fixed-only
   測的是搜尋／抽取；要看收尾修了沒，看 rolling 題。
 - **隨機題**：近 N 天、兩邊都抓到（cc 觀察 ≥15、claude-mem 觀察 ≥5）、cc 已收尾（`metadata.capture.finalized_at`）、
   原始對話檔還在、沒考過；按專案分層抽。`--allow-unfinalized` 可放寬。
+  `--since <ISO 時間，要帶時區>` 只抽之後才開始的對話（看 claude-mem 記的 session 開始時間），用來只考某次改版後抓的資料；它不會超出 `--days` 的範圍。
 
 ## 判定
 

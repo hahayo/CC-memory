@@ -16,6 +16,7 @@ import random
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,7 +134,8 @@ def psql_rows(sql: str) -> list[list[str]]:
     proc = subprocess.run(['psql', dsn, '-At', '-F', '\t', '-c', sql], capture_output=True, text=True,
                           check=False, timeout=120)
     if proc.returncode != 0:
-        raise SystemExit(f'psql failed rc={proc.returncode}: {proc.stderr.strip()[:200]}')
+        # stderr 可能含 host／user，不印（PR #54 審查 F4）
+        raise SystemExit(f'psql failed rc={proc.returncode}')
     return [line.split('\t') for line in proc.stdout.splitlines() if line]
 
 
@@ -192,6 +194,8 @@ def sample_pool(days: int, n: int, *, cc_min_obs: int = 15, cm_min_obs: int = 5,
 
     since_ms：只收這個時間點之後才開始的對話（看 claude-mem 記的開始時間），用來只考某次改版後抓的資料。
     """
+    if since_ms is not None and since_ms < (time.time() - days * 86400) * 1000:
+        print(f'[pool] 警告：--since 早於 --days {days} 的範圍，實際只看近 {days} 天', file=sys.stderr)
     cc = cc_memory_sessions(days, cc_min_obs)
     cm = claude_mem_sessions(days, cm_min_obs)
     both = [s for s in cc if s in cm and (since_ms is None or cm[s]['started_ms'] >= since_ms)]
