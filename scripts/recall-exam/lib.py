@@ -1,8 +1,11 @@
 """recall-exam 共用工具：隔離的 claude -p 執行、兩套記憶系統的資料池、盲評遮罩。
 
-設計原則（2026-10-23，Codex 對審後定案）：
-- 作答者只拿得到「一套」記憶系統的 MCP 工具，沒有 Bash／Read；出題者只讀原始對話檔，沒有任何記憶工具。
-  出題者的 Bash 理論上仍能讀任何檔，這層只靠 prompt 約束，不是硬隔離。
+設計原則（2026-10-23，Codex 對審後定案；2026-10-25 資安修補）：
+- 原始對話檔是不可信資料（夾帶網頁、工具輸出，可能藏提示注入）。出題者沒有任何工具：
+  由 render_transcript() 先把 JSONL 轉成精簡純文字放進提示，模型讀不到其他檔、也不能執行指令。
+- 作答者只拿得到「一套」記憶系統的唯讀 MCP 工具（明確清單＋dontAsk 模式：清單外一律拒），沒有 Bash／Read。
+  claude-mem 的 smart_search／smart_outline／smart_unfold 能讀本機任意檔，明確封鎖。
+- 子程序的環境變數走白名單（child_env），不再整包繼承 os.environ，避免把 DB 連線字串、API key 帶進去。
 - 每次 claude -p 都帶 --setting-sources local、--no-session-persistence、CC_MEMORY_CAPTURE_CHILD=1，
   避免考試本身被 claude-mem／cc-memory 的 hooks 錄進去（已實測：sdk_sessions 與 spool 都不增加）。
 - 評分前把會洩漏系統身分的工具名遮掉，兩位評分者拿到的答案順序相反。
@@ -18,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +46,44 @@ LEAK_PATTERNS = [
     r'cc_reminders_due', r'rollup', r'spool', r'observation[s]?\b',
 ]
 
+# 子程序環境變數白名單：claude CLI 登入與執行需要的。其餘（DATABASE_URL、各種 API key／token）一律不傳。
+CHILD_ENV_NAMES = frozenset({
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LANGUAGE', 'SHELL', 'TERM', 'TMPDIR', 'TZ',
+    # 有代理或自簽憑證的網路才需要；不存在就不會傳
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+    'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    # claude 設定目錄若有改位置才需要；其他 CLAUDE_* 一律不傳——CLAUDE_CODE_PLUGIN_DIRS 會讓子程序載入外掛 hooks，
+    # CLAUDE_CODE_MESSAGING_* 是父 session 的訊息通道（PR #57 審查）
+    'CLAUDE_CONFIG_DIR',
+})
+# ANTHROPIC_* 要留：登入用，且 ANTHROPIC_DEFAULT_SONNET_MODEL 決定 --model sonnet 實際是哪個模型
+CHILD_ENV_PREFIXES = ('LC_', 'XDG_', 'ANTHROPIC_')
+
+# 作答者可用的 MCP 工具（明確清單）。server 名稱對應 write_mcp_configs 的 key。
+# cc-memory：tool-policy.ts WRITE_TOOLS 以外、project mode 會露出的唯讀工具（todoist 只在 forced personal 才有）。
+CC_MEMORY_READ_TOOLS = ('cc_memory_search', 'cc_memory_list', 'cc_memory_get', 'cc_memory_stats',
+                        'cc_memory_timeline', 'cc_memory_get_observations', 'cc_task_list', 'cc_task_stats')
+# claude-mem 10.5.2 mcp-server.cjs 露出 7 個工具：search／timeline 打 worker GET、get_observations 打
+# worker POST /api/observations/batch（皆唯讀）；__IMPORTANT 只回說明文字；smart_* 會 readFile 本機任意路徑。
+# __IMPORTANT 是靜態說明文字，描述寫「ALWAYS FOLLOW」，不給的話作答者會白白浪費一次被拒的呼叫
+CLAUDE_MEM_READ_TOOLS = ('__IMPORTANT', 'search', 'timeline', 'get_observations')
+CLAUDE_MEM_FILE_TOOLS = ('smart_search', 'smart_outline', 'smart_unfold')
+ANSWER_ALLOWED = {
+    'cc-memory': tuple(f'mcp__cc-memory__{t}' for t in CC_MEMORY_READ_TOOLS),
+    'claude-mem': tuple(f'mcp__mcp-search__{t}' for t in CLAUDE_MEM_READ_TOOLS),
+}
+ANSWER_DISALLOWED = {
+    'cc-memory': (),
+    'claude-mem': tuple(f'mcp__mcp-search__{t}' for t in CLAUDE_MEM_FILE_TOOLS),
+}
+
+# 出題用對話稿的長度上限。sonnet 上下文 200k token；中文約 1 字 1 token 以上，所以同時限字元數與估算 token。
+TRANSCRIPT_MAX_CHARS = 350_000
+TRANSCRIPT_MAX_EST_TOKENS = 120_000
+TRANSCRIPT_TOOL_RESULT_CHARS = 600
+TRANSCRIPT_TOOL_INPUT_CHARS = 300
+TRANSCRIPT_TEXT_CHARS = 8_000  # 單段 user／assistant 文字上限（防一段貼上的長 log 吃掉整份預算）
+
 
 @dataclass
 class ClaudeRun:
@@ -61,7 +103,13 @@ def claude_mem_plugin_root() -> Path:
 
 
 def write_mcp_configs(out_dir: Path) -> dict[str, Path]:
-    """產生兩套各只含一個 server 的 MCP 設定檔。cc-memory 走 CC_READ_ONLY=1（寫入工具不露出）。"""
+    """產生兩套各只含一個 server 的 MCP 設定檔。
+
+    cc-memory 走 CC_READ_ONLY=1＋CC_TOOL_ALLOWLIST（server 端兩層：清單外的工具不露出、呼叫也拒）。
+    claude-mem 沒有 server 端開關，只能靠 run_claude 的 --allowedTools／--disallowedTools＋dontAsk。
+    wrapper 只靠 PATH 找 cat／tr、其餘路徑寫死並從檔案讀連線字串；claude-mem server 靠 HOME 找 ~/.claude-mem 設定。
+    這裡的 env 會疊在 child_env() 白名單之上傳給 server。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     root = claude_mem_plugin_root()
     configs = {
@@ -69,7 +117,10 @@ def write_mcp_configs(out_dir: Path) -> dict[str, Path]:
             'type': 'stdio', 'command': str(root / 'scripts' / 'mcp-server.cjs'),
             'env': {'CLAUDE_PLUGIN_ROOT': str(root)}}}},
         'cc-memory': {'mcpServers': {'cc-memory': {
-            'type': 'stdio', 'command': str(CC_MEMORY_WRAPPER), 'env': {'CC_READ_ONLY': '1'}}}},
+            'type': 'stdio', 'command': str(CC_MEMORY_WRAPPER),
+            'env': {'CC_READ_ONLY': '1', 'CC_TOOL_ALLOWLIST': ','.join(CC_MEMORY_READ_TOOLS),
+                    # 考試不在正式庫留 search_feedback 紀錄
+                    'CC_SEARCH_FEEDBACK': 'off'}}}},
     }
     paths: dict[str, Path] = {}
     for name, cfg in configs.items():
@@ -79,15 +130,32 @@ def write_mcp_configs(out_dir: Path) -> dict[str, Path]:
     return paths
 
 
+def child_env(extra_env: dict[str, str] | None = None,
+              base: dict[str, str] | None = None) -> dict[str, str]:
+    """子程序環境：只留白名單內的變數，再加 CC_MEMORY_CAPTURE_CHILD=1 與 extra_env。"""
+    src = os.environ if base is None else base
+    env = {k: v for k, v in src.items() if k in CHILD_ENV_NAMES or k.startswith(CHILD_ENV_PREFIXES)}
+    env['CC_MEMORY_CAPTURE_CHILD'] = '1'
+    env.update(extra_env or {})
+    return env
+
+
 def run_claude(prompt: str, *, model: str, cwd: Path, mcp_config: Path | None, tools: str,
-               allowed: str, budget_usd: float, timeout_s: int = 600,
+               allowed: str, budget_usd: float, timeout_s: int = 600, disallowed: str = '',
                extra_env: dict[str, str] | None = None) -> ClaudeRun:
+    """跑一次隔離的 claude -p。
+
+    權限模式用 dontAsk：只有 --allowedTools 明列的工具能用，其餘自動拒（bypassPermissions 會讓 allowedTools
+    失去限制作用，清單外的 MCP 工具照樣能呼叫）。--disallowedTools 的工具直接從模型可見的工具表移除。
+    """
     cmd = ['claude', '-p', '--model', model, '--setting-sources', 'local', '--strict-mcp-config',
-           '--tools', tools, '--allowedTools', allowed, '--permission-mode', 'bypassPermissions',
+           '--tools', tools, '--allowedTools', allowed, '--permission-mode', 'dontAsk',
            '--no-session-persistence', '--max-budget-usd', f'{budget_usd:.2f}', '--output-format', 'json']
+    if disallowed:
+        cmd += ['--disallowedTools', disallowed]
     if mcp_config is not None:
         cmd += ['--mcp-config', str(mcp_config)]
-    env = {**os.environ, 'CC_MEMORY_CAPTURE_CHILD': '1', **(extra_env or {})}
+    env = child_env(extra_env)
     try:
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=str(cwd),
                               env=env, timeout=timeout_s, check=False)
@@ -124,6 +192,160 @@ def redact(text: str) -> str:
     for pat in LEAK_PATTERNS:
         out = re.sub(pat, '[工具]', out, flags=re.I)
     return out
+
+
+# ---------- 出題用對話稿 ----------
+
+_TAG_RE = re.compile(r'(?:<|&lt;)(\s*/?\s*)(transcript)', re.I)
+_ZERO_WIDTH_RE = re.compile('[\u200b-\u200f\u2060\ufeff]')
+# 3-A：資料裡像段落標頭的「[L123 」改成全形，出題者才分得出哪些是程式加的標頭
+_FAKE_HEAD_RE = re.compile(r'(^|\n)\s*\[(L\d)')
+_CJK_RE = re.compile(r'[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]')
+
+
+def _neutralize(text: str) -> str:
+    """只套在資料內容上（標頭由程式另外加）：不讓內容關閉／開啟 <transcript> 區塊，也不讓它偽造段落標頭。
+
+    零寬字元一律去掉。全形「＜／transcript＞」要 NFKC 正規化才認得出來，但 NFKC 會把中文全形標點改成半形、
+    動到原文，所以只有正規化後真的出現標籤時才採用正規化版本。
+    """
+    text = _ZERO_WIDTH_RE.sub('', text)
+    folded = unicodedata.normalize('NFKC', text)
+    if folded != text and _TAG_RE.search(folded):
+        text = folded
+    text = _TAG_RE.sub(lambda m: '‹' + m.group(1) + m.group(2), text)
+    return _FAKE_HEAD_RE.sub(lambda m: m.group(1) + '［' + m.group(2), text)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f'{text[:limit]}…〔後略 {len(text) - limit} 字元〕'
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    """長文字頭尾各留一半（結論常在尾巴）。"""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f'{text[:half]}\n…〔中略 {len(text) - limit} 字元〕…\n{text[-half:]}'
+
+
+def _flatten(value: Any) -> str:
+    """把 tool_result 之類的 content（字串、block 陣列、dict）攤平成文字；圖片只留標記。"""
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return '\n'.join(s for s in (_flatten(v) for v in value) if s)
+    if isinstance(value, dict):
+        kind = value.get('type')
+        if kind == 'image':
+            return '[圖片]'
+        if kind == 'tool_reference':
+            return f'[工具參照 {value.get("tool_name", "")}]'.strip()
+        if isinstance(value.get('text'), str):
+            return value['text']
+        if 'content' in value:
+            return _flatten(value['content'])
+        return json.dumps(value, ensure_ascii=False)[:TRANSCRIPT_TOOL_RESULT_CHARS]
+    return str(value)
+
+
+def _est_tokens(text: str) -> int:
+    cjk = len(_CJK_RE.findall(text))
+    # 刻意偏保守：程式碼／JSON／路徑類 ASCII 實際約 0.35–0.4 token/字元，中文約 1.3–1.5
+    return int(cjk * 1.3 + (len(text) - cjk) * 0.4) + 1
+
+
+def _render_line(lineno: int, obj: dict[str, Any]) -> list[str]:
+    """一行 JSONL → 0 到多段文字。只收 user／assistant；略過 thinking、isMeta、附件與狀態行。"""
+    kind = obj.get('type')
+    if kind not in ('user', 'assistant') or obj.get('isMeta'):
+        return []
+    msg = obj.get('message')
+    if not isinstance(msg, dict):
+        return []
+    ts = str(obj.get('timestamp') or '')
+    ts = f'{ts[:19]}Z' if ts.endswith('Z') else ts[:25]
+    role = '對話摘要' if obj.get('isCompactSummary') else kind
+    head = f'[L{lineno} {ts}'.rstrip()
+    content = msg.get('content')
+    blocks = [{'type': 'text', 'text': content}] if isinstance(content, str) else content
+    if not isinstance(blocks, list):
+        return []
+    out: list[str] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        btype = str(b.get('type') or '')
+        if btype == 'text':
+            text = str(b.get('text') or '').strip()
+            if text:
+                out.append(f'{head} {role}] {_neutralize(_clip_middle(text, TRANSCRIPT_TEXT_CHARS))}')
+        elif btype in ('tool_use', 'server_tool_use'):
+            args = json.dumps(b.get('input', {}), ensure_ascii=False, separators=(',', ':'))
+            out.append(f'{head} tool_use] {_neutralize(str(b.get("name", "?")))} '
+                       f'{_neutralize(_clip(args, TRANSCRIPT_TOOL_INPUT_CHARS))}')
+        elif btype == 'tool_result' or btype.endswith('_tool_result'):
+            text = _flatten(b.get('content'))
+            err = ' 錯誤' if b.get('is_error') else ''
+            out.append(f'{head} tool_result{err}] {_neutralize(_clip(text, TRANSCRIPT_TOOL_RESULT_CHARS))}')
+        elif btype == 'image':
+            out.append(f'{head} {role}] [圖片]')
+        # thinking／redacted_thinking 等其他 block 不收
+    return out
+
+
+def render_transcript(path: Path, *, max_chars: int = TRANSCRIPT_MAX_CHARS,
+                      max_est_tokens: int = TRANSCRIPT_MAX_EST_TOKENS) -> str:
+    """把 Claude Code 對話 JSONL 轉成給出題者讀的精簡純文字。
+
+    每段以 [L<原始行號> <時間戳> <角色>] 開頭，讓標準答案的 evidence 能引行號或時間。
+    超過上限時保留後段（定案通常在後面）＋第一則使用者訊息（交代任務），並在截斷處註明。
+    輸出仍是不可信資料：只能放在提示的 <transcript> 區塊內，且呼叫端不能給模型任何工具。
+    """
+    segments: list[tuple[int, str]] = []
+    total_lines = 0
+    with path.open(encoding='utf-8', errors='replace') as fh:
+        for lineno, line in enumerate(fh, start=1):
+            total_lines = lineno
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                segments.extend((lineno, s) for s in _render_line(lineno, obj))
+    header = f'〔對話檔共 {total_lines} 行，轉出 {len(segments)} 段；tool_result 只留前 {TRANSCRIPT_TOOL_RESULT_CHARS} 字元〕'
+    first_user = next((i for i, (_, s) in enumerate(segments) if ' user] ' in s), None)
+    kept: list[str] = []
+    used_chars, used_tokens = len(header), _est_tokens(header)
+    reserve = _clip(segments[first_user][1], 2000) if first_user is not None else ''
+    budget_chars = max_chars - len(reserve) - 200
+    budget_tokens = max_est_tokens - _est_tokens(reserve) - 100
+    cut_index = -1
+    for idx in range(len(segments) - 1, -1, -1):
+        seg = segments[idx][1]
+        c, t = len(seg) + 1, _est_tokens(seg)
+        if used_chars + c > budget_chars or used_tokens + t > budget_tokens:
+            cut_index = idx
+            break
+        kept.append(seg)
+        used_chars += c
+        used_tokens += t
+    kept.reverse()
+    if cut_index < 0:
+        return '\n'.join([header, *kept])
+    first_kept_line = segments[cut_index + 1][0] if cut_index + 1 < len(segments) else total_lines
+    notice = (f'〔已截斷：總長超過上限，第 L{first_kept_line} 行之前的 {cut_index + 1} 段省略，'
+              f'只保留後段；開頭只留第一則使用者訊息供參考〕')
+    lead = [reserve] if reserve and first_user is not None and first_user <= cut_index else []
+    return '\n'.join([header, *lead, notice, *kept])
 
 
 # ---------- 資料池 ----------

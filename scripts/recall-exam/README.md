@@ -23,12 +23,25 @@ python3 scripts/recall-exam/recall_exam.py run --fixed-only
 
 | 角色 | 模型 | 看得到什麼 | 看不到什麼 |
 |---|---|---|---|
-| 出題者 | sonnet | 一份原始對話檔（Bash／Read／Grep） | 任何記憶工具、memory 目錄（prompt 約束，非硬隔離） |
-| 作答者 ×2 | sonnet | 只有一套記憶系統的 MCP 工具（`--strict-mcp-config`，無 Bash／Read） | 另一套、檔案系統 |
-| 評分者 ×2 | sonnet | 題目、標準答案、兩個答案（系統名遮成 `[工具]`、順序相反） | 哪個答案來自哪套 |
+| 出題者 | sonnet | 腳本把一份原始對話檔轉成的精簡文字稿（放在提示的 `<transcript>` 區塊；**沒有任何工具**） | 檔案系統、任何記憶工具 |
+| 作答者 ×2 | sonnet | 只有一套記憶系統的唯讀 MCP 工具（明確清單，見下） | 另一套、檔案系統、Bash／Read |
+| 評分者 ×2 | sonnet | 題目、標準答案、兩個答案（系統名遮成 `[工具]`、順序相反；沒有工具） | 哪個答案來自哪套 |
+
+原始對話檔是不可信資料（夾帶網頁與工具輸出，可能藏提示注入），所以出題者不給工具：`lib.render_transcript()`
+只留 user／assistant 文字、tool_use 的工具名＋精簡參數、tool_result 前 600 字元，每段標原始行號與時間戳；
+總長上限約 35 萬字元／估 12 萬 token，超過時保留後段並註明截斷。
+
+作答者可用的工具（`--permission-mode dontAsk`：清單外一律拒）：
+
+- cc-memory：`cc_memory_search`／`list`／`get`／`stats`／`timeline`／`get_observations`、`cc_task_list`／`cc_task_stats`；
+  server 端另有 `CC_READ_ONLY=1` 與 `CC_TOOL_ALLOWLIST` 兩層。
+- claude-mem：`search`／`timeline`／`get_observations`（另含只回說明文字的 `__IMPORTANT`）。`smart_search`／`smart_outline`／`smart_unfold` 會讀本機任意檔，
+  用 `--disallowedTools` 封鎖。
 
 每次 `claude -p` 都帶 `--setting-sources local --no-session-persistence` 與 `CC_MEMORY_CAPTURE_CHILD=1`，
 考試本身不會被兩套系統錄進去（已實測 `sdk_sessions`、spool 都不增加）。
+環境變數走白名單（`PATH`、`HOME`、`LANG`、`LC_*`、`XDG_*`、`ANTHROPIC_*`、`CLAUDE_*` 等），不再整包傳；
+cc-memory 的 DB 連線字串由 wrapper 自己從檔案讀。
 
 ## 題庫
 
