@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,8 +52,12 @@ CHILD_ENV_NAMES = frozenset({
     # 有代理或自簽憑證的網路才需要；不存在就不會傳
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
     'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    # claude 設定目錄若有改位置才需要；其他 CLAUDE_* 一律不傳——CLAUDE_CODE_PLUGIN_DIRS 會讓子程序載入外掛 hooks，
+    # CLAUDE_CODE_MESSAGING_* 是父 session 的訊息通道（PR #57 審查）
+    'CLAUDE_CONFIG_DIR',
 })
-CHILD_ENV_PREFIXES = ('LC_', 'XDG_', 'ANTHROPIC_', 'CLAUDE_')
+# ANTHROPIC_* 要留：登入用，且 ANTHROPIC_DEFAULT_SONNET_MODEL 決定 --model sonnet 實際是哪個模型
+CHILD_ENV_PREFIXES = ('LC_', 'XDG_', 'ANTHROPIC_')
 
 # 作答者可用的 MCP 工具（明確清單）。server 名稱對應 write_mcp_configs 的 key。
 # cc-memory：tool-policy.ts WRITE_TOOLS 以外、project mode 會露出的唯讀工具（todoist 只在 forced personal 才有）。
@@ -191,13 +196,25 @@ def redact(text: str) -> str:
 
 # ---------- 出題用對話稿 ----------
 
-_TAG_RE = re.compile(r'<(\s*/?\s*)(transcript)', re.I)
+_TAG_RE = re.compile(r'(?:<|&lt;)(\s*/?\s*)(transcript)', re.I)
+_ZERO_WIDTH_RE = re.compile('[\u200b-\u200f\u2060\ufeff]')
+# 3-A：資料裡像段落標頭的「[L123 」改成全形，出題者才分得出哪些是程式加的標頭
+_FAKE_HEAD_RE = re.compile(r'(^|\n)\s*\[(L\d)')
 _CJK_RE = re.compile(r'[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]')
 
 
 def _neutralize(text: str) -> str:
-    """不讓資料內容自己關閉／開啟 <transcript> 區塊（提示注入常見手法）。"""
-    return _TAG_RE.sub(lambda m: '‹' + m.group(1) + m.group(2), text)
+    """只套在資料內容上（標頭由程式另外加）：不讓內容關閉／開啟 <transcript> 區塊，也不讓它偽造段落標頭。
+
+    零寬字元一律去掉。全形「＜／transcript＞」要 NFKC 正規化才認得出來，但 NFKC 會把中文全形標點改成半形、
+    動到原文，所以只有正規化後真的出現標籤時才採用正規化版本。
+    """
+    text = _ZERO_WIDTH_RE.sub('', text)
+    folded = unicodedata.normalize('NFKC', text)
+    if folded != text and _TAG_RE.search(folded):
+        text = folded
+    text = _TAG_RE.sub(lambda m: '‹' + m.group(1) + m.group(2), text)
+    return _FAKE_HEAD_RE.sub(lambda m: m.group(1) + '［' + m.group(2), text)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -268,18 +285,19 @@ def _render_line(lineno: int, obj: dict[str, Any]) -> list[str]:
         if btype == 'text':
             text = str(b.get('text') or '').strip()
             if text:
-                out.append(f'{head} {role}] {_clip_middle(text, TRANSCRIPT_TEXT_CHARS)}')
+                out.append(f'{head} {role}] {_neutralize(_clip_middle(text, TRANSCRIPT_TEXT_CHARS))}')
         elif btype in ('tool_use', 'server_tool_use'):
             args = json.dumps(b.get('input', {}), ensure_ascii=False, separators=(',', ':'))
-            out.append(f'{head} tool_use] {b.get("name", "?")} {_clip(args, TRANSCRIPT_TOOL_INPUT_CHARS)}')
+            out.append(f'{head} tool_use] {_neutralize(str(b.get("name", "?")))} '
+                       f'{_neutralize(_clip(args, TRANSCRIPT_TOOL_INPUT_CHARS))}')
         elif btype == 'tool_result' or btype.endswith('_tool_result'):
             text = _flatten(b.get('content'))
             err = ' 錯誤' if b.get('is_error') else ''
-            out.append(f'{head} tool_result{err}] {_clip(text, TRANSCRIPT_TOOL_RESULT_CHARS)}')
+            out.append(f'{head} tool_result{err}] {_neutralize(_clip(text, TRANSCRIPT_TOOL_RESULT_CHARS))}')
         elif btype == 'image':
             out.append(f'{head} {role}] [圖片]')
         # thinking／redacted_thinking 等其他 block 不收
-    return [_neutralize(s) for s in out]
+    return out
 
 
 def render_transcript(path: Path, *, max_chars: int = TRANSCRIPT_MAX_CHARS,

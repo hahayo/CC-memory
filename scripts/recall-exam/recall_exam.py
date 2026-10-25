@@ -290,6 +290,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     mcp = lib.write_mcp_configs(run_dir)
     questions: list[dict[str, Any]] = []
     meta: dict[str, Any] = {'claude_mem_health': health_msg, 'started': now_stamp(), 'args': {k: v for k, v in vars(args).items() if k != 'func'}}
+    # --model sonnet 實際解析成哪個版本由這個變數決定，記下來，跨輪比較才知道模型有沒有換
+    meta['sonnet_model'] = lib.os.environ.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '(未設，用 CLI 預設)')
     if args.fixed or args.fixed_only:
         questions += load_fixed()
     if not args.fixed_only and args.rolling > 0:
