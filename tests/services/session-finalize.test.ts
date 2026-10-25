@@ -261,7 +261,24 @@ it('treats a missing capture-state file as not ready instead of failing every ti
         called.push(sessionId); return { attempted: true, status: 'finalized' };
       } });
     expect(called).toEqual(['ready']);
-    expect(reported).toEqual(['finalized']);
+    // 不算失敗，但要留一個看得見的訊號：沒有狀態檔可能是排程餓死，不能完全無聲（PR #55 審查）
+    expect(reported).toEqual(['waiting', 'finalized']);
     await expect(access(join(dir, 'nostate.jsonl.finalize.json'))).resolves.toBeUndefined();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it('still reports failed when the capture-state file exists but is corrupt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'finalize-badstate-'));
+  try {
+    const dir = join(root, 'project'); await mkdir(dir);
+    const spool = join(dir, 'bad.jsonl');
+    await writeFile(spool, ''); await writeFile(`${spool}.close`, '');
+    await writeFile(spool.replace('.jsonl', '.capture-state.json'), 'not json');
+    await enrollFinalization(spool, 'project', 'bad');
+    const reported: string[] = [];
+    await runFinalizers({ root, env: {}, nowMs: Date.now, hasBudget: () => true,
+      acquireLock: async () => async () => {}, report: (s) => reported.push(s),
+      finalize: async () => ({ attempted: true, status: 'finalized' }) });
+    expect(reported).toEqual(['failed']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -66,7 +66,7 @@ export interface FinalizeSessionOptions {
 }
 export interface FinalizeResult {
   attempted: boolean;
-  status: 'skipped' | 'current' | 'finalized' | 'failed' | 'stale' | 'orphaned';
+  status: 'skipped' | 'current' | 'finalized' | 'failed' | 'stale' | 'orphaned' | 'waiting';
 }
 
 /** Atomic claim is shared by workers with different spool roots. Publication is fenced by generation + token. */
@@ -218,6 +218,7 @@ export async function runFinalizers(options: FinalizerSchedulerOptions): Promise
         }
         const enrolled = JSON.parse(await readFile(marker, 'utf8')) as { projectId: string; sessionId: string };
         if (!enrolled.projectId || enrolled.projectId === '__personal__' || !enrolled.sessionId) continue;
+        let missingState = false;
         const stillReady = async (): Promise<boolean> => {
           const info = await stat(spool);
           // spool 還沒被採集過時還沒有狀態檔：這是「還沒準備好」，不是失敗（否則同一批標記每輪重報 failed）。
@@ -226,7 +227,7 @@ export async function runFinalizers(options: FinalizerSchedulerOptions): Promise
             if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
             throw error;
           });
-          if (stateText === null) return false;
+          if (stateText === null) { missingState = true; return false; }
           const state = JSON.parse(stateText) as CaptureStateV2;
           if (state.version !== 2 || state.projectId !== enrolled.projectId || state.spool.cursor !== info.size ||
               Object.keys(state.retries).length > 0) return false;
@@ -256,7 +257,11 @@ export async function runFinalizers(options: FinalizerSchedulerOptions): Promise
           return finalizeDue({ quietMs, ageMs: options.nowMs() - lastContentMs, pending: false,
             close: await hasCloseMarker(spool), backfill: Boolean(options.env.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR?.trim()) });
         };
-        if (!(await stillReady())) continue;
+        if (!(await stillReady())) {
+          // 'waiting'：spool 還沒被採集過。不算失敗，但印出來，排程若餓死它才看得到。
+          if (missingState) options.report?.('waiting');
+          continue;
+        }
         if (!options.hasBudget()) return;
         attempted++; // Unknown failures may occur after an LLM call; charge them conservatively.
         const result = await options.finalize({ ...enrolled, stillReady });

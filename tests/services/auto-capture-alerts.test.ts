@@ -236,6 +236,37 @@ describe('services/auto-capture-alerts assessAutoCaptureExecution', () => {
   })
 })
 
+describe('services/auto-capture-alerts session-finalize lines', () => {
+  // 2026-10-25：收尾的正常狀態行（finalized／waiting…）被當成問題 → unit 每輪 exit 1。
+  // 只有 failed 仍算問題（它同時會計入 summary 的 failed=）。
+  const SUMMARY_OK = '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0 failed=0 rate-limited=0 malformed=0 transcript-missing=0 parked=0 yielded=0\n'
+  it('treats non-failed session-finalize status lines as informational', () => {
+    const assessed = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout:
+        '[cc-memory] session-finalize: finalized\n' +
+        '[cc-memory] session-finalize: waiting\n' +
+        '[cc-memory] session-finalize: orphaned\n' +
+        '[cc-memory] session-finalize: current\n' +
+        '[cc-memory] session-finalize: stale\n' +
+        SUMMARY_OK,
+      stderr: '',
+    })
+    expect(assessed.nonSummaryLines).toEqual([])
+    expect(assessed.ok).toBe(true)
+  })
+
+  it('still treats session-finalize: failed as a problem', () => {
+    const assessed = assessAutoCaptureExecution({
+      exitCode: 0,
+      stdout: '[cc-memory] session-finalize: failed\n' + SUMMARY_OK,
+      stderr: '',
+    })
+    expect(assessed.ok).toBe(false)
+    expect(assessed.nonSummaryLines).toEqual(['[cc-memory] session-finalize: failed'])
+  })
+})
+
 describe('services/auto-capture-alerts parseSimpleEnvFile', () => {
   it('supports comments, export prefix, and quoted values', () => {
     const parsed = parseSimpleEnvFile(`
