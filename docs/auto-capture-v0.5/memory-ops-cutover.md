@@ -488,6 +488,7 @@ Node.js 支援下限已提升為 20，CI 與本機驗證採 Node.js 22。2026-08
 背景：Phase 8 健康面全過，但近 72 小時 transcript 265 MB 只覆蓋 5%；每日新增約 50–110 MB（≈1,300–2,700 窗）對每日約 120 窗。使用者拍板選項一（先 A＋B，3 天後看數字再議 C 壓縮／D 暫緩）。Codex 兩輪對審（AGREE-WITH-CHANGES→口徑修正）已收斂。
 
 - **A**：新增 `ops/systemd/cc-memory-auto-capture.timer`（`OnBootSec=2min`、`OnUnitInactiveSec=2min`、`AccuracySec=15s`）；Stop／SessionStart 的 kick 保留。oneshot＋`SuccessExitStatus=75` 相容：exit 75（沒拿到鎖）視為成功結束，timer 照常續排，但該次沒有 summary。`enable --now` 當下若開機已超過 2 分鐘會立即跑一次。
+- **2026-10-27 調整**：`OnUnitInactiveSec` 2min → 20s（使用者拍板「1～4 都修」）。量測依據：10/26–27 的 24 小時 303 輪、每輪平均 180 s，真正在抽取只有 15.2 小時，其餘 2 分鐘空等；quiet period 2 小時不變，所以主要是消化積壓、不是縮短新對話的延遲。代價＝Codex 呼叫量約 ×1.35。已安裝的 `~/.config/systemd/user/cc-memory-auto-capture.timer` 要同步改＋`systemctl --user daemon-reload`。
 - **B**：`CC_CAPTURE_MAX_WINDOWS_PER_TICK=4`、`CC_CAPTURE_MAX_SESSIONS_PER_TICK=4`。第 4 窗必須在 tick 第 58 秒前開始（准入檢查：已耗時＋182 s reserve ≤ 240 s），實際多為 3–4 窗；reserve／budget／timeout 不動。
 - **驗收口徑**：成功窗看 journal `processed=`（`windows=` 是開窗嘗試數，失敗也算）；`yielded` 只有合計、無法拆原因；容量比較用「成功提交的來源區間 bytes」對「每日新增 boundary bytes」；各專案另記最老未完成 boundary 的等待時間。
 - **canary 期「不加 timer／不提高每 tick 數」限制自本日解除**（使用者拍板）。回滾：`systemctl --user disable --now cc-memory-auto-capture.timer`，service 復原 `~/.config/systemd/user/cc-memory-auto-capture.service.pre-20260906`，`daemon-reload`。
@@ -512,3 +513,10 @@ npm run replay:dead-letters -- --apply [--limit N] [--expect-model gpt-5.6-luna]
 - **寫入**：呼叫 `replayCaptureWindow()`（`src/services/capture-worker.ts`）＝ 抽取 → `writeCaptureWindow` 同一條路，rollup／observation 沿用既有 idempotency key 與 content hash 防重；**不碰 capture-state 檔**（checkpoint 已越過、retry entry 已清）。
 - **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`。exit `0` 全成功、`2` 有失敗、`1` preflight 失敗、`3` 鎖忙。
 - **2026-09-12 實跑**：103 張死信中 15 張 `READABLE`（全部 sol timeout，7–252 KB）；canary 1 窗 37 s 寫 4 observations；其餘 14 窗全部成功（24–77 s／窗，共 95 observations，failed=0）。15 張死信已改名 `.json.replayed`；剩 88 張為 7 月 haiku 舊格式（無 source）與 transcript 已刪者，無源可讀。
+
+## 12. 2026-10-27 備援模型與排序名額（使用者拍板「1～4 都修」）
+
+- **備援幾乎全失敗的根因**：10/26–27 的 24 小時主模型 codex 逾時 28 次，備援（fallback，退回模型）備援失敗 29 次（計數器合計，幾乎一對一）。探針把被擱置那段 37 KB 對話餵給備援：Haiku 4.5 low 要 144 s（逾時設 75 s，必死），Haiku 5.5 low 48 s；小提示 7 s，排除 CLI 啟動開銷（adapter 已帶 `--safe-mode`）。
+- **改法**：`CC_CAPTURE_CLAUDE_MODEL=claude-haiku-5-5`（寫完整 id，`--safe-mode` 下別名不吃使用者 settings）、`CC_CAPTURE_CLAUDE_TIMEOUT_MS=120000`；reserve 227 s，tick 420 s／supervisor 450 s／`TimeoutStartSec=480`。已安裝 unit 同步改，備份 `~/.config/systemd/user/cc-memory-auto-capture.service.bak-20261027-haiku45-75s`。驗收：之後 journal 的 `fallback-success` 應明顯高於 `fallback-failed`。
+- **死信現況**：`spool/.dead` 未重跑 262 張，多數是 9 月補舊帳 haiku 32 KB 窗逾時；要清要另批跑 `npm run replay:dead-letters --apply`（codex），待拍板。
+- **搜尋觀察名額**：`CC_MEMORY_SEARCH_OBSERVATION_RESERVE`（預設 0.4），見 CLAUDE.md 環境變數段與 `applyObservationReserve()`。

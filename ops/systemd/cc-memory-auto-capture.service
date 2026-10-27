@@ -8,7 +8,7 @@ ConditionPathExists=%h/.ccm-auto-capture-production-approved
 
 [Service]
 Type=oneshot
-TimeoutStartSec=420
+TimeoutStartSec=480
 WorkingDirectory=%h/CC_project/CC-memory
 Environment=CC_CAPTURE_LLM=codex-cli
 Environment=CC_CAPTURE_LLM_FALLBACK=claude-cli
@@ -17,13 +17,16 @@ Environment=CC_CAPTURE_CODEX_REASONING_EFFORT=high
 Environment=CC_CAPTURE_QUIET_PERIOD_MS=7200000
 Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
 Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=4
-Environment=CC_CAPTURE_CLAUDE_MODEL=haiku
-# codex 90 s + claude 75 s + 2×1 s killGrace + 15 s settle = 182 s reserve < tick 360 s < supervisor 390 s < TimeoutStartSec 420 s
+# 2026-10-27：備援改 Haiku 5.5（同一段 37 KB 對話實測 Haiku 4.5 要 144 s、Haiku 5.5 48 s；舊設定 75 s 逾時讓備援在主模型逾時後幾乎全失敗，24 h 內逾時 28 次、備援失敗 29 次）。
+# 寫完整 model id，不寫 `haiku` 別名：子程序用 --safe-mode 不載使用者 settings，別名會落到 CLI 內建預設。
+Environment=CC_CAPTURE_CLAUDE_MODEL=claude-haiku-5-5
+Environment=CC_CAPTURE_CLAUDE_EFFORT=low
+# codex 90 s + claude 120 s + 2×1 s killGrace + 15 s settle = 227 s reserve < tick 420 s < supervisor 450 s < TimeoutStartSec 480 s
 # 2026-10-21：原本 tick 240 s 被 4 窗（約 60 s）＋182 s 保留吃光，session-finalize 讀完 DB 就沒預算、每輪靜默放棄；
 # 加大後收尾有約 2 分鐘讀 DB 的餘裕。
-Environment=CC_CAPTURE_TICK_BUDGET_MS=360000
-Environment=CC_CAPTURE_SUPERVISOR_TIMEOUT_MS=390000
-Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=75000
+Environment=CC_CAPTURE_TICK_BUDGET_MS=420000
+Environment=CC_CAPTURE_SUPERVISOR_TIMEOUT_MS=450000
+Environment=CC_CAPTURE_CLAUDE_TIMEOUT_MS=120000
 Environment=CC_CAPTURE_MAX_SESSIONS_PER_TICK=4
 Environment=CC_MEMORY_PROJECT_URL_FILE=%h/.ccm-project-url
 Environment=CC_MEMORY_ALERT_ENV_FILE=%h/.ccm-memory-alert.env

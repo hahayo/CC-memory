@@ -707,6 +707,60 @@ export function readSessionRecencyConfig(): SessionRecencyConfig {
   };
 }
 
+/**
+ * 前 limit 名保留給 observation 的比例（observation reserve，觀察名額）。
+ *
+ * rollup 權重 0.85 ＞ auto observation 0.65，加上 rollup floor 讓同 session 的 rollup 永遠不低於
+ * 觀察，預設排序下前 10 名常常全是 rollup、0 筆觀察（2026-10-23／10-25 盲測 Q4／Q8 輸題根因：
+ * 事實只存在觀察裡，摘要被改寫到只剩尾段）。保留名額讓排名最高的幾筆觀察一定進前 limit。
+ * 設 `0` 關閉（回到純加權排序）；上限 1；parse 失敗用預設。
+ */
+const DEFAULT_OBSERVATION_RESERVE_RATIO = 0.4;
+
+export function readObservationReserveRatio(): number {
+  const parsed = parseWeightEnv('CC_MEMORY_SEARCH_OBSERVATION_RESERVE', DEFAULT_OBSERVATION_RESERVE_RATIO);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.min(parsed, 1);
+}
+
+/**
+ * 把已排序的候選切到 limit，並保證其中至少有 `ceil(limit × ratio)` 筆 observation
+ * （候選裡有那麼多才算）。名額不足時，從 limit 內**排名最低的非觀察項目**開始讓位，
+ * 補進 limit 外排名最高的觀察；補進來的觀察接在尾端，limit 內其餘順序不變。
+ *
+ * - ratio ≤ 0、limit ≤ 0、候選數 ≤ limit（沒有可補的）→ 與 `slice(0, limit)` 完全相同。
+ * - 只在候選裡挑，不會額外查 DB；候選有沒有觀察由上游超額撈取決定。
+ */
+export function applyObservationReserve<T extends IndexSearchCandidate>(
+  sorted: readonly T[],
+  limit: number,
+  ratio: number
+): T[] {
+  const head = sorted.slice(0, Math.max(limit, 0));
+  if (ratio <= 0 || limit <= 0 || sorted.length <= limit) return head;
+
+  const reserve = Math.min(limit, Math.ceil(limit * ratio));
+  const isObservation = (candidate: T): boolean => candidate.result.kind === 'observation';
+  const inHead = head.filter(isObservation).length;
+  if (inHead >= reserve) return head;
+
+  const promoted = sorted.slice(limit).filter(isObservation).slice(0, reserve - inHead);
+  if (promoted.length === 0) return head;
+
+  let toDrop = promoted.length;
+  const kept: T[] = [];
+  for (let i = head.length - 1; i >= 0; i--) {
+    const candidate = head[i];
+    if (toDrop > 0 && !isObservation(candidate)) {
+      toDrop -= 1;
+      continue;
+    }
+    kept.push(candidate);
+  }
+  kept.reverse();
+  return [...kept, ...promoted];
+}
+
 function shouldIncludeObservations(): boolean {
   return (process.env.CC_MEMORY_INCLUDE_OBSERVATIONS ?? 'on').trim().toLowerCase() !== 'off';
 }
@@ -1057,7 +1111,11 @@ export async function searchMemoryIndexes(
   }
 
   const weights = readSourceWeights();
-  const sorted = sortWeightedIndexCandidates(candidates, weights, recency).slice(0, limit);
+  const sorted = applyObservationReserve(
+    sortWeightedIndexCandidates(candidates, weights, recency),
+    limit,
+    readObservationReserveRatio()
+  );
   const results = sorted.map((candidate) => candidate.result);
   const scores =
     effectiveMode === 'semantic'

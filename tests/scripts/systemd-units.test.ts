@@ -68,7 +68,7 @@ describe('CC-memory systemd scheduling contracts', () => {
     expect(existsSync(timerPath)).toBe(true);
     const timer = readUnit('cc-memory-auto-capture.timer');
     expect(timer).toContain('OnBootSec=2min');
-    expect(timer).toContain('OnUnitInactiveSec=2min');
+    expect(timer).toContain('OnUnitInactiveSec=20s');
     expect(timer).toContain('Unit=cc-memory-auto-capture.service');
     expect(timer).not.toContain('OnCalendar=');
     expect(timer).not.toContain('Persistent=true');
