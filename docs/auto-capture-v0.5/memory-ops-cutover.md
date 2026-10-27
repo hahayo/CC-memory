@@ -516,7 +516,7 @@ npm run replay:dead-letters -- --apply [--limit N] [--expect-model gpt-5.6-luna]
 
 ## 12. 2026-10-27 備援模型與排序名額（使用者拍板「1～4 都修」）
 
-- **備援幾乎全失敗的根因**：10/26–27 的 24 小時主模型 codex 逾時 28 次，備援（fallback，退回模型）Haiku 4.5 也 28 次跟著逾時。探針把被擱置那段 37 KB 對話餵給備援：Haiku 4.5 low 要 144 s（逾時設 75 s，必死），Haiku 5.5 low 48 s；小提示 7 s，排除 CLI 啟動開銷（adapter 已帶 `--safe-mode`）。
+- **備援幾乎全失敗的根因**：10/26–27 的 24 小時主模型 codex 逾時 28 次，備援（fallback，退回模型）備援失敗 29 次（計數器合計，幾乎一對一）。探針把被擱置那段 37 KB 對話餵給備援：Haiku 4.5 low 要 144 s（逾時設 75 s，必死），Haiku 5.5 low 48 s；小提示 7 s，排除 CLI 啟動開銷（adapter 已帶 `--safe-mode`）。
 - **改法**：`CC_CAPTURE_CLAUDE_MODEL=claude-haiku-5-5`（寫完整 id，`--safe-mode` 下別名不吃使用者 settings）、`CC_CAPTURE_CLAUDE_TIMEOUT_MS=120000`；reserve 227 s，tick 420 s／supervisor 450 s／`TimeoutStartSec=480`。已安裝 unit 同步改，備份 `~/.config/systemd/user/cc-memory-auto-capture.service.bak-20261027-haiku45-75s`。驗收：之後 journal 的 `fallback-success` 應明顯高於 `fallback-failed`。
 - **死信現況**：`spool/.dead` 未重跑 262 張，多數是 9 月補舊帳 haiku 32 KB 窗逾時；要清要另批跑 `npm run replay:dead-letters --apply`（codex），待拍板。
 - **搜尋觀察名額**：`CC_MEMORY_SEARCH_OBSERVATION_RESERVE`（預設 0.4），見 CLAUDE.md 環境變數段與 `applyObservationReserve()`。

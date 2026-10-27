@@ -17,7 +17,7 @@ Environment=CC_CAPTURE_CODEX_REASONING_EFFORT=high
 Environment=CC_CAPTURE_QUIET_PERIOD_MS=7200000
 Environment=CC_CAPTURE_CODEX_TIMEOUT_MS=90000
 Environment=CC_CAPTURE_MAX_WINDOWS_PER_TICK=4
-# 2026-10-27：備援改 Haiku 5.5（同一段 37 KB 對話實測 Haiku 4.5 要 144 s、Haiku 5.5 48 s；舊設定 75 s 逾時讓備援在主模型逾時後幾乎全失敗，24 h 內 28/28）。
+# 2026-10-27：備援改 Haiku 5.5（同一段 37 KB 對話實測 Haiku 4.5 要 144 s、Haiku 5.5 48 s；舊設定 75 s 逾時讓備援在主模型逾時後幾乎全失敗，24 h 內逾時 28 次、備援失敗 29 次）。
 # 寫完整 model id，不寫 `haiku` 別名：子程序用 --safe-mode 不載使用者 settings，別名會落到 CLI 內建預設。
 Environment=CC_CAPTURE_CLAUDE_MODEL=claude-haiku-5-5
 Environment=CC_CAPTURE_CLAUDE_EFFORT=low

@@ -150,7 +150,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_MEMORY_WEIGHT_OBSERVATION_AUTO` - search ranking source weight：auto observation（預設 `0.65`）；parse 失敗用預設
 - `CC_MEMORY_WEIGHT_SESSION_RECENCY_MIN` - 同 session 內 observation 的時序加權（session recency weighting）最低乘數（預設 `0.90`）：最早 observation 得此乘數、最晚得 `1.0`、中間線性內插（dense-rank）；設 `1.0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（超額部分上限 100，不低於原 limit）
 - `CC_MEMORY_WEIGHT_ROLLUP_SESSION_FLOOR` - rollup 的加權分數下限保護（rollup session floor）：同 session 的 rollup 不低於該 session 內最高 observation 加權分數（預設 `1`＝啟用）；設 `0` 關閉；parse 失敗用預設。啟用時每來源超額撈取（over-sample）×3（超額部分上限 100，不低於原 limit）
-- `CC_MEMORY_SEARCH_OBSERVATION_RESERVE` - 搜尋前 limit 名保留給 observation 的比例（observation reserve，觀察名額；預設 `0.4`＝limit 10 時至少 4 筆觀察，候選裡有那麼多才算）：rollup 權重＋rollup floor 會讓前幾名全是摘要、事實所在的觀察被擠掉（2026-10-25 盲測 Q4／Q8 根因）；名額不足時由 limit 內排名最低的非觀察項目讓位、補進 limit 外排名最高的觀察。設 `0` 關閉；上限 `1`；parse 失敗用預設
+- `CC_MEMORY_SEARCH_OBSERVATION_RESERVE` - 搜尋前 limit 名保留給 observation 的比例（observation reserve，觀察名額；預設 `0.4`＝limit 10 時至少 4 筆觀察，候選裡有那麼多才算）：rollup 權重＋rollup floor 會讓前幾名全是摘要、事實所在的觀察被擠掉（2026-10-25 盲測 Q4／Q8 根因）；名額不足時由 limit 內排名最低的非觀察項目讓位、補進 limit 外排名最高的觀察。設 `0`、負數或 `Infinity` 關閉；大於 1 夾成 `1`；parse 失敗用預設
 - `CC_MEMORY_CAPTURE_CHILD` - 遞迴採集斷路器：worker spawn 的子程序設為 1，hooks（掛鉤）偵測到即 exit 0
 - `CC_CAPTURE_TICK_BUDGET_MS` - worker 每 tick（執行輪次）的時間預算毫秒（預設 240000；0=停用；預算耗盡則不開新窗優雅收尾）
 - `CC_DB_CONNECT_TIMEOUT_SEC` - auto-capture worker 連 PostgreSQL 的 connect timeout（連線逾時）秒數（預設 2）。高並行 drain 共用同一條 SSH tunnel（SSH 通道）時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），補舊帳 runner 設 15；必須是純十進位正整數字串，其餘一律退回預設 2——截斷型打錯字（`15seconds`、`2.5`）不會被吃成 15／2，非十進位寫法（`1e3`、`0x10`）也不接受；上限 2147483 秒（再大會被 Node 計時器折成 1 毫秒反而立刻逾時），超過同樣退回 2
