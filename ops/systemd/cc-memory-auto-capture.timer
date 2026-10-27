@@ -4,7 +4,7 @@ Documentation=file:%h/CC_project/CC-memory/docs/auto-capture-v0.5/memory-ops-cut
 
 [Timer]
 OnBootSec=2min
-OnUnitInactiveSec=2min
+OnUnitInactiveSec=20s
 AccuracySec=15s
 Unit=cc-memory-auto-capture.service
 

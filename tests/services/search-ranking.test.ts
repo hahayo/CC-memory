@@ -11,6 +11,7 @@ import {
   sortWeightedIndexCandidates,
   candidateFetchLimit,
   hybridRankLists,
+  applyObservationReserve,
   type SourceWeights,
   type SessionRecencyConfig,
   type WeightedIndexCandidate,
@@ -651,5 +652,70 @@ describe('hybridRankLists — RRF rank grouping under over-sampling', () => {
 
   it('keeps an empty observation list as its own (empty) group when over-sampling', () => {
     expect(titles(hybridRankLists(tag('m', 4), [], true))).toEqual([['m0', 'm1', 'm2', 'm3'], []]);
+  });
+});
+
+describe('applyObservationReserve — 前 limit 名保留觀察名額', () => {
+  const rollups = (n: number): IndexSearchCandidate[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeCandidate({ result: { kind: 'rollup', title: `r${i}`, sessionId: `s${i}` }, baseScore: 1 - i / 100 })
+    );
+  const observations = (n: number): IndexSearchCandidate[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeCandidate({ result: { kind: 'observation', title: `o${i}`, sessionId: `s${i}` }, baseScore: 0.5 - i / 100 })
+    );
+  const titles = (list: IndexSearchCandidate[]): string[] => list.map((c) => c.result.title);
+
+  it('ratio 0（關閉）時與 slice(0, limit) 完全相同', () => {
+    const sorted = [...rollups(12), ...observations(5)];
+    expect(applyObservationReserve(sorted, 10, 0)).toEqual(sorted.slice(0, 10));
+  });
+
+  it('候選數不超過 limit 時原樣回傳（沒有可補的）', () => {
+    const sorted = [...rollups(4), ...observations(2)];
+    expect(applyObservationReserve(sorted, 10, 0.4)).toEqual(sorted);
+  });
+
+  it('前 limit 名全是 rollup 時，尾端 rollup 讓位給排名最高的觀察（ceil(10×0.4)=4 筆）', () => {
+    const sorted = [...rollups(12), ...observations(5)];
+    const result = applyObservationReserve(sorted, 10, 0.4);
+    expect(result).toHaveLength(10);
+    expect(titles(result)).toEqual(['r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'o0', 'o1', 'o2', 'o3']);
+  });
+
+  it('前 limit 名已有足夠觀察時不動', () => {
+    const sorted = [
+      ...rollups(3),
+      ...observations(4),
+      ...rollups(3).map((c) => ({ ...c, result: { ...c.result, title: `${c.result.title}-late` } })),
+      ...observations(2),
+    ];
+    const result = applyObservationReserve(sorted, 10, 0.4);
+    expect(result).toEqual(sorted.slice(0, 10));
+  });
+
+  it('名額只補到候選裡有的觀察數，不會湊假的', () => {
+    const sorted = [...rollups(12), ...observations(1)];
+    const result = applyObservationReserve(sorted, 10, 0.4);
+    expect(result).toHaveLength(10);
+    expect(titles(result).filter((t) => t.startsWith('o'))).toEqual(['o0']);
+    expect(titles(result).slice(0, 9)).toEqual(['r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8']);
+  });
+
+  it('讓位的是非觀察項目；limit 內已有的觀察一律保留', () => {
+    const sorted = [...rollups(8), ...observations(1), ...rollups(3), ...observations(4)];
+    // limit 內原本是 r0..r7、o0、一筆 rollup；要補 3 筆觀察，讓位的是最後那筆 rollup 與 r7、r6
+    const result = applyObservationReserve(sorted, 10, 0.4);
+    expect(result).toHaveLength(10);
+    expect(result.filter((c) => c.result.kind === 'observation')).toHaveLength(4);
+    expect(result.slice(0, 6)).toEqual(sorted.slice(0, 6));
+    expect(result[6].result.id).toBe(sorted[8].result.id);
+    expect(result.slice(7).map((c) => c.result.id)).toEqual(sorted.slice(12, 15).map((c) => c.result.id));
+  });
+
+  it('ratio 超過 1 以 limit 為上限（全部名額都給觀察）', () => {
+    const sorted = [...rollups(5), ...observations(5)];
+    const result = applyObservationReserve(sorted, 3, 5);
+    expect(titles(result)).toEqual(['o0', 'o1', 'o2']);
   });
 });
