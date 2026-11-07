@@ -18,6 +18,8 @@ import {
   orderCandidates,
   parseDeadLetter,
   parseReplayArgs,
+  readSkipList,
+  appendSkipList,
   replayCandidates,
   replayedFileName,
   splitReplayRange,
@@ -204,11 +206,15 @@ describe('parseReplayArgs', () => {
     expect(options.limit).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('parses --apply --limit --expect-model', () => {
-    const options = parseReplayArgs(['--apply', '--limit', '3', '--expect-model', 'gpt-x']);
+  it('parses --apply --limit --expect-model --provider --skip-list', () => {
+    const options = parseReplayArgs(['--apply', '--limit', '3', '--expect-model', 'gpt-x', '--provider', 'claude-cli', '--skip-list', '/tmp/skip.txt']);
     expect(options.apply).toBe(true);
     expect(options.limit).toBe(3);
     expect(options.expectModel).toBe('gpt-x');
+    expect(options.expectProvider).toBe('claude-cli');
+    expect(options.skipListFile).toBe('/tmp/skip.txt');
+    expect(parseReplayArgs([]).expectProvider).toBe('codex-cli');
+    expect(parseReplayArgs([]).skipListFile).toBeNull();
     expect(() => parseReplayArgs(['--limit', 'abc'])).toThrow(/--limit/);
   });
 });
@@ -233,6 +239,29 @@ describe('assertExpectedLlm', () => {
     expect(() => assertExpectedLlm(fakeLlm({ disabled: true, disabledReason: 'x' }), 'gpt-5.6-luna')).toThrow(/disabled/);
     expect(() => assertExpectedLlm(fakeLlm({ provider: 'claude-cli', model: 'haiku' }), 'gpt-5.6-luna')).toThrow(/codex-cli/);
     expect(() => assertExpectedLlm(fakeLlm({ model: 'gpt-5.6-sol' }), 'gpt-5.6-luna')).toThrow(/gpt-5.6-luna/);
+  });
+
+  it('accepts claude-cli only when --provider says so, and still pins the model', () => {
+    const haiku = fakeLlm({ provider: 'claude-cli', model: 'claude-haiku-5-5' });
+    expect(() => assertExpectedLlm(haiku, 'claude-haiku-5-5', 'claude-cli')).not.toThrow();
+    expect(() => assertExpectedLlm(haiku, 'claude-haiku-5-5')).toThrow(/codex-cli/);
+    expect(() => assertExpectedLlm(haiku, 'claude-sonnet-5-5', 'claude-cli')).toThrow(/claude-sonnet-5-5/);
+  });
+});
+
+describe('skip list', () => {
+  it('reads names (ignoring blanks and comments), appends only new ones, and tolerates a missing file', async () => {
+    const spool = makeSpool();
+    const file = join(spool, 'retained.txt');
+    expect(await readSkipList(file)).toEqual(new Set());
+    expect(await readSkipList(null)).toEqual(new Set());
+    writeFileSync(file, '# retained\na.json\n\nb.json\n');
+    const set = await readSkipList(file);
+    expect(set).toEqual(new Set(['a.json', 'b.json']));
+    await appendSkipList(file, ['b.json', 'c.json'], set);
+    expect(await readFile(file, 'utf8')).toBe('# retained\na.json\n\nb.json\nc.json\n');
+    expect(set.has('c.json')).toBe(true);
+    await appendSkipList(null, ['zzz'], set);
   });
 });
 
@@ -271,7 +300,7 @@ describe('replayCandidates', () => {
     const totals = await replayCandidates([candidate], runtime, { write: (c: string) => out.push(c) });
 
     expect(calls).toEqual([{ raw: 'window-bytes-', hwm: { start, end } }]);
-    expect(totals).toEqual({ written: 1, observations: 2, skipped: 0, retained: 0, failed: 0 });
+    expect(totals).toEqual({ written: 1, observations: 2, skipped: 0, retained: 0, retainedFiles: [], failed: 0 });
     expect(out.join('')).toContain('written');
     expect((await listDeadLetters(spool)).length).toBe(0);
     const replayed = JSON.parse(await readFile(replayedFileName(deadFile), 'utf8')) as { replayed?: { status?: string } };
@@ -316,7 +345,7 @@ describe('replayCandidates', () => {
     };
     const out: string[] = [];
     const first = await replayCandidates([candidate], runtime, { write: (c: string) => out.push(c) });
-    expect(first).toEqual({ written: 0, observations: 0, skipped: 0, retained: 0, failed: 1 });
+    expect(first).toEqual({ written: 0, observations: 0, skipped: 0, retained: 0, retainedFiles: [], failed: 1 });
     expect(calls.map((c) => c.raw)).toEqual(['alpha-1\n', 'bravo-2\n']);
     expect(calls[0].source).toEqual({ start, end: start + 8, content_hash: null });
     expect((await listDeadLetters(spool)).length).toBe(1);
@@ -324,7 +353,7 @@ describe('replayCandidates', () => {
 
     calls.length = 0;
     const second = await replayCandidates([candidate], runtime, { write: (c: string) => out.push(c) });
-    expect(second).toEqual({ written: 1, observations: 3, skipped: 0, retained: 0, failed: 0 });
+    expect(second).toEqual({ written: 1, observations: 3, skipped: 0, retained: 0, retainedFiles: [], failed: 0 });
     expect(calls.map((c) => c.raw)).toEqual(['alpha-1\n', 'bravo-2\n', 'charl-3\n']);
     expect(calls[2].source).toEqual({ start: start + 16, end, content_hash: null });
     expect((await listDeadLetters(spool)).length).toBe(0);
@@ -362,7 +391,7 @@ describe('replayCandidates', () => {
       { write: (c: string) => out.push(c) },
     );
     expect(calls).toEqual([]);
-    expect(totals).toEqual({ written: 0, observations: 0, skipped: 0, retained: 1, failed: 0 });
+    expect(totals).toEqual({ written: 0, observations: 0, skipped: 0, retained: 1, retainedFiles: ['dl.json'], failed: 0 });
     expect(out.join('')).toContain('reason=content-hash-mismatch');
     expect((await listDeadLetters(spool)).length).toBe(1);
   });
@@ -389,7 +418,7 @@ describe('replayCandidates', () => {
       runtime,
       { write: () => undefined },
     );
-    expect(totals).toEqual({ written: 0, observations: 0, skipped: 0, retained: 1, failed: 0 });
+    expect(totals).toEqual({ written: 0, observations: 0, skipped: 0, retained: 1, retainedFiles: ['dl.json'], failed: 0 });
     expect((await listDeadLetters(spool)).length).toBe(1);
   });
 

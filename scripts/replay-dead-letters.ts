@@ -22,7 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -44,6 +44,7 @@ const DEFAULT_GEMINI_KEY_FILE = path.join(homedir(), '.gemini-api-key');
 const DEFAULT_LOCK_FILE = path.join(homedir(), '.cache', 'cc-memory', 'auto-capture-run.lock');
 const DEFAULT_ERROR_CODE = 'LLM_EXTRACT_FAILED';
 const DEFAULT_EXPECT_MODEL = 'gpt-5.6-luna';
+const DEFAULT_EXPECT_PROVIDER = 'codex-cli';
 const REPLAYED_SUFFIX = '.replayed';
 /**
  * worker 在對話檔讀不到時寫的死信，source.content_hash 不是內容雜湊而是這個固定哨兵值
@@ -59,8 +60,16 @@ export interface ReplayCliOptions {
   geminiKeyFile: string;
   lockFile: string;
   errorCode: string;
+  /** apply 時 LLM provider 必須等於這個（預設 codex-cli）；2026-11-08 起可指定 claude-cli 用 Haiku 跑大批次。 */
+  expectProvider: string;
   expectModel: string;
   limit: number;
+  /**
+   * 跳過清單檔（一行一個死信檔名）。分批 --limit 迴圈時，retained（hash 不符、session 已合併、
+   * 已有較晚 rollup、空內容）的死信每輪都會重新排到最前面，沒有這份清單就永遠卡在同幾張；
+   * 每輪結束把本輪 retained 追加進去，下一輪略過。省略＝不跳過、不記錄。
+   */
+  skipListFile: string | null;
 }
 
 export interface DeadLetterSource {
@@ -120,8 +129,10 @@ export function parseReplayArgs(args: string[]): ReplayCliOptions {
     geminiKeyFile: optionValue(args, '--gemini-key-file') ?? DEFAULT_GEMINI_KEY_FILE,
     lockFile: optionValue(args, '--lock-file') ?? DEFAULT_LOCK_FILE,
     errorCode: optionValue(args, '--error-code') ?? DEFAULT_ERROR_CODE,
+    expectProvider: optionValue(args, '--provider') ?? DEFAULT_EXPECT_PROVIDER,
     expectModel: optionValue(args, '--expect-model') ?? DEFAULT_EXPECT_MODEL,
     limit,
+    skipListFile: optionValue(args, '--skip-list') ?? null,
   };
 }
 
@@ -341,6 +352,8 @@ export interface ReplayTotals {
   skipped: number;
   /** 死信留在 .dead：hash 不符、session 已合併、已有較晚 rollup、空內容——要人看，exit 非 0。 */
   retained: number;
+  /** retained 的死信檔名（basename），給 --skip-list 用。 */
+  retainedFiles: string[];
   failed: number;
 }
 
@@ -350,7 +363,7 @@ export async function replayCandidates(
   runtime: ReplayRuntime,
   stdout: { write(chunk: string): unknown },
 ): Promise<ReplayTotals> {
-  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, retained: 0, failed: 0 };
+  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, retained: 0, retainedFiles: [], failed: 0 };
   const cache: TranscriptSourceCache = { path: null, buffer: null };
   for (const candidate of candidates) {
     const r = candidate.record;
@@ -366,6 +379,7 @@ export async function replayCandidates(
     // 死信帶真正的內容雜湊時，先對整段驗；切窗後各子窗沒有自己的雜湊，驗過的整段才放行。
     if (r.source.content_hash && sha256Hex(raw) !== r.source.content_hash) {
       totals.retained += 1;
+      totals.retainedFiles.push(path.basename(r.file));
       stdout.write(`[replay] retained ${label} reason=content-hash-mismatch 0s\n`);
       continue;
     }
@@ -412,8 +426,12 @@ export async function replayCandidates(
     if (windowFailed) {
       // 已寫入的子窗下次重跑會回 already-covered（idempotency key 同一段範圍），不會重複寫。
       // 死信沒改名就不算成功：skipped 原因要人判斷的計 retained，讓 exit code 看得出來。
-      if (lastResult.status === 'skipped') totals.retained += 1;
-      else totals.failed += 1;
+      if (lastResult.status === 'skipped') {
+        totals.retained += 1;
+        totals.retainedFiles.push(path.basename(r.file));
+      } else {
+        totals.failed += 1;
+      }
       continue;
     }
     if (observations > 0 || lastResult.status === 'written') {
@@ -457,16 +475,32 @@ async function loadGeminiKey(file: string): Promise<string | undefined> {
   return key || undefined;
 }
 
-export function assertExpectedLlm(llm: CaptureLlmAdapter, expectModel: string): void {
+export function assertExpectedLlm(llm: CaptureLlmAdapter, expectModel: string, expectProvider = DEFAULT_EXPECT_PROVIDER): void {
   if (isCaptureLlmDisabled(llm)) {
     throw new Error(`capture LLM disabled: ${llm.disabledReason ?? 'unknown'}`);
   }
-  if (llm.provider !== 'codex-cli') {
-    throw new Error(`provider must be codex-cli for replay, got ${llm.provider ?? 'unknown'} (set CC_CAPTURE_LLM=codex-cli)`);
+  if (llm.provider !== expectProvider) {
+    throw new Error(`provider must be ${expectProvider} for replay, got ${llm.provider ?? 'unknown'} (set CC_CAPTURE_LLM=${expectProvider} or --provider)`);
   }
   if (llm.model !== expectModel) {
-    throw new Error(`model must be ${expectModel}, got ${llm.model} (set CC_CAPTURE_CODEX_MODEL or --expect-model)`);
+    throw new Error(`model must be ${expectModel}, got ${llm.model} (set CC_CAPTURE_CODEX_MODEL／CC_CAPTURE_CLAUDE_MODEL or --expect-model)`);
   }
+}
+
+/** 讀跳過清單：一行一個死信檔名，空行與 # 開頭略過；檔案不存在＝空集合。 */
+export async function readSkipList(file: string | null): Promise<Set<string>> {
+  if (!file) return new Set();
+  const text = await readFile(file, 'utf8').catch(() => '');
+  return new Set(text.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#')));
+}
+
+/** 追加到跳過清單（只加還沒在清單裡的）。 */
+export async function appendSkipList(file: string | null, names: string[], existing: Set<string>): Promise<void> {
+  if (!file) return;
+  const fresh = names.filter((name) => !existing.has(name));
+  if (fresh.length === 0) return;
+  await appendFile(file, `${fresh.join('\n')}\n`, { mode: 0o600 });
+  for (const name of fresh) existing.add(name);
 }
 
 async function main(): Promise<number> {
@@ -489,12 +523,16 @@ async function main(): Promise<number> {
   stdout.write(`[replay] dead-letters=${records.length} error-code=${options.errorCode}\n`);
   for (const [status, n] of [...counts.entries()].sort()) stdout.write(`[replay]   ${status}=${n}\n`);
 
-  const readable = orderCandidates(candidates.filter((c) => c.status === 'READABLE')).slice(0, options.limit);
+  const skipList = await readSkipList(options.skipListFile);
+  const skippedByList = candidates.filter((c) => c.status === 'READABLE' && skipList.has(path.basename(c.record.file))).length;
+  const readable = orderCandidates(
+    candidates.filter((c) => c.status === 'READABLE' && !skipList.has(path.basename(c.record.file))),
+  ).slice(0, options.limit);
   const readableBytes = readable.reduce((sum, c) => sum + c.bytes, 0);
   // 本次 error-code 範圍內、分類就讀不到的死信：留在 .dead，不能讓 --apply 回 0。
   const unreadable = candidates.filter((c) => c.status !== 'READABLE' && c.status !== 'error-code-filtered').length;
   stdout.write(
-    `[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''} bytes=${(readableBytes / 1e6).toFixed(1)}MB sessions=${new Set(readable.map((c) => c.record.sessionId)).size} unreadable=${unreadable}\n`
+    `[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''} bytes=${(readableBytes / 1e6).toFixed(1)}MB sessions=${new Set(readable.map((c) => c.record.sessionId)).size} unreadable=${unreadable} skip-listed=${skippedByList}\n`
   );
   for (const c of candidates) {
     if (c.status === 'READABLE' || c.status === 'path-unresolved' || c.status === 'transcript-truncated') {
@@ -504,7 +542,7 @@ async function main(): Promise<number> {
 
   if (!options.apply) {
     const llm = createCaptureLlmAdapter({ env: process.env, emitDisabledWarning: false });
-    stdout.write(`[replay] dry-run; effective provider=${llm.provider ?? 'unknown'} model=${llm.model} (apply requires codex-cli/${options.expectModel})\n`);
+    stdout.write(`[replay] dry-run; effective provider=${llm.provider ?? 'unknown'} model=${llm.model} (apply requires ${options.expectProvider}/${options.expectModel})\n`);
     return 0;
   }
   if (readable.length === 0) {
@@ -528,7 +566,7 @@ async function main(): Promise<number> {
 
   const llm = createCaptureLlmAdapter({ env: process.env, emitDisabledWarning: false });
   try {
-    assertExpectedLlm(llm, options.expectModel);
+    assertExpectedLlm(llm, options.expectModel, options.expectProvider);
     assertZstdRuntime();
   } catch (error) {
     process.stderr.write(`[replay] preflight failed: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -560,8 +598,9 @@ async function main(): Promise<number> {
       replay: replayCaptureWindow,
       maxWindowBytes: captureMaxWindowBytes(process.env, llm),
     }, stdout);
+    await appendSkipList(options.skipListFile, totals.retainedFiles, skipList);
     stdout.write(
-      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed} unreadable=${unreadable}\n`
+      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed} unreadable=${unreadable} remaining-readable=${Math.max(0, candidates.filter((c) => c.status === 'READABLE').length - skippedByList - totals.written - totals.skipped - totals.retained)}\n`
     );
     // retained／unreadable 也算沒做完：死信還在 .dead，自動化不能把它當成功。
     return totals.failed > 0 || totals.retained > 0 || unreadable > 0 ? 2 : 0;
