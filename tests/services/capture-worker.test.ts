@@ -31,12 +31,14 @@ import {
 } from '../../src/services/capture-spool.js';
 import {
   isCaptureRetryHeld,
+  readFirstTranscriptCwd,
   replayCaptureWindow,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
   type CaptureRetryEntry,
   type CaptureStateV2,
 } from '../../src/services/capture-worker.js';
+import { zstdCompressSync } from 'node:zlib';
 import { CaptureLlmValidationError } from '../../src/services/capture-llm.js';
 import type {
   CaptureLlmAdapter,
@@ -1610,6 +1612,34 @@ describe('capture worker failure contracts without DB', () => {
       readFileSync(childPath, 'utf8'),
     ]);
     expect(readState(harness).spool.cursor).toBe(statSync(spoolPath(harness)).size);
+  });
+
+  it('reads a transcript that Codex compressed to <path>.jsonl.zst instead of reporting it missing', async () => {
+    const harness = makeHarness();
+    const transcriptEnd = appendTranscriptEntries(harness.transcriptPath, [
+      { type: 'session_meta', payload: { cwd: '/home/haha/CC_project/CC-memory' } },
+      { message: 'codex rollout body survives compression' },
+    ]);
+    const original = readFileSync(harness.transcriptPath);
+    await appendWindow(harness, {
+      transcriptStart: 0,
+      transcriptEnd,
+      timestamp: '2026-07-06T10:12:20.000Z',
+    });
+    writeFileSync(`${harness.transcriptPath}.zst`, zstdCompressSync(original), { mode: 0o600 });
+    unlinkSync(harness.transcriptPath);
+
+    const llm = mockLlm([rawExtraction({ summary: 'compressed rollout captured', observations: [] })]);
+    const fakeDb = { transaction: async () => ({ observationsWritten: 0, rollupsWritten: 1 }) };
+    const result = await runWorker(harness, { db: fakeDb, llm });
+    expect(result).toMatchObject({ processed: 1, transcriptMissing: 0, parked: 0, deadLettered: 0 });
+    expect(llm.calls.map((call) => call.transcript)).toEqual([original.toString('utf8')]);
+    expect(readState(harness).retries).toEqual({});
+    expect(Object.values(readState(harness).transcripts).map((entry) => entry.checkpoint)).toContain(transcriptEnd);
+
+    // 舊帳 project_id 推導也走同一條退路：原檔不在就解壓看開頭的 cwd。
+    expect(await readFirstTranscriptCwd(harness.transcriptPath, 256 * 1024)).toBe('/home/haha/CC_project/CC-memory');
+    expect(await readFirstTranscriptCwd(join(harness.root, 'never-existed.jsonl'), 256 * 1024)).toBeNull();
   });
 
   it('clears a missing-source retry only after the full captured boundary becomes readable', async () => {

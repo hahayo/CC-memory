@@ -8,7 +8,6 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
 import {
-  CLAUDE_CLI_PROVIDER_ID,
   CaptureLlmValidationError,
   PRIOR_SUMMARY_MAX_ITEM_CHARS,
   PRIOR_SUMMARY_MAX_ITEMS,
@@ -41,11 +40,11 @@ import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
 import { enrollFinalization, finalizeMarkerPath, finalizeQuietMs, finalizeSession, hasCloseMarker, runFinalizers } from './session-finalize.js';
 import { isSummaryDegraded, mergeGuardPending } from './summary-guard.js';
+import { readCompressedTranscript, readTranscriptSource } from './transcript-source.js';
+import { captureMaxWindowBytes, splitTranscriptRange, type TranscriptChunk } from './transcript-window.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
-const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
-const DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES = 32 * 1024;
 const PROMPT_TOO_LONG_RETRY_MIN_BYTES = 1024;
 const LLM_CALL_SETTLE_RESERVE_MS = 15_000;
 const SANDBOX_STAGING_SWEEP_AGE_MS = 60 * 60 * 1000;
@@ -281,14 +280,6 @@ interface TranscriptSourceRange {
   path_hash: string;
   start: number;
   end: number;
-}
-
-interface TranscriptChunk {
-  path: string;
-  pathHash: string;
-  start: number;
-  end: number;
-  raw: Buffer;
 }
 
 interface ParsedSpoolResult {
@@ -703,18 +694,6 @@ function spoolMaxBytes(env: Record<string, string | undefined>): number {
   return mb * 1024 * 1024;
 }
 
-function captureMaxWindowBytes(
-  env: Record<string, string | undefined>,
-  llm?: Pick<CaptureLlmAdapter, 'provider'>
-): number {
-  const parsed = Number.parseInt(env.CC_CAPTURE_MAX_WINDOW_BYTES ?? '', 10);
-  if (Number.isInteger(parsed) && parsed >= 4) return parsed;
-  if (llm?.provider === CLAUDE_CLI_PROVIDER_ID) {
-    return DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES;
-  }
-  return DEFAULT_CAPTURE_MAX_WINDOW_BYTES;
-}
-
 function captureMaxSessionsPerTick(env: Record<string, string | undefined>): number {
   return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_SESSIONS_PER_TICK, Number.MAX_SAFE_INTEGER);
 }
@@ -920,21 +899,27 @@ export async function readFirstTranscriptCwd(path: string, maxBytes: number): Pr
     handle = await open(path, 'r');
     const buffer = Buffer.alloc(maxBytes + 1);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
-    const truncated = bytesRead > maxBytes;
-    const text = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8');
-    const lines = text.split('\n');
-    // 截斷時最後一段是半行，不解析；未截斷代表已到檔尾，整段都是完整行。
-    const completeCount = truncated ? lines.length - 1 : lines.length;
-    for (let i = 0; i < completeCount; i += 1) {
-      const cwd = extractCwdFromTranscriptLine(lines[i]);
-      if (cwd) return cwd;
-    }
-    return null;
+    return firstCwdInPrefix(buffer.subarray(0, bytesRead), maxBytes);
   } catch {
-    return null;
+    // 原檔不在（例：Codex 已壓成 .jsonl.zst）→ 解壓後只看開頭同樣的 maxBytes。
+    const compressed = await readCompressedTranscript(path);
+    return compressed ? firstCwdInPrefix(compressed, maxBytes) : null;
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** 只看 buffer 開頭 maxBytes；buffer 比 maxBytes 長代表截斷，最後一段是半行不解析。 */
+function firstCwdInPrefix(buffer: Buffer, maxBytes: number): string | null {
+  const truncated = buffer.length > maxBytes;
+  const text = buffer.subarray(0, Math.min(buffer.length, maxBytes)).toString('utf8');
+  const lines = text.split('\n');
+  const completeCount = truncated ? lines.length - 1 : lines.length;
+  for (let i = 0; i < completeCount; i += 1) {
+    const cwd = extractCwdFromTranscriptLine(lines[i]);
+    if (cwd) return cwd;
+  }
+  return null;
 }
 
 /**
@@ -1017,12 +1002,8 @@ async function readTranscriptBuffer(
   boundary: number,
   snapshotDir?: string,
 ): Promise<Buffer | null> {
-  let original: Buffer | null = null;
-  try {
-    original = await readFile(path);
-  } catch {
-    // An explicitly configured archive snapshot may still contain the captured prefix.
-  }
+  // 原檔不在就退到 <path>.zst（Codex 壓縮）；兩者皆無才看 archive snapshot。
+  const original = await readTranscriptSource(path);
   if (original && original.length >= boundary) return original;
   const root = snapshotDir?.trim();
   if (!root) return original;
@@ -1032,58 +1013,6 @@ async function readTranscriptBuffer(
   } catch {
     return original;
   }
-}
-
-function utf8SafeEnd(buffer: Buffer, start: number, proposedEnd: number, hardEnd: number): number {
-  let end = Math.max(start, Math.min(proposedEnd, hardEnd));
-  if (end >= hardEnd) return hardEnd;
-  while (end > start && (buffer[end] & 0xc0) === 0x80) {
-    end -= 1;
-  }
-  if (end > start) return end;
-  end = Math.min(proposedEnd, hardEnd);
-  while (end < hardEnd && (buffer[end] & 0xc0) === 0x80) {
-    end += 1;
-  }
-  return Math.max(start + 1, Math.min(end, hardEnd));
-}
-
-function splitTranscriptRange(
-  path: string,
-  pathHash: string,
-  buffer: Buffer,
-  start: number,
-  end: number,
-  maxBytes: number
-): TranscriptChunk[] {
-  const safeStart = Math.max(0, Math.min(start, buffer.length));
-  const safeEnd = Math.max(safeStart, Math.min(end, buffer.length));
-  const chunks: TranscriptChunk[] = [];
-  let cursor = safeStart;
-  while (cursor < safeEnd) {
-    const proposedEnd = Math.min(cursor + maxBytes, safeEnd);
-    let chunkEnd = proposedEnd;
-    if (proposedEnd < safeEnd) {
-      const newline = buffer.lastIndexOf(0x0a, proposedEnd - 1);
-      if (newline >= cursor) {
-        chunkEnd = newline + 1;
-      } else {
-        chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd, safeEnd);
-      }
-    }
-    if (chunkEnd <= cursor) {
-      chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd + 1, safeEnd);
-    }
-    chunks.push({
-      path,
-      pathHash,
-      start: cursor,
-      end: chunkEnd,
-      raw: buffer.subarray(cursor, chunkEnd),
-    });
-    cursor = chunkEnd;
-  }
-  return chunks;
 }
 
 function splitTranscriptChunk(chunk: TranscriptChunk): TranscriptChunk[] | null {
