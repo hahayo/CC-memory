@@ -194,14 +194,22 @@ function assessBacklog(evidence: ProductionReadinessEvidence): ReadinessGate {
   };
 }
 
+/** zlib 內建 zstd：22.15.0 與 23.8.0 起才有（官方 zlib 文件）；23.0–23.7 沒有，不能只看 major。 */
+export function nodeHasBuiltinZstd(nodeVersion: string): boolean {
+  const [major, minor] = nodeVersion.replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
+  if (major === 22) return minor >= 15;
+  if (major === 23) return minor >= 8;
+  return major > 23;
+}
+
 function assessCanary(evidence: ProductionReadinessEvidence): ReadinessGate {
-  const nodeMajor = Number.parseInt(evidence.nodeVersion.replace(/^v/, '').split('.')[0] ?? '', 10);
-  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+  if (!nodeHasBuiltinZstd(evidence.nodeVersion)) {
     return {
       id: 'g5-canary',
       status: 'FAIL',
-      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} does not satisfy the >=20 contract.`,
-      remediation: 'Use Node.js 20 or newer; CI and production verification should use Node.js 22.',
+      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} lacks built-in zlib zstd (need ^22.15.0 || >=23.8.0).`,
+      remediation: 'Use Node.js 22.15+ or 23.8+; CI and production verification use Node.js 22.',
     };
   }
   const repoContent = evidence.repoUnit.content;

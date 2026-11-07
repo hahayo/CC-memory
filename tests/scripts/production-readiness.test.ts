@@ -16,6 +16,7 @@ import {
   type ProductionReadinessPaths,
   type ProductionReadinessEvidence,
   type ReadinessEvidenceSource,
+  nodeHasBuiltinZstd,
 } from '../../scripts/lib/production-readiness.js';
 
 const REQUIRED_UNIT = `[Unit]
@@ -227,5 +228,18 @@ describe('production readiness evidence assessor', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('nodeHasBuiltinZstd', () => {
+  it('accepts only Node lines that ship zlib zstd (22.15+, 23.8+, 24+)', () => {
+    expect(nodeHasBuiltinZstd('v22.14.0')).toBe(false);
+    expect(nodeHasBuiltinZstd('v22.15.0')).toBe(true);
+    expect(nodeHasBuiltinZstd('v22.22.0')).toBe(true);
+    expect(nodeHasBuiltinZstd('v23.7.0')).toBe(false);
+    expect(nodeHasBuiltinZstd('v23.8.0')).toBe(true);
+    expect(nodeHasBuiltinZstd('v24.0.0')).toBe(true);
+    expect(nodeHasBuiltinZstd('v20.19.0')).toBe(false);
+    expect(nodeHasBuiltinZstd('')).toBe(false);
   });
 });

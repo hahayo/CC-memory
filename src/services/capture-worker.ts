@@ -8,7 +8,6 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { sql, type SQL } from 'drizzle-orm';
 import {
-  CLAUDE_CLI_PROVIDER_ID,
   CaptureLlmValidationError,
   PRIOR_SUMMARY_MAX_ITEM_CHARS,
   PRIOR_SUMMARY_MAX_ITEMS,
@@ -41,11 +40,11 @@ import { resolveProjectId } from './projects.js';
 import { decodeSpoolSegment } from './capture-spool.js';
 import { enrollFinalization, finalizeMarkerPath, finalizeQuietMs, finalizeSession, hasCloseMarker, runFinalizers } from './session-finalize.js';
 import { isSummaryDegraded, mergeGuardPending } from './summary-guard.js';
+import { readCompressedTranscript, readTranscriptSource } from './transcript-source.js';
+import { captureMaxWindowBytes, splitTranscriptRange, type TranscriptChunk } from './transcript-window.js';
 
 const DEFAULT_SPOOL_DIR = join(homedir(), '.cache', 'cc-memory', 'spool');
 const DEFAULT_SPOOL_MAX_MB = 500;
-const DEFAULT_CAPTURE_MAX_WINDOW_BYTES = 256 * 1024;
-const DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES = 32 * 1024;
 const PROMPT_TOO_LONG_RETRY_MIN_BYTES = 1024;
 const LLM_CALL_SETTLE_RESERVE_MS = 15_000;
 const SANDBOX_STAGING_SWEEP_AGE_MS = 60 * 60 * 1000;
@@ -281,14 +280,6 @@ interface TranscriptSourceRange {
   path_hash: string;
   start: number;
   end: number;
-}
-
-interface TranscriptChunk {
-  path: string;
-  pathHash: string;
-  start: number;
-  end: number;
-  raw: Buffer;
 }
 
 interface ParsedSpoolResult {
@@ -703,18 +694,6 @@ function spoolMaxBytes(env: Record<string, string | undefined>): number {
   return mb * 1024 * 1024;
 }
 
-function captureMaxWindowBytes(
-  env: Record<string, string | undefined>,
-  llm?: Pick<CaptureLlmAdapter, 'provider'>
-): number {
-  const parsed = Number.parseInt(env.CC_CAPTURE_MAX_WINDOW_BYTES ?? '', 10);
-  if (Number.isInteger(parsed) && parsed >= 4) return parsed;
-  if (llm?.provider === CLAUDE_CLI_PROVIDER_ID) {
-    return DEFAULT_CLAUDE_CAPTURE_MAX_WINDOW_BYTES;
-  }
-  return DEFAULT_CAPTURE_MAX_WINDOW_BYTES;
-}
-
 function captureMaxSessionsPerTick(env: Record<string, string | undefined>): number {
   return parsePositiveIntegerEnv(env.CC_CAPTURE_MAX_SESSIONS_PER_TICK, Number.MAX_SAFE_INTEGER);
 }
@@ -920,21 +899,27 @@ export async function readFirstTranscriptCwd(path: string, maxBytes: number): Pr
     handle = await open(path, 'r');
     const buffer = Buffer.alloc(maxBytes + 1);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
-    const truncated = bytesRead > maxBytes;
-    const text = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8');
-    const lines = text.split('\n');
-    // 截斷時最後一段是半行，不解析；未截斷代表已到檔尾，整段都是完整行。
-    const completeCount = truncated ? lines.length - 1 : lines.length;
-    for (let i = 0; i < completeCount; i += 1) {
-      const cwd = extractCwdFromTranscriptLine(lines[i]);
-      if (cwd) return cwd;
-    }
-    return null;
+    return firstCwdInPrefix(buffer.subarray(0, bytesRead), maxBytes);
   } catch {
-    return null;
+    // 原檔不在（例：Codex 已壓成 .jsonl.zst）→ 解壓後只看開頭同樣的 maxBytes。
+    const compressed = await readCompressedTranscript(path);
+    return compressed ? firstCwdInPrefix(compressed, maxBytes) : null;
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** 只看 buffer 開頭 maxBytes；buffer 比 maxBytes 長代表截斷，最後一段是半行不解析。 */
+function firstCwdInPrefix(buffer: Buffer, maxBytes: number): string | null {
+  const truncated = buffer.length > maxBytes;
+  const text = buffer.subarray(0, Math.min(buffer.length, maxBytes)).toString('utf8');
+  const lines = text.split('\n');
+  const completeCount = truncated ? lines.length - 1 : lines.length;
+  for (let i = 0; i < completeCount; i += 1) {
+    const cwd = extractCwdFromTranscriptLine(lines[i]);
+    if (cwd) return cwd;
+  }
+  return null;
 }
 
 /**
@@ -1017,12 +1002,8 @@ async function readTranscriptBuffer(
   boundary: number,
   snapshotDir?: string,
 ): Promise<Buffer | null> {
-  let original: Buffer | null = null;
-  try {
-    original = await readFile(path);
-  } catch {
-    // An explicitly configured archive snapshot may still contain the captured prefix.
-  }
+  // 原檔不在就退到 <path>.zst（Codex 壓縮）；兩者皆無才看 archive snapshot。
+  const original = await readTranscriptSource(path);
   if (original && original.length >= boundary) return original;
   const root = snapshotDir?.trim();
   if (!root) return original;
@@ -1032,58 +1013,6 @@ async function readTranscriptBuffer(
   } catch {
     return original;
   }
-}
-
-function utf8SafeEnd(buffer: Buffer, start: number, proposedEnd: number, hardEnd: number): number {
-  let end = Math.max(start, Math.min(proposedEnd, hardEnd));
-  if (end >= hardEnd) return hardEnd;
-  while (end > start && (buffer[end] & 0xc0) === 0x80) {
-    end -= 1;
-  }
-  if (end > start) return end;
-  end = Math.min(proposedEnd, hardEnd);
-  while (end < hardEnd && (buffer[end] & 0xc0) === 0x80) {
-    end += 1;
-  }
-  return Math.max(start + 1, Math.min(end, hardEnd));
-}
-
-function splitTranscriptRange(
-  path: string,
-  pathHash: string,
-  buffer: Buffer,
-  start: number,
-  end: number,
-  maxBytes: number
-): TranscriptChunk[] {
-  const safeStart = Math.max(0, Math.min(start, buffer.length));
-  const safeEnd = Math.max(safeStart, Math.min(end, buffer.length));
-  const chunks: TranscriptChunk[] = [];
-  let cursor = safeStart;
-  while (cursor < safeEnd) {
-    const proposedEnd = Math.min(cursor + maxBytes, safeEnd);
-    let chunkEnd = proposedEnd;
-    if (proposedEnd < safeEnd) {
-      const newline = buffer.lastIndexOf(0x0a, proposedEnd - 1);
-      if (newline >= cursor) {
-        chunkEnd = newline + 1;
-      } else {
-        chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd, safeEnd);
-      }
-    }
-    if (chunkEnd <= cursor) {
-      chunkEnd = utf8SafeEnd(buffer, cursor, proposedEnd + 1, safeEnd);
-    }
-    chunks.push({
-      path,
-      pathHash,
-      start: cursor,
-      end: chunkEnd,
-      raw: buffer.subarray(cursor, chunkEnd),
-    });
-    cursor = chunkEnd;
-  }
-  return chunks;
 }
 
 function splitTranscriptChunk(chunk: TranscriptChunk): TranscriptChunk[] | null {
@@ -1187,9 +1116,27 @@ function captureTextForTokenEstimate(extraction: CaptureLlmExtraction): string {
   ].join('\n');
 }
 
+/**
+ * rollup 的 metadata 欄位讀回來不一定是物件：postgres-js 的 jsonb 解析在某些 client 設定下會關掉
+ * （CI 測試庫的 `db.execute` 實測回字串，2026-11-08），字串就自己 JSON.parse 一次；壞字串當沒有。
+ */
+export function metadataRecord(metadata: unknown): Record<string, unknown> | null {
+  let value = metadata;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
 function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
-  const capture = (metadata as { capture?: unknown }).capture;
+  const root = metadataRecord(metadata);
+  if (!root) return null;
+  const capture = root.capture;
   if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return null;
   const record = capture as Partial<CaptureMetadata>;
   return {
@@ -1305,10 +1252,7 @@ function transcriptSourceCovered(
 }
 
 function mergeMetadata(metadata: unknown, capture: CaptureMetadata): Record<string, unknown> {
-  const base =
-    metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-      ? { ...(metadata as Record<string, unknown>) }
-      : {};
+  const base: Record<string, unknown> = { ...(metadataRecord(metadata) ?? {}) };
   base.capture = capture;
   return base;
 }
@@ -1340,10 +1284,16 @@ function stringArray(value: unknown): string[] {
 }
 
 export type PriorSummaryLookup =
-  | { kind: 'active'; summary: CapturePriorSummary }
+  /**
+   * transcriptSources＝既有 rollup 已涵蓋的對話檔範圍（path_hash＋位移）。死信回填缺口時拿它判斷時序：
+   * 同一對話檔內位移單調，跨 spool 輪替（spool 檔改名封存後位移歸零）也不受影響；spool_offsets 不能當時間軸。
+   */
+  | { kind: 'active'; summary: CapturePriorSummary; transcriptSources: TranscriptSourceRange[] }
   /** 同鍵只剩 Step C 併掉的 archived 列：這條 spool 的目的地已搬走，不得在舊專案重建 rollup。 */
   | { kind: 'merged'; mergedInto: string }
-  | { kind: 'none' };
+  | { kind: 'none' }
+  /** 查詢本身失敗（DB 斷線等）：live worker 視同 none 照舊抽取；replay 必須 fail-closed，不能猜。 */
+  | { kind: 'error'; message: string };
 
 /**
  * 接力摘要（2026-09-12）：抽取前撈同 session 既有 canonical rollup 的 summary／decisions／next_steps
@@ -1353,7 +1303,7 @@ export type PriorSummaryLookup =
  *   fail-closed：不叫 LLM、不推進 checkpoint（Codex R3 #1 止血；完整路由屬 Step C 後續項）；
  * - 其餘（含 DB 出錯）→ 'none'，退回舊行為（摘要只反映本段），不擋抽取。
  */
-async function loadPriorSessionSummary(
+export async function loadPriorSessionSummary(
   db: DbClient,
   projectId: string,
   sessionId: string
@@ -1391,10 +1341,29 @@ async function loadPriorSessionSummary(
         next_steps: stringArray(row.next_steps),
         ...(pendingSummary ? { pendingSummary } : {}),
       },
+      transcriptSources: capture?.transcript_sources ?? [],
     };
-  } catch {
-    return { kind: 'none' };
+  } catch (error) {
+    return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** 同鍵只剩 archived＋merged_into 的列（Step C 合併殘留）→ 回 merged_into；否則 null。 */
+async function selectMergedRollup(tx: DbClient, projectId: string, idempotencyKey: string): Promise<string | null> {
+  const rows = await executeRows<{ merged_into: unknown }>(
+    tx,
+    sql`
+      SELECT merged_into
+      FROM project_memories
+      WHERE project_id = ${projectId}
+        AND idempotency_key = ${idempotencyKey}
+        AND status = 'archived'
+        AND merged_into IS NOT NULL
+      LIMIT 1
+    `
+  );
+  if (!rows[0]) return null;
+  return typeof rows[0].merged_into === 'string' ? rows[0].merged_into : 'unknown';
 }
 
 async function selectRollup(tx: DbClient, projectId: string, idempotencyKey: string): Promise<RollupRow | null> {
@@ -1633,7 +1602,7 @@ async function insertObservation(
 
 /** Preserve finalization generation and retry fencing across new extraction windows. */
 function finalizationMetadata(metadata: unknown): Record<string, unknown> {
-  const capture = (metadata as { capture?: Record<string, unknown> } | null)?.capture ?? {};
+  const capture = (metadataRecord(metadata) as { capture?: Record<string, unknown> } | null)?.capture ?? {};
   return Object.fromEntries(Object.entries(capture).filter(([key]) => key.startsWith('finaliz')));
 }
 
@@ -1653,6 +1622,14 @@ async function writeCaptureWindow(
   const summary = extraction.session_summary;
   const idempotencyKey = `capture:v05:${window.projectId}:${window.sessionId}`;
   const existing = await selectRollup(tx, window.projectId, idempotencyKey);
+  if (!existing) {
+    // 交易內再擋一次：抽取前的 prior lookup 若剛好失敗（回 none），這裡是最後一道，
+    // 不然會在舊專案插回一筆 active rollup（partial unique index 只管 active 列）。
+    const mergedInto = await selectMergedRollup(tx, window.projectId, idempotencyKey);
+    if (mergedInto) {
+      throw new Error(`rollup for ${idempotencyKey} was merged into ${mergedInto}; refusing to recreate it`);
+    }
+  }
   const previousCapture = existingCaptureMetadata(existing?.metadata);
   if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
     return { observationsWritten: 0, rollupsWritten: 0, embeddingFailed: 0, replayed: true };
@@ -2966,8 +2943,38 @@ export type ReplayCaptureWindowResult =
       rollupsWritten: number;
       embeddingFailed: number;
     }
-  | { status: 'skipped'; reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' }
+  | {
+      status: 'skipped';
+      reason:
+        | 'content-hash-mismatch'
+        | 'empty-transcript'
+        | 'already-covered'
+        | 'session-merged'
+        | 'later-rollup-exists'
+        | 'rollup-order-unknown';
+    }
   | { status: 'failed'; errorCode: string; message: string };
+
+/**
+ * 死信回填能不能安全接在既有 rollup 後面：只用對話檔範圍（path_hash＋位移）判斷，不用 spool 位移
+ * （spool 檔輪替後位移歸零，跨世代比不得）。
+ * - 'ok'：rollup 沒有任何來源範圍比這段更晚（含這段本身已被涵蓋，交給 writeCaptureWindow 回 already-covered）。
+ * - 'later-rollup-exists'：同一對話檔已有位移更後面的內容被摘要過。
+ * - 'rollup-order-unknown'：rollup 沒記來源（2026-09 前的舊列，正式 DB 有 198 筆）或只記別的對話檔，先後不可知。
+ */
+export function replayOrderAgainstRollup(
+  rollupSources: TranscriptSourceRange[],
+  window: { path_hash: string; start: number; end: number },
+): 'ok' | 'later-rollup-exists' | 'rollup-order-unknown' {
+  if (rollupSources.some((s) => s.path_hash === window.path_hash && s.start <= window.start && s.end >= window.end)) {
+    return 'ok';
+  }
+  if (rollupSources.length === 0) return 'rollup-order-unknown';
+  const samePath = rollupSources.filter((s) => s.path_hash === window.path_hash);
+  if (samePath.length !== rollupSources.length) return 'rollup-order-unknown';
+  if (samePath.some((s) => s.end > window.start)) return 'later-rollup-exists';
+  return 'ok';
+}
 
 export async function replayCaptureWindow(
   input: ReplayCaptureWindowInput
@@ -3002,6 +3009,30 @@ export async function replayCaptureWindow(
   // Load prior summary so the replay path gets the same cumulative context
   // and summary guard protection as the main capture path.
   const priorLookup = await loadPriorSessionSummary(input.db, input.projectId, input.sessionId);
+  if (priorLookup.kind === 'merged') {
+    // 與 live worker 同一條 fail-closed：同鍵 rollup 已被 Step C 併到別的專案（archived＋merged_into），
+    // 再寫會在舊專案復活一筆 active rollup。不叫 LLM、不寫 DB；呼叫端不得改名死信。
+    input.stdout?.write(
+      `[cc-memory] replay info: merged-rollup-skip session=${input.sessionId} project=${input.projectId} merged_into=${priorLookup.mergedInto}\n`
+    );
+    return { status: 'skipped', reason: 'session-merged' };
+  }
+  if (priorLookup.kind === 'error') {
+    // 查不到就不猜：若其實是 merged，寫下去會復活舊專案 rollup。死信留著下次再來。
+    return { status: 'failed', errorCode: 'PRIOR_LOOKUP_FAILED', message: priorLookup.message };
+  }
+  if (priorLookup.kind === 'active') {
+    const order = replayOrderAgainstRollup(priorLookup.transcriptSources, input.source);
+    if (order !== 'ok') {
+      // 既有 rollup 已涵蓋比這張死信更晚的內容（或無法判斷先後）：現在回填會把「較晚摘要」當成較早摘要
+      // 餵給 LLM，decisions／next_steps 可能被舊狀態蓋掉（守衛只比長度，擋不住）。fail-closed，
+      // 留給「只寫 observations＋標記重建摘要」的後續功能處理。
+      input.stdout?.write(
+        `[cc-memory] replay info: ${order} session=${input.sessionId} project=${input.projectId} source=${input.source.path_hash.slice(0, 12)}:${input.source.start}-${input.source.end} rollup_sources=${priorLookup.transcriptSources.length}\n`
+      );
+      return { status: 'skipped', reason: order };
+    }
+  }
   const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
 
   let rawResponse: CaptureLlmRawResponse;

@@ -2,9 +2,13 @@
 /**
  * scripts/replay-dead-letters.ts — 重跑 spool/.dead 裡的死信窗口（dead-letter replay）。
  *
- * 適用：LLM 抽取連續超時被 park 的窗口（error_code=LLM_EXTRACT_FAILED）。
+ * 適用：LLM 抽取連續超時被 park 的窗口（error_code=LLM_EXTRACT_FAILED，預設），
+ * 以及對話檔當時讀不到、現在又讀得到的窗口（`--error-code TRANSCRIPT_SOURCE_UNAVAILABLE`；
+ * 2026-11-08 起對話檔會退到 `<path>.jsonl.zst`，Codex 壓縮過的舊對話因此救得回）。
  * 主迴圈 park 時 checkpoint 已越過該區間，永遠不會回頭；此腳本照死信記錄的
  * transcript 位置把原文撈回來，用「現在的」provider/model 重抽一次並寫 DB。
+ * 範圍超過單窗上限（CC_CAPTURE_MAX_WINDOW_BYTES，codex 預設 256 KiB）會照行界切成多窗依序抽，
+ * 全部成功才把死信改名；中途失敗則死信留著，已寫入的子窗下次重跑回 already-covered。
  *
  * 安全設計：
  *   - 預設 dry-run，只列清單；`--apply` 才會呼叫 LLM 與寫 DB。
@@ -18,7 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -27,7 +31,10 @@ import {
   isCaptureLlmDisabled,
   type CaptureLlmAdapter,
 } from '../src/services/capture-llm.js';
+// 只能 type import：capture-worker.js 一載入就會讀 src/config.ts（要求 DATABASE_URL），dry-run 不設 DB。
 import type { ReplayCaptureWindowResult } from '../src/services/capture-worker.js';
+import { assertZstdRuntime, readTranscriptSource, transcriptSourceLength } from '../src/services/transcript-source.js';
+import { captureMaxWindowBytes, splitTranscriptRange } from '../src/services/transcript-window.js';
 import type { DbClient } from '../src/services/types.js';
 import { checkProductionApproval } from './run-auto-capture-supervisor.js';
 
@@ -38,6 +45,12 @@ const DEFAULT_LOCK_FILE = path.join(homedir(), '.cache', 'cc-memory', 'auto-capt
 const DEFAULT_ERROR_CODE = 'LLM_EXTRACT_FAILED';
 const DEFAULT_EXPECT_MODEL = 'gpt-5.6-luna';
 const REPLAYED_SUFFIX = '.replayed';
+/**
+ * worker 在對話檔讀不到時寫的死信，source.content_hash 不是內容雜湊而是這個固定哨兵值
+ * （capture-worker.ts TRANSCRIPT_SOURCE_UNAVAILABLE_HASH），重放時視同「沒有雜湊可比對」。
+ */
+const TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = 'TRANSCRIPT_SOURCE_UNAVAILABLE';
+const TRANSCRIPT_SOURCE_UNAVAILABLE_HASH = createHash('sha256').update(TRANSCRIPT_SOURCE_UNAVAILABLE_CODE).digest('hex');
 
 export interface ReplayCliOptions {
   apply: boolean;
@@ -144,11 +157,12 @@ export function parseDeadLetter(file: string, raw: string): DeadLetterRecord | n
     const start = nonNegativeInteger(rawSource.start);
     const end = nonNegativeInteger(rawSource.end);
     if (start !== null && end !== null && end > start) {
+      const contentHash = typeof rawSource.content_hash === 'string' ? rawSource.content_hash : null;
       source = {
         path_hash: rawSource.path_hash,
         start,
         end,
-        content_hash: typeof rawSource.content_hash === 'string' ? rawSource.content_hash : null,
+        content_hash: contentHash === TRANSCRIPT_SOURCE_UNAVAILABLE_HASH ? null : contentHash,
       };
     }
   }
@@ -211,19 +225,27 @@ export async function buildTranscriptPathMap(spoolDir: string): Promise<Map<stri
   return map;
 }
 
+/**
+ * 對話檔長度快取（path → 長度；null＝原檔與 .zst 都沒有）。同一場對話平均有 2–3 張死信，
+ * 壓縮檔每次都要整個解壓才知道長度，所以在一次執行內只量一次。
+ */
+export type TranscriptLengthCache = Map<string, number | null>;
+
 export async function classifyCandidate(
   record: DeadLetterRecord,
   pathMap: Map<string, string>,
   errorCode: string,
+  lengthCache: TranscriptLengthCache = new Map(),
 ): Promise<ReplayCandidate> {
   const base = { record, transcriptPath: null as string | null, bytes: 0 };
   if (record.errorCode !== errorCode) return { ...base, status: 'error-code-filtered' };
   if (!record.source) return { ...base, status: 'no-source' };
   const transcriptPath = pathMap.get(record.source.path_hash);
   if (!transcriptPath) return { ...base, status: 'path-unresolved' };
-  const fileStat = await stat(transcriptPath).catch(() => null);
-  if (!fileStat) return { ...base, transcriptPath, status: 'transcript-deleted' };
-  if (fileStat.size < record.source.end) return { ...base, transcriptPath, status: 'transcript-truncated' };
+  if (!lengthCache.has(transcriptPath)) lengthCache.set(transcriptPath, await transcriptSourceLength(transcriptPath));
+  const length = lengthCache.get(transcriptPath) ?? null;
+  if (length === null) return { ...base, transcriptPath, status: 'transcript-deleted' };
+  if (length < record.source.end) return { ...base, transcriptPath, status: 'transcript-truncated' };
   return {
     record,
     transcriptPath,
@@ -247,8 +269,24 @@ function formatCandidateLine(candidate: ReplayCandidate): string {
   return `${candidate.status.padEnd(20)} ${r.model.padEnd(13)} ${r.projectId.padEnd(30)} ${kb.padStart(6)} ${src} ${path.basename(r.file)}`;
 }
 
-async function readTranscriptRange(transcriptPath: string, start: number, end: number): Promise<Buffer> {
-  const whole = await readFile(transcriptPath);
+/** 單格快取：同一場對話的死信連著排，壓縮檔只解壓一次；換路徑就釋放。 */
+interface TranscriptSourceCache {
+  path: string | null;
+  buffer: Buffer | null;
+}
+
+async function readTranscriptRange(
+  transcriptPath: string,
+  start: number,
+  end: number,
+  cache: TranscriptSourceCache,
+): Promise<Buffer | null> {
+  if (cache.path !== transcriptPath) {
+    cache.path = transcriptPath;
+    cache.buffer = await readTranscriptSource(transcriptPath);
+  }
+  const whole = cache.buffer;
+  if (!whole || whole.length < end) return null;
   return whole.subarray(start, end);
 }
 
@@ -258,12 +296,51 @@ export interface ReplayRuntime {
   generateEmbedding: (text: string) => Promise<number[] | null>;
   embeddingExpected: boolean;
   replay: typeof import('../src/services/capture-worker.js').replayCaptureWindow;
+  /**
+   * 單次 LLM 呼叫的 transcript 位元組上限（與 live worker 同一個 CC_CAPTURE_MAX_WINDOW_BYTES 口徑）。
+   * 死信記的是整段 checkpoint→boundary 範圍（對話檔不見那批平均 1.6 MB），必須照這個上限切窗；
+   * 省略＝不切（舊行為，只適合 LLM_EXTRACT_FAILED 那種本來就是單窗的死信）。
+   */
+  maxWindowBytes?: number;
+}
+
+/** 死信範圍切成 ≤ maxWindowBytes 的連續子窗（行界優先），回絕對位移。 */
+export function splitReplayRange(
+  raw: Buffer,
+  source: DeadLetterSource,
+  maxWindowBytes: number | undefined,
+): Array<{ raw: Buffer; start: number; end: number }> {
+  if (!maxWindowBytes || raw.length <= maxWindowBytes) {
+    return [{ raw, start: source.start, end: source.end }];
+  }
+  return splitTranscriptRange('', source.path_hash, raw, 0, raw.length, maxWindowBytes).map((chunk) => ({
+    raw: chunk.raw,
+    start: source.start + chunk.start,
+    end: source.start + chunk.end,
+  }));
+}
+
+/**
+ * 同一場對話的死信照 spool 位移由小到大排，累積摘要才會依時間順序接力。
+ * 不能用 transcript 位移：同一 session 可能有多個對話檔（子代理），每個檔的位移都從 0 起算，
+ * spool 檔的位移才是單調的時間軸。
+ */
+export function orderCandidates(candidates: ReplayCandidate[]): ReplayCandidate[] {
+  return [...candidates].sort((a, b) =>
+    a.record.projectId.localeCompare(b.record.projectId) ||
+    a.record.sessionId.localeCompare(b.record.sessionId) ||
+    a.record.spoolOffset.start - b.record.spoolOffset.start ||
+    a.record.spoolOffset.end - b.record.spoolOffset.end,
+  );
 }
 
 export interface ReplayTotals {
   written: number;
   observations: number;
+  /** 死信已改名（已寫入或 DB 判定 already-covered）。 */
   skipped: number;
+  /** 死信留在 .dead：hash 不符、session 已合併、已有較晚 rollup、空內容——要人看，exit 非 0。 */
+  retained: number;
   failed: number;
 }
 
@@ -273,42 +350,79 @@ export async function replayCandidates(
   runtime: ReplayRuntime,
   stdout: { write(chunk: string): unknown },
 ): Promise<ReplayTotals> {
-  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, failed: 0 };
+  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, retained: 0, failed: 0 };
+  const cache: TranscriptSourceCache = { path: null, buffer: null };
   for (const candidate of candidates) {
     const r = candidate.record;
     if (candidate.status !== 'READABLE' || !candidate.transcriptPath || !r.source) continue;
-    const raw = await readTranscriptRange(candidate.transcriptPath, r.source.start, r.source.end);
-    const startedAt = Date.now();
-    const result: ReplayCaptureWindowResult = await runtime.replay({
-      db: runtime.db,
-      llm: runtime.llm,
-      projectId: r.projectId,
-      sessionId: r.sessionId,
-      transcriptPath: candidate.transcriptPath,
-      raw,
-      spoolOffset: r.spoolOffset,
-      hwmOffset: r.hwmOffset,
-      source: r.source,
-      generateEmbedding: runtime.generateEmbedding,
-      embeddingExpected: runtime.embeddingExpected,
-    });
-    const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`;
+    const raw = await readTranscriptRange(candidate.transcriptPath, r.source.start, r.source.end, cache);
     const label = `${r.projectId} ${shortHash(r.source.path_hash)}:${r.source.start}-${r.source.end}`;
-    if (result.status === 'written') {
-      totals.written += 1;
-      totals.observations += result.observationsWritten;
-      await markReplayed(r.file, result);
-      stdout.write(
-        `[replay] written  ${label} model=${result.model} observations=${result.observationsWritten} embedding-failed=${result.embeddingFailed} ${elapsed}\n`
-      );
-    } else if (result.status === 'skipped') {
-      totals.skipped += 1;
-      if (result.reason === 'already-covered') await markReplayed(r.file, result);
-      stdout.write(`[replay] skipped  ${label} reason=${result.reason} ${elapsed}\n`);
-    } else {
+    if (!raw) {
+      // 分類時還讀得到、現在讀不到（檔案剛被刪或壓縮中）：算失敗、死信留著下次再來。
       totals.failed += 1;
-      stdout.write(`[replay] failed   ${label} code=${result.errorCode} ${elapsed} message=${result.message.slice(0, 160)}\n`);
+      stdout.write(`[replay] failed   ${label} code=TRANSCRIPT_SOURCE_UNAVAILABLE 0s message=transcript vanished between classify and replay\n`);
+      continue;
     }
+    // 死信帶真正的內容雜湊時，先對整段驗；切窗後各子窗沒有自己的雜湊，驗過的整段才放行。
+    if (r.source.content_hash && sha256Hex(raw) !== r.source.content_hash) {
+      totals.retained += 1;
+      stdout.write(`[replay] retained ${label} reason=content-hash-mismatch 0s\n`);
+      continue;
+    }
+    const windows = splitReplayRange(raw, r.source, runtime.maxWindowBytes);
+    // 整段已驗過（或本來就沒有雜湊），子窗一律不再帶雜湊給 replayCaptureWindow 比對。
+    const contentHash = null;
+    let lastResult: ReplayCaptureWindowResult | null = null;
+    let windowFailed = false;
+    let observations = 0;
+    for (const [index, window] of windows.entries()) {
+      const startedAt = Date.now();
+      const result: ReplayCaptureWindowResult = await runtime.replay({
+        db: runtime.db,
+        llm: runtime.llm,
+        projectId: r.projectId,
+        sessionId: r.sessionId,
+        transcriptPath: candidate.transcriptPath,
+        raw: window.raw,
+        spoolOffset: r.spoolOffset,
+        hwmOffset: { start: window.start, end: window.end },
+        source: { path_hash: r.source.path_hash, start: window.start, end: window.end, content_hash: contentHash },
+        generateEmbedding: runtime.generateEmbedding,
+        embeddingExpected: runtime.embeddingExpected,
+      });
+      lastResult = result;
+      const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`;
+      const part = windows.length > 1 ? ` part=${index + 1}/${windows.length} ${window.start}-${window.end}` : '';
+      if (result.status === 'written') {
+        observations += result.observationsWritten;
+        stdout.write(
+          `[replay] written  ${label}${part} model=${result.model} observations=${result.observationsWritten} embedding-failed=${result.embeddingFailed} ${elapsed}\n`
+        );
+      } else if (result.status === 'skipped') {
+        stdout.write(`[replay] skipped  ${label}${part} reason=${result.reason} ${elapsed}\n`);
+        // content-hash-mismatch／empty-transcript 代表這段不會再有結果，留死信給人看；already-covered 可以繼續。
+        if (result.reason !== 'already-covered') { windowFailed = true; break; }
+      } else {
+        stdout.write(`[replay] failed   ${label}${part} code=${result.errorCode} ${elapsed} message=${result.message.slice(0, 160)}\n`);
+        windowFailed = true;
+        break;
+      }
+    }
+    if (!lastResult) continue;
+    if (windowFailed) {
+      // 已寫入的子窗下次重跑會回 already-covered（idempotency key 同一段範圍），不會重複寫。
+      // 死信沒改名就不算成功：skipped 原因要人判斷的計 retained，讓 exit code 看得出來。
+      if (lastResult.status === 'skipped') totals.retained += 1;
+      else totals.failed += 1;
+      continue;
+    }
+    if (observations > 0 || lastResult.status === 'written') {
+      totals.written += 1;
+      totals.observations += observations;
+    } else {
+      totals.skipped += 1;
+    }
+    await markReplayed(r.file, lastResult);
   }
   return totals;
 }
@@ -367,15 +481,21 @@ async function main(): Promise<number> {
   const records = await listDeadLetters(options.spoolDir);
   const pathMap = await buildTranscriptPathMap(options.spoolDir);
   const candidates: ReplayCandidate[] = [];
-  for (const record of records) candidates.push(await classifyCandidate(record, pathMap, options.errorCode));
+  const lengthCache: TranscriptLengthCache = new Map();
+  for (const record of records) candidates.push(await classifyCandidate(record, pathMap, options.errorCode, lengthCache));
 
   const counts = new Map<ReplayCandidateStatus, number>();
   for (const c of candidates) counts.set(c.status, (counts.get(c.status) ?? 0) + 1);
   stdout.write(`[replay] dead-letters=${records.length} error-code=${options.errorCode}\n`);
   for (const [status, n] of [...counts.entries()].sort()) stdout.write(`[replay]   ${status}=${n}\n`);
 
-  const readable = candidates.filter((c) => c.status === 'READABLE').slice(0, options.limit);
-  stdout.write(`[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''}\n`);
+  const readable = orderCandidates(candidates.filter((c) => c.status === 'READABLE')).slice(0, options.limit);
+  const readableBytes = readable.reduce((sum, c) => sum + c.bytes, 0);
+  // 本次 error-code 範圍內、分類就讀不到的死信：留在 .dead，不能讓 --apply 回 0。
+  const unreadable = candidates.filter((c) => c.status !== 'READABLE' && c.status !== 'error-code-filtered').length;
+  stdout.write(
+    `[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''} bytes=${(readableBytes / 1e6).toFixed(1)}MB sessions=${new Set(readable.map((c) => c.record.sessionId)).size} unreadable=${unreadable}\n`
+  );
   for (const c of candidates) {
     if (c.status === 'READABLE' || c.status === 'path-unresolved' || c.status === 'transcript-truncated') {
       stdout.write(`  ${formatCandidateLine(c)}\n`);
@@ -388,8 +508,8 @@ async function main(): Promise<number> {
     return 0;
   }
   if (readable.length === 0) {
-    stdout.write('[replay] nothing to replay\n');
-    return 0;
+    stdout.write(`[replay] nothing to replay${unreadable > 0 ? ` (unreadable=${unreadable} still in .dead)` : ''}\n`);
+    return unreadable > 0 ? 2 : 0;
   }
 
   let databaseUrl: string;
@@ -409,6 +529,7 @@ async function main(): Promise<number> {
   const llm = createCaptureLlmAdapter({ env: process.env, emitDisabledWarning: false });
   try {
     assertExpectedLlm(llm, options.expectModel);
+    assertZstdRuntime();
   } catch (error) {
     process.stderr.write(`[replay] preflight failed: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
@@ -437,11 +558,13 @@ async function main(): Promise<number> {
       generateEmbedding,
       embeddingExpected: Boolean(geminiKey),
       replay: replayCaptureWindow,
+      maxWindowBytes: captureMaxWindowBytes(process.env, llm),
     }, stdout);
     stdout.write(
-      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} failed=${totals.failed}\n`
+      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed} unreadable=${unreadable}\n`
     );
-    return totals.failed > 0 ? 2 : 0;
+    // retained／unreadable 也算沒做完：死信還在 .dead，自動化不能把它當成功。
+    return totals.failed > 0 || totals.retained > 0 || unreadable > 0 ? 2 : 0;
   } finally {
     await client.end();
   }
