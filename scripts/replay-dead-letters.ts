@@ -269,8 +269,23 @@ function formatCandidateLine(candidate: ReplayCandidate): string {
   return `${candidate.status.padEnd(20)} ${r.model.padEnd(13)} ${r.projectId.padEnd(30)} ${kb.padStart(6)} ${src} ${path.basename(r.file)}`;
 }
 
-async function readTranscriptRange(transcriptPath: string, start: number, end: number): Promise<Buffer | null> {
-  const whole = await readTranscriptSource(transcriptPath);
+/** 單格快取：同一場對話的死信連著排，壓縮檔只解壓一次；換路徑就釋放。 */
+interface TranscriptSourceCache {
+  path: string | null;
+  buffer: Buffer | null;
+}
+
+async function readTranscriptRange(
+  transcriptPath: string,
+  start: number,
+  end: number,
+  cache: TranscriptSourceCache,
+): Promise<Buffer | null> {
+  if (cache.path !== transcriptPath) {
+    cache.path = transcriptPath;
+    cache.buffer = await readTranscriptSource(transcriptPath);
+  }
+  const whole = cache.buffer;
   if (!whole || whole.length < end) return null;
   return whole.subarray(start, end);
 }
@@ -305,11 +320,17 @@ export function splitReplayRange(
   }));
 }
 
-/** 同一場對話的死信照位移由小到大排，累積摘要才會依時間順序接力。 */
+/**
+ * 同一場對話的死信照 spool 位移由小到大排，累積摘要才會依時間順序接力。
+ * 不能用 transcript 位移：同一 session 可能有多個對話檔（子代理），每個檔的位移都從 0 起算，
+ * spool 檔的位移才是單調的時間軸。
+ */
 export function orderCandidates(candidates: ReplayCandidate[]): ReplayCandidate[] {
   return [...candidates].sort((a, b) =>
+    a.record.projectId.localeCompare(b.record.projectId) ||
     a.record.sessionId.localeCompare(b.record.sessionId) ||
-    (a.record.source?.start ?? 0) - (b.record.source?.start ?? 0),
+    a.record.spoolOffset.start - b.record.spoolOffset.start ||
+    a.record.spoolOffset.end - b.record.spoolOffset.end,
   );
 }
 
@@ -327,10 +348,11 @@ export async function replayCandidates(
   stdout: { write(chunk: string): unknown },
 ): Promise<ReplayTotals> {
   const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, failed: 0 };
+  const cache: TranscriptSourceCache = { path: null, buffer: null };
   for (const candidate of candidates) {
     const r = candidate.record;
     if (candidate.status !== 'READABLE' || !candidate.transcriptPath || !r.source) continue;
-    const raw = await readTranscriptRange(candidate.transcriptPath, r.source.start, r.source.end);
+    const raw = await readTranscriptRange(candidate.transcriptPath, r.source.start, r.source.end, cache);
     const label = `${r.projectId} ${shortHash(r.source.path_hash)}:${r.source.start}-${r.source.end}`;
     if (!raw) {
       // 分類時還讀得到、現在讀不到（檔案剛被刪或壓縮中）：算失敗、死信留著下次再來。
@@ -338,9 +360,15 @@ export async function replayCandidates(
       stdout.write(`[replay] failed   ${label} code=TRANSCRIPT_SOURCE_UNAVAILABLE 0s message=transcript vanished between classify and replay\n`);
       continue;
     }
+    // 死信帶真正的內容雜湊時，先對整段驗；切窗後各子窗沒有自己的雜湊，驗過的整段才放行。
+    if (r.source.content_hash && sha256Hex(raw) !== r.source.content_hash) {
+      totals.skipped += 1;
+      stdout.write(`[replay] skipped  ${label} reason=content-hash-mismatch 0s\n`);
+      continue;
+    }
     const windows = splitReplayRange(raw, r.source, runtime.maxWindowBytes);
-    // 切成多窗後各窗沒有自己的內容雜湊可比；只有單窗才沿用死信原本的 content_hash。
-    const contentHash = windows.length === 1 ? r.source.content_hash : null;
+    // 整段已驗過（或本來就沒有雜湊），子窗一律不再帶雜湊給 replayCaptureWindow 比對。
+    const contentHash = null;
     let lastResult: ReplayCaptureWindowResult | null = null;
     let windowFailed = false;
     let observations = 0;

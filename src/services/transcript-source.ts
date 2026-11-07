@@ -15,11 +15,15 @@ import { promisify } from 'node:util';
 import { zstdDecompress as zstdDecompressCb } from 'node:zlib';
 
 export const COMPRESSED_TRANSCRIPT_SUFFIX = '.zst';
-/** 實測最大 Codex rollout 解壓後約 20 MB；512 MiB 留足夠餘裕又擋住惡意壓縮炸彈。 */
-export const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 512 * 1024 * 1024;
+/**
+ * 2026-11-08 實測最大 Codex rollout 解壓後 17.6 MB（1,772 個檔的 p90 7.5 MB）；128 MiB 留 7 倍餘裕，
+ * 同時擋住壓縮炸彈——worker 會把壓縮檔與解壓結果同時放在記憶體，unit 沒設 MemoryMax。
+ */
+export const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 128 * 1024 * 1024;
 
-/** Node ≥ 22.15 才有內建 zstd；舊版（engines 仍允許 20）沒有退路，一律當成「壓縮檔讀不到」。 */
+/** Node ≥ 22.15 才有內建 zstd（package.json engines 已要求）；萬一跑在舊版，只警告一次，壓縮檔一律回 null。 */
 const zstdDecompress = typeof zstdDecompressCb === 'function' ? promisify(zstdDecompressCb) : null;
+let warnedNoZstd = false;
 
 export function compressedTranscriptPath(path: string): string {
   return `${path}${COMPRESSED_TRANSCRIPT_SUFFIX}`;
@@ -27,7 +31,15 @@ export function compressedTranscriptPath(path: string): string {
 
 /** 只讀壓縮檔 `<path>.zst`；不存在、不是 regular file、解壓失敗或超過上限都回 null。 */
 export async function readCompressedTranscript(path: string): Promise<Buffer | null> {
-  if (!zstdDecompress) return null;
+  if (!zstdDecompress) {
+    if (!warnedNoZstd) {
+      warnedNoZstd = true;
+      process.stderr.write(
+        `[cc-memory] transcript-source warning: node ${process.version} has no zlib zstd; .jsonl.zst transcripts will read as unavailable (need >= 22.15)\n`
+      );
+    }
+    return null;
+  }
   const compressedPath = compressedTranscriptPath(path);
   try {
     const info = await lstat(compressedPath);

@@ -162,18 +162,28 @@ describe('splitReplayRange / orderCandidates', () => {
     expect(Buffer.concat(parts.map((p) => p.raw)).equals(raw)).toBe(true);
   });
 
-  it('orders candidates by session then by source offset so prior summaries chain in time order', () => {
-    const make = (sessionId: string, start: number): ReplayCandidate => ({
-      record: parseDeadLetter(`/x/${sessionId}-${start}.json`, deadLetterPayload({
+  it('orders candidates by project, session, then spool offset (not transcript offset) so prior summaries chain in time order', () => {
+    // 同一 session 兩個對話檔（parent／child）：child 的 transcript 位移從 0 起算但在 spool 裡較晚。
+    const make = (projectId: string, sessionId: string, spoolStart: number, pathHash: string, start: number): ReplayCandidate => ({
+      record: parseDeadLetter(`/x/${sessionId}-${spoolStart}.json`, deadLetterPayload({
+        project_id: projectId,
         session_id: sessionId,
-        source: { path_hash: 'h', start, end: start + 10, content_hash: null },
+        offset: { start: spoolStart, end: spoolStart + 5 },
+        source: { path_hash: pathHash, start, end: start + 10, content_hash: null },
       }))!,
       status: 'READABLE',
       transcriptPath: '/t',
       bytes: 10,
     });
-    const ordered = orderCandidates([make('b', 500), make('a', 900), make('b', 100), make('a', 0)]);
-    expect(ordered.map((c) => `${c.record.sessionId}:${c.record.source!.start}`)).toEqual(['a:0', 'a:900', 'b:100', 'b:500']);
+    const ordered = orderCandidates([
+      make('p', 'b', 300, 'child', 0),
+      make('p', 'a', 900, 'parent', 900),
+      make('p', 'b', 200, 'parent', 500000),
+      make('o', 'z', 0, 'parent', 0),
+      make('p', 'a', 100, 'parent', 0),
+    ]);
+    expect(ordered.map((c) => `${c.record.projectId}/${c.record.sessionId}@${c.record.spoolOffset.start}`))
+      .toEqual(['o/z@0', 'p/a@100', 'p/a@900', 'p/b@200', 'p/b@300']);
   });
 });
 
@@ -320,6 +330,67 @@ describe('replayCandidates', () => {
     expect((await listDeadLetters(spool)).length).toBe(0);
     const replayed = JSON.parse(await readFile(replayedFileName(deadFile), 'utf8')) as { replayed?: { status?: string } };
     expect(replayed.replayed?.status).toBe('written');
+  });
+
+  it('verifies a real content_hash over the whole range before splitting, and skips without renaming on mismatch', async () => {
+    const spool = makeSpool();
+    const transcript = join(spool, 'transcript.jsonl');
+    const original = 'alpha-1\nbravo-2\ncharl-3\n';
+    writeFileSync(transcript, 'xlpha-1\nbravo-2\ncharl-3\n'); // 等長、內容不同
+    const deadFile = join(spool, '.dead', 'dl.json');
+    writeFileSync(deadFile, deadLetterPayload({
+      source: { path_hash: sha256(transcript), start: 0, end: original.length, content_hash: sha256(original) },
+      hwm_offset: { start: 0, end: original.length },
+    }));
+    const [record] = await listDeadLetters(spool);
+    const calls: string[] = [];
+    const runtime: ReplayRuntime = {
+      db: {} as never,
+      llm: fakeLlm({}),
+      generateEmbedding: async () => null,
+      embeddingExpected: false,
+      maxWindowBytes: 10,
+      replay: async (input) => {
+        calls.push(input.raw.toString('utf8'));
+        return { status: 'written', model: 'gpt-5.6-luna', observationsWritten: 1, rollupsWritten: 1, embeddingFailed: 0 };
+      },
+    };
+    const out: string[] = [];
+    const totals = await replayCandidates(
+      [{ record, status: 'READABLE', transcriptPath: transcript, bytes: original.length }],
+      runtime,
+      { write: (c: string) => out.push(c) },
+    );
+    expect(calls).toEqual([]);
+    expect(totals).toEqual({ written: 0, observations: 0, skipped: 1, failed: 0 });
+    expect(out.join('')).toContain('reason=content-hash-mismatch');
+    expect((await listDeadLetters(spool)).length).toBe(1);
+  });
+
+  it('leaves the dead-letter alone when replayCaptureWindow reports the session was merged into another project', async () => {
+    const spool = makeSpool();
+    const transcript = join(spool, 'transcript.jsonl');
+    writeFileSync(transcript, 'x'.repeat(50));
+    const deadFile = join(spool, '.dead', 'dl.json');
+    writeFileSync(deadFile, deadLetterPayload({
+      source: { path_hash: sha256(transcript), start: 0, end: 50, content_hash: null },
+      hwm_offset: { start: 0, end: 50 },
+    }));
+    const [record] = await listDeadLetters(spool);
+    const runtime: ReplayRuntime = {
+      db: {} as never,
+      llm: fakeLlm({}),
+      generateEmbedding: async () => null,
+      embeddingExpected: false,
+      replay: async () => ({ status: 'skipped', reason: 'session-merged' }),
+    };
+    const totals = await replayCandidates(
+      [{ record, status: 'READABLE', transcriptPath: transcript, bytes: 50 }],
+      runtime,
+      { write: () => undefined },
+    );
+    expect(totals).toEqual({ written: 0, observations: 0, skipped: 1, failed: 0 });
+    expect((await listDeadLetters(spool)).length).toBe(1);
   });
 
   it('leaves the dead-letter untouched on failure', async () => {

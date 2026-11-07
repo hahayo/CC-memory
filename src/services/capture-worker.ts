@@ -2895,7 +2895,7 @@ export type ReplayCaptureWindowResult =
       rollupsWritten: number;
       embeddingFailed: number;
     }
-  | { status: 'skipped'; reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' }
+  | { status: 'skipped'; reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' | 'session-merged' }
   | { status: 'failed'; errorCode: string; message: string };
 
 export async function replayCaptureWindow(
@@ -2931,6 +2931,14 @@ export async function replayCaptureWindow(
   // Load prior summary so the replay path gets the same cumulative context
   // and summary guard protection as the main capture path.
   const priorLookup = await loadPriorSessionSummary(input.db, input.projectId, input.sessionId);
+  if (priorLookup.kind === 'merged') {
+    // 與 live worker 同一條 fail-closed：同鍵 rollup 已被 Step C 併到別的專案（archived＋merged_into），
+    // 再寫會在舊專案復活一筆 active rollup。不叫 LLM、不寫 DB；呼叫端不得改名死信。
+    input.stdout?.write(
+      `[cc-memory] replay info: merged-rollup-skip session=${input.sessionId} project=${input.projectId} merged_into=${priorLookup.mergedInto}\n`
+    );
+    return { status: 'skipped', reason: 'session-merged' };
+  }
   const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
 
   let rawResponse: CaptureLlmRawResponse;

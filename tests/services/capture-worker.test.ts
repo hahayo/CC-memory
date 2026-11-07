@@ -4804,4 +4804,52 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
     await sql`DELETE FROM project_memories WHERE project_id = ${projectId}`;
     await sql`DELETE FROM observations WHERE project_id = ${projectId}`;
   });
+
+  it('fails closed like the live worker when the session rollup was merged into another project: no LLM, no rows, skipped session-merged', async () => {
+    const projectId = `replay-merged-${randomUUID()}`;
+    const targetProject = `${projectId}-target`;
+    const sessionId = `session-replay-merged-${randomUUID()}`;
+    const [{ id: targetId }] = await sql<{ id: string }[]>`
+      INSERT INTO project_memories (project_id, type, summary, status, idempotency_key)
+      VALUES (${targetProject}, 'session', 'survivor summary', 'active', ${`capture:v05:${targetProject}:${sessionId}`})
+      RETURNING id`;
+    await sql`
+      INSERT INTO project_memories (project_id, type, summary, status, merged_into, idempotency_key)
+      VALUES (${projectId}, 'session', 'old summary', 'archived', ${targetId}::uuid, ${`capture:v05:${projectId}:${sessionId}`})`;
+
+    let llmCalls = 0;
+    const mockLlm: CaptureLlmAdapter = {
+      model: 'test-model',
+      provider: 'test',
+      worstCaseCallBudgetMs: 10_000,
+      extract: async () => {
+        llmCalls += 1;
+        throw new Error('must not be called');
+      },
+      takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 0, fallbackSuccess: 0, fallbackFailed: 0 }),
+    };
+    const out: string[] = [];
+    const result = await replayCaptureWindow({
+      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+      llm: mockLlm,
+      projectId,
+      sessionId,
+      transcriptPath: '/dev/null',
+      raw: Buffer.from('old backlog for a merged session'),
+      spoolOffset: { start: 0, end: 100 },
+      hwmOffset: { start: 0, end: 100 },
+      source: { path_hash: 'replay-merged-test', start: 0, end: 100, content_hash: null },
+      stdout: { write: (c: string) => out.push(c) },
+    });
+
+    expect(result).toEqual({ status: 'skipped', reason: 'session-merged' });
+    expect(llmCalls).toBe(0);
+    expect(out.join('')).toContain(`merged-rollup-skip session=${sessionId}`);
+    const oldActive = await sql`SELECT id FROM project_memories WHERE project_id = ${projectId} AND status = 'active'`;
+    expect(oldActive).toHaveLength(0);
+    const obs = await sql`SELECT id FROM observations WHERE project_id = ${projectId}`;
+    expect(obs).toHaveLength(0);
+
+    await sql`DELETE FROM project_memories WHERE project_id IN (${projectId}, ${targetProject})`;
+  });
 });
