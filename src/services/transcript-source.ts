@@ -20,10 +20,23 @@ export const COMPRESSED_TRANSCRIPT_SUFFIX = '.zst';
  * 同時擋住壓縮炸彈——worker 會把壓縮檔與解壓結果同時放在記憶體，unit 沒設 MemoryMax。
  */
 export const MAX_DECOMPRESSED_TRANSCRIPT_BYTES = 128 * 1024 * 1024;
+/** 壓縮檔本身的大小上限（實測最大 20.2 MB）；超過就不讀進記憶體，直接當不可用。 */
+export const MAX_COMPRESSED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+/** 最低 Node 版本：zlib 內建 zstd 自 22.15.0 起。 */
+export const MIN_NODE_VERSION_FOR_ZSTD = '22.15.0';
 
 /** Node ≥ 22.15 才有內建 zstd（package.json engines 已要求）；萬一跑在舊版，只警告一次，壓縮檔一律回 null。 */
 const zstdDecompress = typeof zstdDecompressCb === 'function' ? promisify(zstdDecompressCb) : null;
 let warnedNoZstd = false;
+
+/** 啟動門檻：live supervisor 與 replay --apply 開跑前呼叫；沒有 zstd 就拋，不讓它靜默退化。 */
+export function assertZstdRuntime(): void {
+  if (!zstdDecompress) {
+    throw new Error(
+      `node ${process.version} has no zlib zstd support; cc-memory needs >= ${MIN_NODE_VERSION_FOR_ZSTD} to read .jsonl.zst transcripts`
+    );
+  }
+}
 
 export function compressedTranscriptPath(path: string): string {
   return `${path}${COMPRESSED_TRANSCRIPT_SUFFIX}`;
@@ -43,7 +56,7 @@ export async function readCompressedTranscript(path: string): Promise<Buffer | n
   const compressedPath = compressedTranscriptPath(path);
   try {
     const info = await lstat(compressedPath);
-    if (!info.isFile()) return null;
+    if (!info.isFile() || info.size > MAX_COMPRESSED_TRANSCRIPT_BYTES) return null;
     const compressed = await readFile(compressedPath);
     return await zstdDecompress(compressed, { maxOutputLength: MAX_DECOMPRESSED_TRANSCRIPT_BYTES });
   } catch {

@@ -1269,10 +1269,13 @@ function stringArray(value: unknown): string[] {
 }
 
 export type PriorSummaryLookup =
-  | { kind: 'active'; summary: CapturePriorSummary }
+  /** maxSpoolOffsetEnd＝既有 rollup 已涵蓋的最大 spool 位移；死信回填比它早的缺口時用來判斷時序。 */
+  | { kind: 'active'; summary: CapturePriorSummary; maxSpoolOffsetEnd: number | null }
   /** 同鍵只剩 Step C 併掉的 archived 列：這條 spool 的目的地已搬走，不得在舊專案重建 rollup。 */
   | { kind: 'merged'; mergedInto: string }
-  | { kind: 'none' };
+  | { kind: 'none' }
+  /** 查詢本身失敗（DB 斷線等）：live worker 視同 none 照舊抽取；replay 必須 fail-closed，不能猜。 */
+  | { kind: 'error'; message: string };
 
 /**
  * 接力摘要（2026-09-12）：抽取前撈同 session 既有 canonical rollup 的 summary／decisions／next_steps
@@ -1312,6 +1315,7 @@ async function loadPriorSessionSummary(
     // Check for a pending summary from a guarded window that needs merging.
     const capture = existingCaptureMetadata(row.metadata);
     const pendingSummary = capture?.summary_guard_pending;
+    const offsets = capture?.spool_offsets ?? [];
     return {
       kind: 'active',
       summary: {
@@ -1320,10 +1324,29 @@ async function loadPriorSessionSummary(
         next_steps: stringArray(row.next_steps),
         ...(pendingSummary ? { pendingSummary } : {}),
       },
+      maxSpoolOffsetEnd: offsets.length > 0 ? Math.max(...offsets.map((offset) => offset.end)) : null,
     };
-  } catch {
-    return { kind: 'none' };
+  } catch (error) {
+    return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** 同鍵只剩 archived＋merged_into 的列（Step C 合併殘留）→ 回 merged_into；否則 null。 */
+async function selectMergedRollup(tx: DbClient, projectId: string, idempotencyKey: string): Promise<string | null> {
+  const rows = await executeRows<{ merged_into: unknown }>(
+    tx,
+    sql`
+      SELECT merged_into
+      FROM project_memories
+      WHERE project_id = ${projectId}
+        AND idempotency_key = ${idempotencyKey}
+        AND status = 'archived'
+        AND merged_into IS NOT NULL
+      LIMIT 1
+    `
+  );
+  if (!rows[0]) return null;
+  return typeof rows[0].merged_into === 'string' ? rows[0].merged_into : 'unknown';
 }
 
 async function selectRollup(tx: DbClient, projectId: string, idempotencyKey: string): Promise<RollupRow | null> {
@@ -1582,6 +1605,14 @@ async function writeCaptureWindow(
   const summary = extraction.session_summary;
   const idempotencyKey = `capture:v05:${window.projectId}:${window.sessionId}`;
   const existing = await selectRollup(tx, window.projectId, idempotencyKey);
+  if (!existing) {
+    // 交易內再擋一次：抽取前的 prior lookup 若剛好失敗（回 none），這裡是最後一道，
+    // 不然會在舊專案插回一筆 active rollup（partial unique index 只管 active 列）。
+    const mergedInto = await selectMergedRollup(tx, window.projectId, idempotencyKey);
+    if (mergedInto) {
+      throw new Error(`rollup for ${idempotencyKey} was merged into ${mergedInto}; refusing to recreate it`);
+    }
+  }
   const previousCapture = existingCaptureMetadata(existing?.metadata);
   if (transcriptSourceCovered(previousCapture?.transcript_sources ?? [], source)) {
     return { observationsWritten: 0, rollupsWritten: 0, embeddingFailed: 0, replayed: true };
@@ -2895,7 +2926,10 @@ export type ReplayCaptureWindowResult =
       rollupsWritten: number;
       embeddingFailed: number;
     }
-  | { status: 'skipped'; reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' | 'session-merged' }
+  | {
+      status: 'skipped';
+      reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' | 'session-merged' | 'later-rollup-exists';
+    }
   | { status: 'failed'; errorCode: string; message: string };
 
 export async function replayCaptureWindow(
@@ -2938,6 +2972,23 @@ export async function replayCaptureWindow(
       `[cc-memory] replay info: merged-rollup-skip session=${input.sessionId} project=${input.projectId} merged_into=${priorLookup.mergedInto}\n`
     );
     return { status: 'skipped', reason: 'session-merged' };
+  }
+  if (priorLookup.kind === 'error') {
+    // 查不到就不猜：若其實是 merged，寫下去會復活舊專案 rollup。死信留著下次再來。
+    return { status: 'failed', errorCode: 'PRIOR_LOOKUP_FAILED', message: priorLookup.message };
+  }
+  if (
+    priorLookup.kind === 'active' &&
+    priorLookup.maxSpoolOffsetEnd !== null &&
+    priorLookup.maxSpoolOffsetEnd > input.spoolOffset.end
+  ) {
+    // 既有 rollup 已涵蓋比這張死信更晚的窗口：現在回填會把「較晚摘要」當成較早摘要餵給 LLM，
+    // decisions／next_steps 可能被舊狀態蓋掉（守衛只比長度，擋不住）。fail-closed，留給
+    // 「只寫 observations＋標記重建摘要」的後續功能處理。
+    input.stdout?.write(
+      `[cc-memory] replay info: later-rollup-exists session=${input.sessionId} project=${input.projectId} rollup_max_spool_end=${priorLookup.maxSpoolOffsetEnd} window_spool_end=${input.spoolOffset.end}\n`
+    );
+    return { status: 'skipped', reason: 'later-rollup-exists' };
   }
   const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
 

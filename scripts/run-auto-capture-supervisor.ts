@@ -19,6 +19,7 @@ import {
   type AutoCaptureExecutionResult,
 } from '../src/services/auto-capture-alerts.js'
 import { readSecureMode0600RegularFile } from '../src/utils/secure-file.js'
+import { assertZstdRuntime } from '../src/services/transcript-source.js'
 
 const DEFAULT_REPO_ROOT = path.resolve(__dirname, '..')
 const DEFAULT_PROJECT_URL_FILE = path.join(homedir(), '.ccm-project-url')
@@ -421,6 +422,8 @@ export async function runAutoCaptureSupervisorTick(
     const message = error instanceof Error ? error.message : String(error)
     stderr.write(`[run-auto-capture-supervisor] alerts-disabled: ${message}\n`)
   }
+  // Node 沒有內建 zstd 就不開跑：否則 .jsonl.zst 對話檔會被靜默當成「不見了」寫死信（2026-11-08）。
+  assertZstdRuntime()
   const previousState = await loadState()
   const approvalCheck = deps.checkProductionApproval ?? checkProductionApproval
   const databaseUrl = await resolveProjectUrl(options)

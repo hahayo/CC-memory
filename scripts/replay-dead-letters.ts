@@ -33,7 +33,7 @@ import {
 } from '../src/services/capture-llm.js';
 // 只能 type import：capture-worker.js 一載入就會讀 src/config.ts（要求 DATABASE_URL），dry-run 不設 DB。
 import type { ReplayCaptureWindowResult } from '../src/services/capture-worker.js';
-import { readTranscriptSource, transcriptSourceLength } from '../src/services/transcript-source.js';
+import { assertZstdRuntime, readTranscriptSource, transcriptSourceLength } from '../src/services/transcript-source.js';
 import { captureMaxWindowBytes, splitTranscriptRange } from '../src/services/transcript-window.js';
 import type { DbClient } from '../src/services/types.js';
 import { checkProductionApproval } from './run-auto-capture-supervisor.js';
@@ -337,7 +337,10 @@ export function orderCandidates(candidates: ReplayCandidate[]): ReplayCandidate[
 export interface ReplayTotals {
   written: number;
   observations: number;
+  /** 死信已改名（已寫入或 DB 判定 already-covered）。 */
   skipped: number;
+  /** 死信留在 .dead：hash 不符、session 已合併、已有較晚 rollup、空內容——要人看，exit 非 0。 */
+  retained: number;
   failed: number;
 }
 
@@ -347,7 +350,7 @@ export async function replayCandidates(
   runtime: ReplayRuntime,
   stdout: { write(chunk: string): unknown },
 ): Promise<ReplayTotals> {
-  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, failed: 0 };
+  const totals: ReplayTotals = { written: 0, observations: 0, skipped: 0, retained: 0, failed: 0 };
   const cache: TranscriptSourceCache = { path: null, buffer: null };
   for (const candidate of candidates) {
     const r = candidate.record;
@@ -362,8 +365,8 @@ export async function replayCandidates(
     }
     // 死信帶真正的內容雜湊時，先對整段驗；切窗後各子窗沒有自己的雜湊，驗過的整段才放行。
     if (r.source.content_hash && sha256Hex(raw) !== r.source.content_hash) {
-      totals.skipped += 1;
-      stdout.write(`[replay] skipped  ${label} reason=content-hash-mismatch 0s\n`);
+      totals.retained += 1;
+      stdout.write(`[replay] retained ${label} reason=content-hash-mismatch 0s\n`);
       continue;
     }
     const windows = splitReplayRange(raw, r.source, runtime.maxWindowBytes);
@@ -408,7 +411,8 @@ export async function replayCandidates(
     if (!lastResult) continue;
     if (windowFailed) {
       // 已寫入的子窗下次重跑會回 already-covered（idempotency key 同一段範圍），不會重複寫。
-      if (lastResult.status === 'skipped') totals.skipped += 1;
+      // 死信沒改名就不算成功：skipped 原因要人判斷的計 retained，讓 exit code 看得出來。
+      if (lastResult.status === 'skipped') totals.retained += 1;
       else totals.failed += 1;
       continue;
     }
@@ -523,6 +527,7 @@ async function main(): Promise<number> {
   const llm = createCaptureLlmAdapter({ env: process.env, emitDisabledWarning: false });
   try {
     assertExpectedLlm(llm, options.expectModel);
+    assertZstdRuntime();
   } catch (error) {
     process.stderr.write(`[replay] preflight failed: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
@@ -554,9 +559,10 @@ async function main(): Promise<number> {
       maxWindowBytes: captureMaxWindowBytes(process.env, llm),
     }, stdout);
     stdout.write(
-      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} failed=${totals.failed}\n`
+      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed}\n`
     );
-    return totals.failed > 0 ? 2 : 0;
+    // retained 也算沒做完：死信還在 .dead，自動化不能把它當成功。
+    return totals.failed > 0 || totals.retained > 0 ? 2 : 0;
   } finally {
     await client.end();
   }

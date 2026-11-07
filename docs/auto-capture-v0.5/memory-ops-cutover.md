@@ -481,7 +481,7 @@ exit code：`0` 只保留給所有 gate 都能由機器證明通過的情況；`
 
 ### 9.1 相依套件安全基線
 
-Node.js 支援下限已提升為 20，CI 與本機驗證採 Node.js 22。2026-08-12 的 `npm audit --omit=dev` 為 0 vulnerabilities（漏洞）；完整 `npm audit` 尚有 4 個 moderate（中等）且全屬 dev-only（僅開發期）鏈：`drizzle-kit@0.31.10` → `@esbuild-kit/esm-loader` → `@esbuild-kit/core-utils` → 舊版 `esbuild`。`drizzle-kit@0.31.10` 已是當時最新版，npm 提示降至 `0.18.1` 不是可接受修正；正式 runtime 不安裝 dev dependencies（開發相依套件），也不得把 migration／Vitest 開發服務暴露到網路。此項是有記錄的 upstream constraint（上游限制），不是 production 漏洞豁免；上游釋出安全版本後應升級並重跑 audit、typecheck、lint 與完整測試。
+Node.js 支援下限 2026-11-08 起提升為 22.15（內建 zlib zstd；supervisor 與 replay `--apply` 啟動時會檢查，沒有就直接退出），CI 與本機驗證採 Node.js 22。2026-08-12 的 `npm audit --omit=dev` 為 0 vulnerabilities（漏洞）；完整 `npm audit` 尚有 4 個 moderate（中等）且全屬 dev-only（僅開發期）鏈：`drizzle-kit@0.31.10` → `@esbuild-kit/esm-loader` → `@esbuild-kit/core-utils` → 舊版 `esbuild`。`drizzle-kit@0.31.10` 已是當時最新版，npm 提示降至 `0.18.1` 不是可接受修正；正式 runtime 不安裝 dev dependencies（開發相依套件），也不得把 migration／Vitest 開發服務暴露到網路。此項是有記錄的 upstream constraint（上游限制），不是 production 漏洞豁免；上游釋出安全版本後應升級並重跑 audit、typecheck、lint 與完整測試。
 
 ## 10. 2026-09-06 吞吐量調整（A 閒置續跑 timer ＋ B 每 tick 上限 4）
 
@@ -514,9 +514,9 @@ npm run replay:dead-letters -- --apply --error-code TRANSCRIPT_SOURCE_UNAVAILABL
 
 - **候選分類**：`READABLE`（transcript 仍在且長度夠；2026-11-08 起 `.jsonl` 不在時改看 `<path>.jsonl.zst` 解壓後長度）／`path-unresolved`（spool live＋sealed 檔都找不到 path_hash）／`transcript-deleted`（原檔與 `.zst` 都沒有）／`transcript-truncated`／`no-source`（7 月 haiku 舊格式）／`error-code-filtered`（預設只重跑 `LLM_EXTRACT_FAILED`；要救 `TRANSCRIPT_SOURCE_UNAVAILABLE` 那批得明確帶 `--error-code`）。
 - **守衛**：apply 走與 live worker 相同的 `auto-capture-run.lock`（flock 等最多 300 s；live tick 撞鎖 exit 75 讓路）；過 §1.5 production approval marker；provider 必須 `codex-cli` 且 model 等於 `--expect-model`（預設 `gpt-5.6-luna`），避免 shell 預設 `claude-cli/haiku` 或 `gpt-5.6-sol` 偷偷生效。讀回的整段位元組先比對死信裡的 `content_hash`，不符即 skip；`TRANSCRIPT_SOURCE_UNAVAILABLE` 死信的 `content_hash` 是固定哨兵值（`sha256('TRANSCRIPT_SOURCE_UNAVAILABLE')`），視為沒有雜湊。同鍵 rollup 已被 Step C 併到別的專案（archived＋`merged_into`）→ `skipped reason=session-merged`，不叫 LLM、不改名死信。
-- **切窗與部分失敗**：死信記的是整段 checkpoint→boundary（對話檔不見那批平均 1.6 MB），超過 `CC_CAPTURE_MAX_WINDOW_BYTES`（codex 256 KiB）會照行界切多窗依序抽；候選先照 project → session → spool 位移排序，累積摘要才按時間接力。全部子窗 written／already-covered 才改名死信；中途失敗死信留著，已寫入的子窗下次重跑回 `already-covered`（同一段 source range 的 idempotency）。已知限制：同一 session 若較晚窗口早已寫入 rollup，再回填較早的缺口時「較早摘要」其實是較晚的內容，摘要守衛會擋退化但不會重排時序。
+- **切窗與部分失敗**：死信記的是整段 checkpoint→boundary（對話檔不見那批平均 1.6 MB），超過 `CC_CAPTURE_MAX_WINDOW_BYTES`（codex 256 KiB）會照行界切多窗依序抽；候選先照 project → session → spool 位移排序，累積摘要才按時間接力。全部子窗 written／already-covered 才改名死信；中途失敗死信留著，已寫入的子窗下次重跑回 `already-covered`（同一段 source range 的 idempotency）。已知限制：同一 session 若較晚窗口早已寫入 rollup，再回填較早的缺口時「較早摘要」其實是較晚的內容，守衛只比長度擋不住——所以 2026-11-08 起 replay 遇到「既有 rollup 的最大 spool 位移比這張死信晚」直接 `skipped reason=later-rollup-exists`、死信留著（實測 1,772 場裡 557 場會中）；要補這些缺口需另做「只寫 observations＋標記摘要重建」。
 - **寫入**：呼叫 `replayCaptureWindow()`（`src/services/capture-worker.ts`）＝ 抽取 → `writeCaptureWindow` 同一條路，rollup／observation 沿用既有 idempotency key 與 content hash 防重；**不碰 capture-state 檔**（checkpoint 已越過、retry entry 已清）。
-- **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`。exit `0` 全成功、`2` 有失敗、`1` preflight 失敗、`3` 鎖忙。
+- **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`；`retained`（hash 不符、session 已合併、已有較晚 rollup、空內容）原檔也不動，要人看。exit `0` 全成功、`2` 有 failed 或 retained、`1` preflight 失敗、`3` 鎖忙。
 - **2026-09-12 實跑**：103 張死信中 15 張 `READABLE`（全部 sol timeout，7–252 KB）；canary 1 窗 37 s 寫 4 observations；其餘 14 窗全部成功（24–77 s／窗，共 95 observations，failed=0）。15 張死信已改名 `.json.replayed`；剩 88 張為 7 月 haiku 舊格式（無 source）與 transcript 已刪者，無源可讀。
 
 ## 12. 2026-10-27 備援模型與排序名額（使用者拍板「1～4 都修」）

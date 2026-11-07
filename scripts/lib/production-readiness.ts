@@ -195,13 +195,16 @@ function assessBacklog(evidence: ProductionReadinessEvidence): ReadinessGate {
 }
 
 function assessCanary(evidence: ProductionReadinessEvidence): ReadinessGate {
-  const nodeMajor = Number.parseInt(evidence.nodeVersion.replace(/^v/, '').split('.')[0] ?? '', 10);
-  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+  const [nodeMajor, nodeMinor] = evidence.nodeVersion.replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
+  // 22.15 起才有內建 zlib zstd；低於它 .jsonl.zst 對話檔會被當成不可用（2026-11-08）。
+  const nodeOk = Number.isInteger(nodeMajor) && Number.isInteger(nodeMinor)
+    && (nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 15));
+  if (!nodeOk) {
     return {
       id: 'g5-canary',
       status: 'FAIL',
-      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} does not satisfy the >=20 contract.`,
-      remediation: 'Use Node.js 20 or newer; CI and production verification should use Node.js 22.',
+      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} does not satisfy the >=22.15 contract (built-in zstd).`,
+      remediation: 'Use Node.js 22.15 or newer; CI and production verification use Node.js 22.',
     };
   }
   const repoContent = evidence.repoUnit.content;

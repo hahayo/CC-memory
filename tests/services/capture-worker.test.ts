@@ -4852,4 +4852,70 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
 
     await sql`DELETE FROM project_memories WHERE project_id IN (${projectId}, ${targetProject})`;
   });
+
+  it('refuses to backfill an earlier gap when the existing rollup already covers a later spool window (later-rollup-exists)', async () => {
+    const projectId = `replay-later-${randomUUID()}`;
+    const sessionId = `session-replay-later-${randomUUID()}`;
+    await sql`
+      INSERT INTO project_memories (project_id, type, idempotency_key, summary, decisions, next_steps, content_hash, writer_host, metadata, status)
+      VALUES (
+        ${projectId}, 'session', ${`capture:v05:${projectId}:${sessionId}`},
+        'latest summary: switched to the new API', ARRAY['use new API'], ARRAY['deploy new API'],
+        'replay-later-hash', 'vitest',
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [{ start: 400, end: 900 }], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
+        'active'
+      )`;
+    let llmCalls = 0;
+    const mockLlm: CaptureLlmAdapter = {
+      model: 'test-model',
+      provider: 'test',
+      worstCaseCallBudgetMs: 10_000,
+      extract: async () => {
+        llmCalls += 1;
+        return {
+          model: 'test-model',
+          text: JSON.stringify({
+            session_summary: { summary: 'stale summary: keep using the old API for now', keywords: [], decisions: ['keep old API'], next_steps: ['nothing'] },
+            observations: [],
+          }),
+        };
+      },
+      takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0 }),
+    };
+    const earlierGap = await replayCaptureWindow({
+      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+      llm: mockLlm,
+      projectId,
+      sessionId,
+      transcriptPath: '/dev/null',
+      raw: Buffer.from('older part of the conversation'),
+      spoolOffset: { start: 100, end: 200 },
+      hwmOffset: { start: 0, end: 30 },
+      source: { path_hash: 'replay-later-test', start: 0, end: 30, content_hash: null },
+    });
+    expect(earlierGap).toEqual({ status: 'skipped', reason: 'later-rollup-exists' });
+    expect(llmCalls).toBe(0);
+    const [row] = await sql<{ decisions: string[]; next_steps: string[] }[]>`
+      SELECT decisions, next_steps FROM project_memories WHERE project_id = ${projectId} AND status = 'active'`;
+    expect(row.decisions).toEqual(['use new API']);
+    expect(row.next_steps).toEqual(['deploy new API']);
+
+    // 同一 spool 範圍（切窗後的子窗）或更晚的窗口照常放行。
+    const sameWindow = await replayCaptureWindow({
+      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+      llm: mockLlm,
+      projectId,
+      sessionId,
+      transcriptPath: '/dev/null',
+      raw: Buffer.from('tail of the covered window'),
+      spoolOffset: { start: 400, end: 900 },
+      hwmOffset: { start: 5000, end: 5100 },
+      source: { path_hash: 'replay-later-test', start: 5000, end: 5100, content_hash: null },
+    });
+    expect(sameWindow.status).toBe('written');
+    expect(llmCalls).toBe(1);
+
+    await sql`DELETE FROM observations WHERE project_id = ${projectId}`;
+    await sql`DELETE FROM project_memories WHERE project_id = ${projectId}`;
+  });
 });

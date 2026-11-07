@@ -8,13 +8,13 @@ echo "========================"
 
 # 檢查 Node.js
 if ! command -v node &> /dev/null; then
-    echo "❌ Node.js 未安裝，請先安裝 Node.js 18+"
+    echo "❌ Node.js 未安裝，請先安裝 Node.js 22.15+"
     exit 1
 fi
 
-NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    echo "❌ Node.js 版本需要 18+，目前版本: $(node -v)"
+# 需要 22.15+：對話檔 .jsonl.zst 退路用 Node 內建 zlib zstd（22.15 起才有）
+if ! node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=15)?0:1)"; then
+    echo "❌ Node.js 版本需要 22.15+，目前版本: $(node -v)"
     exit 1
 fi
 echo "✓ Node.js $(node -v)"
