@@ -20,7 +20,7 @@ auto-capture 不設 timer，也不做常駐 daemon（背景常駐程序）；ser
 
 ## 1. 準備獨立憑證與連線檔
 
-runtime 前提是 Node.js `>=22.15.0`（2026-11-08 起：對話檔 `.jsonl.zst` 退路用內建 `zlib` zstd，22.15 才有；舊版只會在 stderr 警告一次並把壓縮檔當成不可用）；CI 使用 Node.js 22，本機正式操作也用同一個 major version。執行 cutover 前先確認 `node --version` 與 `npm ci` 沒有 engine（執行版本）警告。
+runtime 前提是 Node.js `^22.15.0 || >=23.8.0`（2026-11-08 起：對話檔 `.jsonl.zst` 退路用內建 `zlib` zstd，22.15／23.8 起才有；supervisor 與 replay `--apply` 啟動時 `assertZstdRuntime()` 沒有就直接退出，不降級）；CI 使用 Node.js 22，本機正式操作也用同一個 major version。執行 cutover 前先確認 `node --version` 與 `npm ci` 沒有 engine（執行版本）警告。
 
 ### 1.1 memory 告警
 
@@ -514,9 +514,9 @@ npm run replay:dead-letters -- --apply --error-code TRANSCRIPT_SOURCE_UNAVAILABL
 
 - **候選分類**：`READABLE`（transcript 仍在且長度夠；2026-11-08 起 `.jsonl` 不在時改看 `<path>.jsonl.zst` 解壓後長度）／`path-unresolved`（spool live＋sealed 檔都找不到 path_hash）／`transcript-deleted`（原檔與 `.zst` 都沒有）／`transcript-truncated`／`no-source`（7 月 haiku 舊格式）／`error-code-filtered`（預設只重跑 `LLM_EXTRACT_FAILED`；要救 `TRANSCRIPT_SOURCE_UNAVAILABLE` 那批得明確帶 `--error-code`）。
 - **守衛**：apply 走與 live worker 相同的 `auto-capture-run.lock`（flock 等最多 300 s；live tick 撞鎖 exit 75 讓路）；過 §1.5 production approval marker；provider 必須 `codex-cli` 且 model 等於 `--expect-model`（預設 `gpt-5.6-luna`），避免 shell 預設 `claude-cli/haiku` 或 `gpt-5.6-sol` 偷偷生效。讀回的整段位元組先比對死信裡的 `content_hash`，不符即 skip；`TRANSCRIPT_SOURCE_UNAVAILABLE` 死信的 `content_hash` 是固定哨兵值（`sha256('TRANSCRIPT_SOURCE_UNAVAILABLE')`），視為沒有雜湊。同鍵 rollup 已被 Step C 併到別的專案（archived＋`merged_into`）→ `skipped reason=session-merged`，不叫 LLM、不改名死信。
-- **切窗與部分失敗**：死信記的是整段 checkpoint→boundary（對話檔不見那批平均 1.6 MB），超過 `CC_CAPTURE_MAX_WINDOW_BYTES`（codex 256 KiB）會照行界切多窗依序抽；候選先照 project → session → spool 位移排序，累積摘要才按時間接力。全部子窗 written／already-covered 才改名死信；中途失敗死信留著，已寫入的子窗下次重跑回 `already-covered`（同一段 source range 的 idempotency）。已知限制：同一 session 若較晚窗口早已寫入 rollup，再回填較早的缺口時「較早摘要」其實是較晚的內容，守衛只比長度擋不住——所以 2026-11-08 起 replay 遇到「既有 rollup 的最大 spool 位移比這張死信晚」直接 `skipped reason=later-rollup-exists`、死信留著（實測 1,772 場裡 557 場會中）；要補這些缺口需另做「只寫 observations＋標記摘要重建」。
+- **切窗與部分失敗**：死信記的是整段 checkpoint→boundary（對話檔不見那批平均 1.6 MB），超過 `CC_CAPTURE_MAX_WINDOW_BYTES`（codex 256 KiB）會照行界切多窗依序抽；候選先照 project → session → spool 位移排序，累積摘要才按時間接力。全部子窗 written／already-covered 才改名死信；中途失敗死信留著，已寫入的子窗下次重跑回 `already-covered`（同一段 source range 的 idempotency）。已知限制：同一 session 若較晚窗口早已寫入 rollup，再回填較早的缺口時「較早摘要」其實是較晚的內容，守衛只比長度擋不住——所以 2026-11-08 起 replay 用既有 rollup 的 `transcript_sources`（對話檔 path_hash＋位移；spool 位移輪替後會歸零不能當時間軸）判斷：同一對話檔已有更後面的內容被摘要過 → `skipped reason=later-rollup-exists`；rollup 沒記來源（舊列，正式 DB 有 198 筆）或只記別的對話檔 → `rollup-order-unknown`；兩者都留死信（實測 1,772 場裡 557 場已有 active rollup，多數會中）；要補這些缺口需另做「只寫 observations＋標記摘要重建」。
 - **寫入**：呼叫 `replayCaptureWindow()`（`src/services/capture-worker.ts`）＝ 抽取 → `writeCaptureWindow` 同一條路，rollup／observation 沿用既有 idempotency key 與 content hash 防重；**不碰 capture-state 檔**（checkpoint 已越過、retry entry 已清）。
-- **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`；`retained`（hash 不符、session 已合併、已有較晚 rollup、空內容）原檔也不動，要人看。exit `0` 全成功、`2` 有 failed 或 retained、`1` preflight 失敗、`3` 鎖忙。
+- **檔案生命週期**：成功（或 DB 判定 `already-covered`）→ 原檔改為 `<hash>.json.replayed`（附 `replayed` 欄：時間、model、observations 數；非 `.json`，drain／audit 不再計為 parked）；失敗原檔不動，stdout 印 `code=`；`retained`（hash 不符、session 已合併、已有較晚 rollup、空內容）原檔也不動，要人看。exit `0` 全成功、`2` 有 failed／retained／unreadable（本次 error-code 範圍內分類就讀不到、仍留在 .dead 的）、`1` preflight 失敗、`3` 鎖忙。
 - **2026-09-12 實跑**：103 張死信中 15 張 `READABLE`（全部 sol timeout，7–252 KB）；canary 1 窗 37 s 寫 4 observations；其餘 14 窗全部成功（24–77 s／窗，共 95 observations，failed=0）。15 張死信已改名 `.json.replayed`；剩 88 張為 7 月 haiku 舊格式（無 source）與 transcript 已刪者，無源可讀。
 
 ## 12. 2026-10-27 備援模型與排序名額（使用者拍板「1～4 都修」）

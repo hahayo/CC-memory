@@ -22,6 +22,7 @@ import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { sql as drizzleSql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   appendCaptureEvent,
@@ -34,6 +35,7 @@ import {
   loadPriorSessionSummary,
   readFirstTranscriptCwd,
   replayCaptureWindow,
+  replayOrderAgainstRollup,
   runCaptureWorkerOnce,
   writeCaptureStateAtomically,
   type CaptureRetryEntry,
@@ -4854,7 +4856,7 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
     await sql`DELETE FROM project_memories WHERE project_id IN (${projectId}, ${targetProject})`;
   });
 
-  it('refuses to backfill an earlier gap when the existing rollup already covers a later spool window (later-rollup-exists)', async () => {
+  it('refuses to backfill an earlier gap when the existing rollup already summarized later transcript content (later-rollup-exists)', async () => {
     const projectId = `replay-later-${randomUUID()}`;
     const sessionId = `session-replay-later-${randomUUID()}`;
     await sql`
@@ -4863,7 +4865,7 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
         ${projectId}, 'session', ${`capture:v05:${projectId}:${sessionId}`},
         'latest summary: switched to the new API', ARRAY['use new API'], ARRAY['deploy new API'],
         'replay-later-hash', 'vitest',
-        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [{ start: 400, end: 900 }], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [{ start: 0, end: 200 }], transcript_sources: [{ path_hash: 'replay-later-test', start: 5000, end: 5100 }], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
         'active'
       )`;
     let llmCalls = 0;
@@ -4884,43 +4886,80 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
       takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0 }),
     };
     const lookup = await loadPriorSessionSummary(db as Parameters<typeof loadPriorSessionSummary>[0], projectId, sessionId);
-    expect(lookup).toMatchObject({ kind: 'active', maxSpoolOffsetEnd: 900 });
-    const out: string[] = [];
-    const earlierGap = await replayCaptureWindow({
-      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
-      llm: mockLlm,
-      projectId,
-      sessionId,
-      transcriptPath: '/dev/null',
-      raw: Buffer.from('older part of the conversation'),
-      spoolOffset: { start: 100, end: 200 },
-      hwmOffset: { start: 0, end: 30 },
-      source: { path_hash: 'replay-later-test', start: 0, end: 30, content_hash: null },
-      stdout: { write: (c: string) => out.push(c) },
-    });
-    expect(earlierGap, out.join('')).toEqual({ status: 'skipped', reason: 'later-rollup-exists' });
+    // 診斷：CI 曾在這裡拿到空的 spool_offsets；印出 db.execute 原始回傳，確認 jsonb 回來是物件還是字串。
+    const rawRows = await (db as { execute: (q: unknown) => Promise<unknown> }).execute(
+      drizzleSql`SELECT metadata FROM project_memories WHERE project_id = ${projectId}`,
+    );
+    const rawRow = (Array.isArray(rawRows) ? rawRows : (rawRows as { rows: unknown[] }).rows)[0] as { metadata?: unknown } | undefined;
+    const diag = `metadata typeof=${typeof rawRow?.metadata} value=${JSON.stringify(rawRow?.metadata)?.slice(0, 400)}`;
+    expect(lookup, diag).toMatchObject({ kind: 'active', transcriptSources: [{ path_hash: 'replay-later-test', start: 5000, end: 5100 }] });
+    const replay = (source: { path_hash: string; start: number; end: number }, spool: { start: number; end: number }) =>
+      replayCaptureWindow({
+        db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+        llm: mockLlm,
+        projectId,
+        sessionId,
+        transcriptPath: '/dev/null',
+        raw: Buffer.from(`conversation bytes ${source.start}-${source.end}`),
+        spoolOffset: spool,
+        hwmOffset: { start: source.start, end: source.end },
+        source: { ...source, content_hash: null },
+      });
+
+    // 較早的缺口（同一對話檔、位移在既有來源之前）：不叫 LLM、不動 decisions／next_steps。
+    // spool 位移故意給比既有的大（模擬 spool 輪替後世代不同），證明不是靠 spool 位移判斷。
+    const earlierGap = await replay({ path_hash: 'replay-later-test', start: 0, end: 30 }, { start: 900, end: 1000 });
+    expect(earlierGap).toEqual({ status: 'skipped', reason: 'later-rollup-exists' });
+    // 別的對話檔（子代理）：先後不可知，一樣不寫。
+    const otherPath = await replay({ path_hash: 'replay-later-other-path', start: 0, end: 30 }, { start: 900, end: 1000 });
+    expect(otherPath).toEqual({ status: 'skipped', reason: 'rollup-order-unknown' });
     expect(llmCalls).toBe(0);
     const [row] = await sql<{ decisions: string[]; next_steps: string[] }[]>`
       SELECT decisions, next_steps FROM project_memories WHERE project_id = ${projectId} AND status = 'active'`;
     expect(row.decisions).toEqual(['use new API']);
     expect(row.next_steps).toEqual(['deploy new API']);
 
-    // 同一 spool 範圍（切窗後的子窗）或更晚的窗口照常放行。
-    const sameWindow = await replayCaptureWindow({
-      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
-      llm: mockLlm,
-      projectId,
-      sessionId,
-      transcriptPath: '/dev/null',
-      raw: Buffer.from('tail of the covered window'),
-      spoolOffset: { start: 400, end: 900 },
-      hwmOffset: { start: 5000, end: 5100 },
-      source: { path_hash: 'replay-later-test', start: 5000, end: 5100, content_hash: null },
-    });
-    expect(sameWindow.status).toBe('written');
+    // 同一對話檔、位移在既有來源之後的窗口照常放行。
+    const later = await replay({ path_hash: 'replay-later-test', start: 6000, end: 6100 }, { start: 0, end: 50 });
+    expect(later.status).toBe('written');
     expect(llmCalls).toBe(1);
 
-    await sql`DELETE FROM observations WHERE project_id = ${projectId}`;
-    await sql`DELETE FROM project_memories WHERE project_id = ${projectId}`;
+    // rollup 完全沒記來源（2026-09 前的舊列）：先後不可知，不寫。
+    const legacyProject = `${projectId}-legacy`;
+    await sql`
+      INSERT INTO project_memories (project_id, type, idempotency_key, summary, content_hash, writer_host, metadata, status)
+      VALUES (${legacyProject}, 'session', ${`capture:v05:${legacyProject}:${sessionId}`}, 'legacy summary', 'legacy-hash', 'vitest',
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb, 'active')`;
+    const legacy = await replayCaptureWindow({
+      db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
+      llm: mockLlm,
+      projectId: legacyProject,
+      sessionId,
+      transcriptPath: '/dev/null',
+      raw: Buffer.from('legacy gap'),
+      spoolOffset: { start: 0, end: 10 },
+      hwmOffset: { start: 0, end: 10 },
+      source: { path_hash: 'replay-later-test', start: 0, end: 10, content_hash: null },
+    });
+    expect(legacy).toEqual({ status: 'skipped', reason: 'rollup-order-unknown' });
+    expect(llmCalls).toBe(1);
+
+    await sql`DELETE FROM observations WHERE project_id IN (${projectId}, ${legacyProject})`;
+    await sql`DELETE FROM project_memories WHERE project_id IN (${projectId}, ${legacyProject})`;
+  });
+});
+
+describe('replayOrderAgainstRollup (no DB)', () => {
+  const win = { path_hash: 'p', start: 1000, end: 1200 };
+  it('allows when the rollup has no later content on the same transcript, or already covers the window', () => {
+    expect(replayOrderAgainstRollup([{ path_hash: 'p', start: 0, end: 1000 }], win)).toBe('ok');
+    expect(replayOrderAgainstRollup([{ path_hash: 'p', start: 900, end: 1300 }], win)).toBe('ok');
+  });
+  it('refuses when later content exists on the same transcript, or when order cannot be known', () => {
+    expect(replayOrderAgainstRollup([{ path_hash: 'p', start: 0, end: 1001 }], win)).toBe('later-rollup-exists');
+    expect(replayOrderAgainstRollup([{ path_hash: 'p', start: 5000, end: 5100 }], win)).toBe('later-rollup-exists');
+    expect(replayOrderAgainstRollup([], win)).toBe('rollup-order-unknown');
+    expect(replayOrderAgainstRollup([{ path_hash: 'q', start: 0, end: 10 }], win)).toBe('rollup-order-unknown');
+    expect(replayOrderAgainstRollup([{ path_hash: 'p', start: 0, end: 10 }, { path_hash: 'q', start: 0, end: 10 }], win)).toBe('rollup-order-unknown');
   });
 });

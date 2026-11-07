@@ -12,9 +12,9 @@ if ! command -v node &> /dev/null; then
     exit 1
 fi
 
-# 需要 22.15+：對話檔 .jsonl.zst 退路用 Node 內建 zlib zstd（22.15 起才有）
-if ! node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=15)?0:1)"; then
-    echo "❌ Node.js 版本需要 22.15+，目前版本: $(node -v)"
+# 需要內建 zlib zstd（Node 22.15+ 或 23.8+）：對話檔 .jsonl.zst 退路靠它，直接探能力不猜版本
+if ! node -e "process.exit(typeof require('node:zlib').zstdDecompress === 'function' ? 0 : 1)"; then
+    echo "❌ Node.js 需要內建 zstd（22.15+ 或 23.8+），目前版本: $(node -v)"
     exit 1
 fi
 echo "✓ Node.js $(node -v)"

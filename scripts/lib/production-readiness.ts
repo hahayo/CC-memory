@@ -194,17 +194,22 @@ function assessBacklog(evidence: ProductionReadinessEvidence): ReadinessGate {
   };
 }
 
+/** zlib 內建 zstd：22.15.0 與 23.8.0 起才有（官方 zlib 文件）；23.0–23.7 沒有，不能只看 major。 */
+export function nodeHasBuiltinZstd(nodeVersion: string): boolean {
+  const [major, minor] = nodeVersion.replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
+  if (major === 22) return minor >= 15;
+  if (major === 23) return minor >= 8;
+  return major > 23;
+}
+
 function assessCanary(evidence: ProductionReadinessEvidence): ReadinessGate {
-  const [nodeMajor, nodeMinor] = evidence.nodeVersion.replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
-  // 22.15 起才有內建 zlib zstd；低於它 .jsonl.zst 對話檔會被當成不可用（2026-11-08）。
-  const nodeOk = Number.isInteger(nodeMajor) && Number.isInteger(nodeMinor)
-    && (nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 15));
-  if (!nodeOk) {
+  if (!nodeHasBuiltinZstd(evidence.nodeVersion)) {
     return {
       id: 'g5-canary',
       status: 'FAIL',
-      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} does not satisfy the >=22.15 contract (built-in zstd).`,
-      remediation: 'Use Node.js 22.15 or newer; CI and production verification use Node.js 22.',
+      reason: `Node.js runtime ${evidence.nodeVersion || '(unknown)'} lacks built-in zlib zstd (need ^22.15.0 || >=23.8.0).`,
+      remediation: 'Use Node.js 22.15+ or 23.8+; CI and production verification use Node.js 22.',
     };
   }
   const repoContent = evidence.repoUnit.content;

@@ -491,8 +491,10 @@ async function main(): Promise<number> {
 
   const readable = orderCandidates(candidates.filter((c) => c.status === 'READABLE')).slice(0, options.limit);
   const readableBytes = readable.reduce((sum, c) => sum + c.bytes, 0);
+  // 本次 error-code 範圍內、分類就讀不到的死信：留在 .dead，不能讓 --apply 回 0。
+  const unreadable = candidates.filter((c) => c.status !== 'READABLE' && c.status !== 'error-code-filtered').length;
   stdout.write(
-    `[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''} bytes=${(readableBytes / 1e6).toFixed(1)}MB sessions=${new Set(readable.map((c) => c.record.sessionId)).size}\n`
+    `[replay] readable=${readable.length}${Number.isFinite(options.limit) ? ` (limit ${options.limit})` : ''} bytes=${(readableBytes / 1e6).toFixed(1)}MB sessions=${new Set(readable.map((c) => c.record.sessionId)).size} unreadable=${unreadable}\n`
   );
   for (const c of candidates) {
     if (c.status === 'READABLE' || c.status === 'path-unresolved' || c.status === 'transcript-truncated') {
@@ -506,8 +508,8 @@ async function main(): Promise<number> {
     return 0;
   }
   if (readable.length === 0) {
-    stdout.write('[replay] nothing to replay\n');
-    return 0;
+    stdout.write(`[replay] nothing to replay${unreadable > 0 ? ` (unreadable=${unreadable} still in .dead)` : ''}\n`);
+    return unreadable > 0 ? 2 : 0;
   }
 
   let databaseUrl: string;
@@ -559,10 +561,10 @@ async function main(): Promise<number> {
       maxWindowBytes: captureMaxWindowBytes(process.env, llm),
     }, stdout);
     stdout.write(
-      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed}\n`
+      `[replay] summary: written=${totals.written} observations=${totals.observations} skipped=${totals.skipped} retained=${totals.retained} failed=${totals.failed} unreadable=${unreadable}\n`
     );
-    // retained 也算沒做完：死信還在 .dead，自動化不能把它當成功。
-    return totals.failed > 0 || totals.retained > 0 ? 2 : 0;
+    // retained／unreadable 也算沒做完：死信還在 .dead，自動化不能把它當成功。
+    return totals.failed > 0 || totals.retained > 0 || unreadable > 0 ? 2 : 0;
   } finally {
     await client.end();
   }

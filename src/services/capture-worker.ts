@@ -1269,8 +1269,11 @@ function stringArray(value: unknown): string[] {
 }
 
 export type PriorSummaryLookup =
-  /** maxSpoolOffsetEnd＝既有 rollup 已涵蓋的最大 spool 位移；死信回填比它早的缺口時用來判斷時序。 */
-  | { kind: 'active'; summary: CapturePriorSummary; maxSpoolOffsetEnd: number | null }
+  /**
+   * transcriptSources＝既有 rollup 已涵蓋的對話檔範圍（path_hash＋位移）。死信回填缺口時拿它判斷時序：
+   * 同一對話檔內位移單調，跨 spool 輪替（spool 檔改名封存後位移歸零）也不受影響；spool_offsets 不能當時間軸。
+   */
+  | { kind: 'active'; summary: CapturePriorSummary; transcriptSources: TranscriptSourceRange[] }
   /** 同鍵只剩 Step C 併掉的 archived 列：這條 spool 的目的地已搬走，不得在舊專案重建 rollup。 */
   | { kind: 'merged'; mergedInto: string }
   | { kind: 'none' }
@@ -1315,7 +1318,6 @@ export async function loadPriorSessionSummary(
     // Check for a pending summary from a guarded window that needs merging.
     const capture = existingCaptureMetadata(row.metadata);
     const pendingSummary = capture?.summary_guard_pending;
-    const offsets = capture?.spool_offsets ?? [];
     return {
       kind: 'active',
       summary: {
@@ -1324,7 +1326,7 @@ export async function loadPriorSessionSummary(
         next_steps: stringArray(row.next_steps),
         ...(pendingSummary ? { pendingSummary } : {}),
       },
-      maxSpoolOffsetEnd: offsets.length > 0 ? Math.max(...offsets.map((offset) => offset.end)) : null,
+      transcriptSources: capture?.transcript_sources ?? [],
     };
   } catch (error) {
     return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
@@ -2928,9 +2930,36 @@ export type ReplayCaptureWindowResult =
     }
   | {
       status: 'skipped';
-      reason: 'content-hash-mismatch' | 'empty-transcript' | 'already-covered' | 'session-merged' | 'later-rollup-exists';
+      reason:
+        | 'content-hash-mismatch'
+        | 'empty-transcript'
+        | 'already-covered'
+        | 'session-merged'
+        | 'later-rollup-exists'
+        | 'rollup-order-unknown';
     }
   | { status: 'failed'; errorCode: string; message: string };
+
+/**
+ * 死信回填能不能安全接在既有 rollup 後面：只用對話檔範圍（path_hash＋位移）判斷，不用 spool 位移
+ * （spool 檔輪替後位移歸零，跨世代比不得）。
+ * - 'ok'：rollup 沒有任何來源範圍比這段更晚（含這段本身已被涵蓋，交給 writeCaptureWindow 回 already-covered）。
+ * - 'later-rollup-exists'：同一對話檔已有位移更後面的內容被摘要過。
+ * - 'rollup-order-unknown'：rollup 沒記來源（2026-09 前的舊列，正式 DB 有 198 筆）或只記別的對話檔，先後不可知。
+ */
+export function replayOrderAgainstRollup(
+  rollupSources: TranscriptSourceRange[],
+  window: { path_hash: string; start: number; end: number },
+): 'ok' | 'later-rollup-exists' | 'rollup-order-unknown' {
+  if (rollupSources.some((s) => s.path_hash === window.path_hash && s.start <= window.start && s.end >= window.end)) {
+    return 'ok';
+  }
+  if (rollupSources.length === 0) return 'rollup-order-unknown';
+  const samePath = rollupSources.filter((s) => s.path_hash === window.path_hash);
+  if (samePath.length !== rollupSources.length) return 'rollup-order-unknown';
+  if (samePath.some((s) => s.end > window.start)) return 'later-rollup-exists';
+  return 'ok';
+}
 
 export async function replayCaptureWindow(
   input: ReplayCaptureWindowInput
@@ -2977,18 +3006,17 @@ export async function replayCaptureWindow(
     // 查不到就不猜：若其實是 merged，寫下去會復活舊專案 rollup。死信留著下次再來。
     return { status: 'failed', errorCode: 'PRIOR_LOOKUP_FAILED', message: priorLookup.message };
   }
-  if (
-    priorLookup.kind === 'active' &&
-    priorLookup.maxSpoolOffsetEnd !== null &&
-    priorLookup.maxSpoolOffsetEnd > input.spoolOffset.end
-  ) {
-    // 既有 rollup 已涵蓋比這張死信更晚的窗口：現在回填會把「較晚摘要」當成較早摘要餵給 LLM，
-    // decisions／next_steps 可能被舊狀態蓋掉（守衛只比長度，擋不住）。fail-closed，留給
-    // 「只寫 observations＋標記重建摘要」的後續功能處理。
-    input.stdout?.write(
-      `[cc-memory] replay info: later-rollup-exists session=${input.sessionId} project=${input.projectId} rollup_max_spool_end=${priorLookup.maxSpoolOffsetEnd} window_spool_end=${input.spoolOffset.end}\n`
-    );
-    return { status: 'skipped', reason: 'later-rollup-exists' };
+  if (priorLookup.kind === 'active') {
+    const order = replayOrderAgainstRollup(priorLookup.transcriptSources, input.source);
+    if (order !== 'ok') {
+      // 既有 rollup 已涵蓋比這張死信更晚的內容（或無法判斷先後）：現在回填會把「較晚摘要」當成較早摘要
+      // 餵給 LLM，decisions／next_steps 可能被舊狀態蓋掉（守衛只比長度，擋不住）。fail-closed，
+      // 留給「只寫 observations＋標記重建摘要」的後續功能處理。
+      input.stdout?.write(
+        `[cc-memory] replay info: ${order} session=${input.sessionId} project=${input.projectId} source=${input.source.path_hash.slice(0, 12)}:${input.source.start}-${input.source.end} rollup_sources=${priorLookup.transcriptSources.length}\n`
+      );
+      return { status: 'skipped', reason: order };
+    }
   }
   const priorSummary = priorLookup.kind === 'active' ? priorLookup.summary : undefined;
 
