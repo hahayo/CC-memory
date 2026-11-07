@@ -1285,7 +1285,7 @@ export type PriorSummaryLookup =
  *   fail-closed：不叫 LLM、不推進 checkpoint（Codex R3 #1 止血；完整路由屬 Step C 後續項）；
  * - 其餘（含 DB 出錯）→ 'none'，退回舊行為（摘要只反映本段），不擋抽取。
  */
-async function loadPriorSessionSummary(
+export async function loadPriorSessionSummary(
   db: DbClient,
   projectId: string,
   sessionId: string

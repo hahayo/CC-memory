@@ -31,6 +31,7 @@ import {
 } from '../../src/services/capture-spool.js';
 import {
   isCaptureRetryHeld,
+  loadPriorSessionSummary,
   readFirstTranscriptCwd,
   replayCaptureWindow,
   runCaptureWorkerOnce,
@@ -4882,6 +4883,9 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
       },
       takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0 }),
     };
+    const lookup = await loadPriorSessionSummary(db as Parameters<typeof loadPriorSessionSummary>[0], projectId, sessionId);
+    expect(lookup).toMatchObject({ kind: 'active', maxSpoolOffsetEnd: 900 });
+    const out: string[] = [];
     const earlierGap = await replayCaptureWindow({
       db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
       llm: mockLlm,
@@ -4892,8 +4896,9 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
       spoolOffset: { start: 100, end: 200 },
       hwmOffset: { start: 0, end: 30 },
       source: { path_hash: 'replay-later-test', start: 0, end: 30, content_hash: null },
+      stdout: { write: (c: string) => out.push(c) },
     });
-    expect(earlierGap).toEqual({ status: 'skipped', reason: 'later-rollup-exists' });
+    expect(earlierGap, out.join('')).toEqual({ status: 'skipped', reason: 'later-rollup-exists' });
     expect(llmCalls).toBe(0);
     const [row] = await sql<{ decisions: string[]; next_steps: string[] }[]>`
       SELECT decisions, next_steps FROM project_memories WHERE project_id = ${projectId} AND status = 'active'`;
