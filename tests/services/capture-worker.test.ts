@@ -22,7 +22,6 @@ import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { sql as drizzleSql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   appendCaptureEvent,
@@ -33,6 +32,7 @@ import {
 import {
   isCaptureRetryHeld,
   loadPriorSessionSummary,
+  metadataRecord,
   readFirstTranscriptCwd,
   replayCaptureWindow,
   replayOrderAgainstRollup,
@@ -4761,7 +4761,7 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
         'existing cumulative summary about auth flow', ARRAY['auth'],
         ARRAY['use SSO'], ARRAY['deploy SSO'],
         'replay-prior-hash', 'vitest',
-        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [], transcript_sources: [], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
+        ${JSON.stringify({ capture: { version: '0.5', session_id: sessionId, observation_ids: [], model: 'test', spool_offsets: [{ start: 0, end: 50 }], transcript_sources: [{ path_hash: 'replay-prior-test', start: 0, end: 100 }], summarize_count: 1, discovery_tokens: 100, empty_observation_windows: [] } })}::jsonb,
         'active'
       )
     `;
@@ -4791,9 +4791,10 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
       sessionId,
       transcriptPath: '/dev/null',
       raw: Buffer.from('User asked about SSO.\nAssistant fixed auth.'),
-      spoolOffset: { start: 0, end: 100 },
-      hwmOffset: { start: 0, end: 100 },
-      source: { path_hash: 'replay-prior-test', start: 0, end: 100, content_hash: null },
+      spoolOffset: { start: 50, end: 100 },
+      // 接在既有來源（0–100）之後的窗口，時序守衛放行。
+      hwmOffset: { start: 100, end: 200 },
+      source: { path_hash: 'replay-prior-test', start: 100, end: 200, content_hash: null },
     });
 
     expect(result.status).toBe('written');
@@ -4886,13 +4887,8 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
       takeTelemetry: () => ({ primaryProvider: 'test', primarySuccess: 1, fallbackSuccess: 0, fallbackFailed: 0 }),
     };
     const lookup = await loadPriorSessionSummary(db as Parameters<typeof loadPriorSessionSummary>[0], projectId, sessionId);
-    // 診斷：CI 曾在這裡拿到空的 spool_offsets；印出 db.execute 原始回傳，確認 jsonb 回來是物件還是字串。
-    const rawRows = await (db as { execute: (q: unknown) => Promise<unknown> }).execute(
-      drizzleSql`SELECT metadata FROM project_memories WHERE project_id = ${projectId}`,
-    );
-    const rawRow = (Array.isArray(rawRows) ? rawRows : (rawRows as { rows: unknown[] }).rows)[0] as { metadata?: unknown } | undefined;
-    const diag = `metadata typeof=${typeof rawRow?.metadata} value=${JSON.stringify(rawRow?.metadata)?.slice(0, 400)}`;
-    expect(lookup, diag).toMatchObject({ kind: 'active', transcriptSources: [{ path_hash: 'replay-later-test', start: 5000, end: 5100 }] });
+    // CI 測試庫的 db.execute 把 jsonb 回成字串（2026-11-08 實測），metadataRecord 要能吃字串才讀得到來源。
+    expect(lookup).toMatchObject({ kind: 'active', transcriptSources: [{ path_hash: 'replay-later-test', start: 5000, end: 5100 }] });
     const replay = (source: { path_hash: string; start: number; end: number }, spool: { start: number; end: number }) =>
       replayCaptureWindow({
         db: db as Parameters<typeof replayCaptureWindow>[0]['db'],
@@ -4946,6 +4942,16 @@ describe('replayCaptureWindow prior-summary loading (DB-backed)', () => {
 
     await sql`DELETE FROM observations WHERE project_id IN (${projectId}, ${legacyProject})`;
     await sql`DELETE FROM project_memories WHERE project_id IN (${projectId}, ${legacyProject})`;
+  });
+});
+
+describe('metadataRecord (no DB)', () => {
+  it('accepts an object, parses a JSON string, and rejects garbage', () => {
+    expect(metadataRecord({ capture: { a: 1 } })).toEqual({ capture: { a: 1 } });
+    expect(metadataRecord('{"capture":{"spool_offsets":[{"start":0,"end":9}]}}')).toEqual({ capture: { spool_offsets: [{ start: 0, end: 9 }] } });
+    expect(metadataRecord('not json')).toBeNull();
+    expect(metadataRecord(null)).toBeNull();
+    expect(metadataRecord([1])).toBeNull();
   });
 });
 

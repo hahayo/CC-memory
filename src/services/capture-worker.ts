@@ -1116,9 +1116,27 @@ function captureTextForTokenEstimate(extraction: CaptureLlmExtraction): string {
   ].join('\n');
 }
 
+/**
+ * rollup 的 metadata 欄位讀回來不一定是物件：postgres-js 的 jsonb 解析在某些 client 設定下會關掉
+ * （CI 測試庫的 `db.execute` 實測回字串，2026-11-08），字串就自己 JSON.parse 一次；壞字串當沒有。
+ */
+export function metadataRecord(metadata: unknown): Record<string, unknown> | null {
+  let value = metadata;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
 function existingCaptureMetadata(metadata: unknown): CaptureMetadata | null {
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
-  const capture = (metadata as { capture?: unknown }).capture;
+  const root = metadataRecord(metadata);
+  if (!root) return null;
+  const capture = root.capture;
   if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return null;
   const record = capture as Partial<CaptureMetadata>;
   return {
@@ -1234,10 +1252,7 @@ function transcriptSourceCovered(
 }
 
 function mergeMetadata(metadata: unknown, capture: CaptureMetadata): Record<string, unknown> {
-  const base =
-    metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-      ? { ...(metadata as Record<string, unknown>) }
-      : {};
+  const base: Record<string, unknown> = { ...(metadataRecord(metadata) ?? {}) };
   base.capture = capture;
   return base;
 }
@@ -1587,7 +1602,7 @@ async function insertObservation(
 
 /** Preserve finalization generation and retry fencing across new extraction windows. */
 function finalizationMetadata(metadata: unknown): Record<string, unknown> {
-  const capture = (metadata as { capture?: Record<string, unknown> } | null)?.capture ?? {};
+  const capture = (metadataRecord(metadata) as { capture?: Record<string, unknown> } | null)?.capture ?? {};
   return Object.fromEntries(Object.entries(capture).filter(([key]) => key.startsWith('finaliz')));
 }
 
