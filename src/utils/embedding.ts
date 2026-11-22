@@ -2,6 +2,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { config } from '../config.js';
+import { LOCAL_EMBEDDING_DIMENSIONS } from './embedding-provider.js';
 
 export const EMBEDDING_REDACTION_RULES_VERSION = '2026-08-19.3';
 
@@ -149,6 +150,76 @@ export function normalizeVector(vector: number[]): number[] {
   return vector.map(val => val / magnitude);
 }
 
+// 刻意不記錄 error.message（provider 可能回吐請求內容，見 tests/utils/embedding.test.ts
+// 「egress redaction」）。只記錯誤類別與 HTTP status，讓 supervisor journal 能分辨
+// 配額（429）／驗證（401/403）／網路（無 status）——2026-09-01 事故因此不可考。
+// error.name 是 provider 可改寫的字串，只放行識別字形式，避免被塞入回吐內容。
+function logEmbeddingError(prefix: string, error: unknown): void {
+  const rawName = error instanceof Error ? error.name : 'UnknownError';
+  const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
+  const status = (error as { status?: unknown } | null)?.status;
+  const statusText = typeof status === 'number' ? ` status=${status}` : '';
+  console.error(`${prefix} (${name}${statusText})`);
+}
+
+class LocalEmbeddingHttpError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`local embedding HTTP ${status}`);
+    this.name = 'LocalEmbeddingHttpError';
+    this.status = status;
+  }
+}
+
+class LocalEmbeddingInvalidResponse extends Error {
+  constructor() {
+    super('local embedding invalid response');
+    this.name = 'LocalEmbeddingInvalidResponse';
+  }
+}
+
+/**
+ * 本機 bge-m3 embed-service（embed-service/server.py）路徑。
+ * 不記 text／response body／error message，只記白名單化的錯誤名與 status。
+ */
+async function generateLocalEmbedding(text: string, label: string): Promise<number[] | null> {
+  try {
+    const prepared = prepareEmbeddingText(text);
+    const url = `${config.embeddingLocalUrl.replace(/\/+$/, '')}/embed`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inputs: [prepared.text] }),
+      signal: AbortSignal.timeout(config.embeddingLocalTimeoutMs),
+    });
+    if (!response.ok) {
+      throw new LocalEmbeddingHttpError(response.status);
+    }
+    const payload: unknown = await response.json();
+    const parsed = payload as { embeddings?: unknown; model?: unknown } | null;
+    const embeddings = parsed?.embeddings;
+    if (
+      parsed?.model !== 'BAAI/bge-m3' ||
+      !Array.isArray(embeddings) || embeddings.length !== 1 ||
+      !Array.isArray(embeddings[0]) ||
+      embeddings[0].length !== LOCAL_EMBEDDING_DIMENSIONS ||
+      !embeddings[0].every((v: unknown) => typeof v === 'number' && Number.isFinite(v))
+    ) {
+      throw new LocalEmbeddingInvalidResponse();
+    }
+    const norm = Math.sqrt(
+      (embeddings[0] as number[]).reduce((sum, v) => sum + v * v, 0)
+    );
+    if (norm === 0 || !Number.isFinite(norm)) {
+      throw new LocalEmbeddingInvalidResponse();
+    }
+    return normalizeVector(embeddings[0] as number[]);
+  } catch (error) {
+    logEmbeddingError(`Failed to generate ${label}`, error);
+    return null;
+  }
+}
+
 /**
  * 生成文件 embedding（用於儲存）
  * 使用 RETRIEVAL_DOCUMENT task type
@@ -157,6 +228,10 @@ export async function generateEmbedding(
   text: string,
   embeddingConfig?: EmbeddingConfig
 ): Promise<number[] | null> {
+  if (config.embeddingProvider === 'local') {
+    return generateLocalEmbedding(text, 'embedding');
+  }
+
   const apiKey = embeddingConfig?.apiKey || config.geminiApiKey;
 
   if (!apiKey) {
@@ -188,15 +263,7 @@ export async function generateEmbedding(
 
     return normalizeVector(embedding);
   } catch (error) {
-    // 刻意不記錄 error.message（provider 可能回吐請求內容，見 tests/utils/embedding.test.ts
-    // 「egress redaction」）。只記錯誤類別與 HTTP status，讓 supervisor journal 能分辨
-    // 配額（429）／驗證（401/403）／網路（無 status）——2026-09-01 事故因此不可考。
-    // error.name 是 provider 可改寫的字串，只放行識別字形式，避免被塞入回吐內容。
-    const rawName = error instanceof Error ? error.name : 'UnknownError';
-    const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
-    const status = (error as { status?: unknown } | null)?.status;
-    const statusText = typeof status === 'number' ? ` status=${status}` : '';
-    console.error(`Failed to generate embedding (${name}${statusText})`);
+    logEmbeddingError('Failed to generate embedding', error);
     return null;
   }
 }
@@ -209,6 +276,10 @@ export async function generateQueryEmbedding(
   query: string,
   embeddingConfig?: EmbeddingConfig
 ): Promise<number[] | null> {
+  if (config.embeddingProvider === 'local') {
+    return generateLocalEmbedding(query, 'query embedding');
+  }
+
   const apiKey = embeddingConfig?.apiKey || config.geminiApiKey;
 
   if (!apiKey) {
@@ -240,12 +311,7 @@ export async function generateQueryEmbedding(
 
     return normalizeVector(embedding);
   } catch (error) {
-    // 同 generateEmbedding：不記 message，只記白名單化的錯誤類別與 HTTP status。
-    const rawName = error instanceof Error ? error.name : 'UnknownError';
-    const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
-    const status = (error as { status?: unknown } | null)?.status;
-    const statusText = typeof status === 'number' ? ` status=${status}` : '';
-    console.error(`Failed to generate query embedding (${name}${statusText})`);
+    logEmbeddingError('Failed to generate query embedding', error);
     return null;
   }
 }
@@ -254,5 +320,5 @@ export async function generateQueryEmbedding(
  * 檢查 embedding 功能是否可用
  */
 export function isEmbeddingEnabled(): boolean {
-  return !!config.geminiApiKey;
+  return config.embeddingProvider === 'local' || Boolean(config.geminiApiKey);
 }

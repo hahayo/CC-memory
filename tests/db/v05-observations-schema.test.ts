@@ -54,6 +54,8 @@ const EXPECTED_COLUMNS = [
   'observed_at',
   'created_at',
   'updated_at',
+  // 0014 以 ALTER TABLE 附加，物理欄位序在最後
+  'embedding_bge_m3',
 ] as const;
 
 const EXPECTED_TYPES: Record<(typeof EXPECTED_COLUMNS)[number], string> = {
@@ -69,6 +71,7 @@ const EXPECTED_TYPES: Record<(typeof EXPECTED_COLUMNS)[number], string> = {
   files: 'text[]',
   narrative: 'text',
   embedding: 'vector(1536)',
+  embedding_bge_m3: 'vector(1024)',
   discovery_tokens: 'integer',
   source_hook: 'text',
   content_hash: 'text',
@@ -239,6 +242,7 @@ describe('v0.5 observations schema (project/personal test DB)', () => {
     expect(contentUnique).toContain("status = 'active'");
 
     expect(projectIndexes.get('observations_embedding_idx')?.toLowerCase()).toContain('using hnsw');
+    expect(projectIndexes.get('observations_embedding_bge_m3_idx')?.toLowerCase()).toContain('using hnsw');
     expect(projectIndexes.get('observations_project_active_idx')?.toLowerCase()).toContain(
       'project_id'
     );

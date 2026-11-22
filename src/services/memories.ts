@@ -56,6 +56,7 @@ import {
   prepareEmbeddingText,
   type EmbeddingPolicyEvidence,
 } from '../utils/embedding.js';
+import { embeddingFieldKey, memoryEmbeddingColumn } from '../db/embedding-column.js';
 
 // ---------------------------------------------------------------------------
 // ProjectStats（同 src/tools/stats.ts 的 shape，本層重新 export）
@@ -193,7 +194,7 @@ export async function saveMemory(
       if (preExisting.contentHash === contentHash) {
         return {
           id: preExisting.id,
-          hasEmbedding: preExisting.embedding !== null,
+          hasEmbedding: preExisting[embeddingFieldKey()] !== null,
           idempotent: true,
         };
       }
@@ -226,7 +227,7 @@ export async function saveMemory(
     keywords: input.keywords ?? [],
     decisions: input.decisions ?? [],
     nextSteps: input.nextSteps ?? [],
-    embedding: embeddingVec,
+    [embeddingFieldKey()]: embeddingVec,
     metadata: embeddingPolicy
       ? mergeEmbeddingPolicyMetadata(input.metadata, embeddingPolicy)
       : input.metadata ?? {},
@@ -272,7 +273,7 @@ export async function saveMemory(
     if (existing.contentHash === contentHash) {
       return {
         id: existing.id,
-        hasEmbedding: existing.embedding !== null,
+        hasEmbedding: existing[embeddingFieldKey()] !== null,
         idempotent: true,
       };
     }
@@ -301,9 +302,12 @@ interface ScoredSearchItem {
 // scope-probe integration test 共用，防兩邊 SQL 漂移。
 
 /** keyword 路徑的 SELECT 欄位：整列去掉 embedding（向量很大、結果用不到）。 */
-function omitEmbedding<T extends Record<string, unknown>>(columns: T): Omit<T, 'embedding'> {
-  const { embedding: _embedding, ...rest } = columns;
+function omitEmbedding<T extends Record<string, unknown>>(
+  columns: T
+): Omit<T, 'embedding' | 'embeddingBgeM3'> {
+  const { embedding: _embedding, embeddingBgeM3: _embeddingBgeM3, ...rest } = columns;
   void _embedding;
+  void _embeddingBgeM3;
   return rest;
 }
 
@@ -361,7 +365,7 @@ async function keywordSearchRows(
     .innerJoin(top, eq(projectMemories.id, top.id))
     .orderBy(desc(top.hits), desc(projectMemories.createdAt))) as Array<Memory & { keywordHits: number | string }>;
   return rows.map(({ keywordHits, ...row }) => ({
-    row: { ...row, embedding: null } as Memory,
+    row: { ...row, embedding: null, embeddingBgeM3: null } as Memory,
     score: Number(keywordHits) / total,
   }));
 }
@@ -379,16 +383,17 @@ async function semanticSearchScoredWithEmbedding(
   limit: number,
   excludeReserved: boolean
 ): Promise<ScoredSearchItem[]> {
+  const embeddingColumn = memoryEmbeddingColumn();
   const conditions: SQL[] = [
     eq(projectMemories.status, 'active'),
-    isNotNull(projectMemories.embedding),
+    isNotNull(embeddingColumn),
   ];
   if (projectId) conditions.push(eq(projectMemories.projectId, projectId));
   if (type) conditions.push(eq(projectMemories.type, type));
   const reserved = reservedExclusionCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
 
-  const similarity = sql<number>`1 - (${cosineDistance(projectMemories.embedding, queryEmbedding)})`;
+  const similarity = sql<number>`1 - (${cosineDistance(embeddingColumn, queryEmbedding)})`;
 
   const rows = (await db
     .select({
@@ -419,7 +424,7 @@ async function semanticSearchScoredWithEmbedding(
   return rows.map((r) => {
     const { similarity: s, ...row } = r;
     // 與 keyword 路徑一致：沒撈的向量明確給 null，不留 undefined（PR #53 審查 F3）
-    return { row: { ...row, embedding: null } as Memory, score: s };
+    return { row: { ...row, embedding: null, embeddingBgeM3: null } as Memory, score: s };
   });
 }
 

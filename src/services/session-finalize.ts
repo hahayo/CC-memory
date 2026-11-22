@@ -42,6 +42,8 @@ import type { DbClient } from './types.js';
 import { parseCaptureLlmExtraction, estimateDiscoveryTokens, type CaptureLlmAdapter,
   type CapturePriorSummary } from './capture-llm.js';
 import { composeEmbeddingText, prepareEmbeddingText, mergeEmbeddingPolicyMetadata } from '../utils/embedding.js';
+import { isEmbeddingConfigured } from '../utils/embedding-provider.js';
+import { embeddingColumnSql, inactiveEmbeddingColumnSql } from '../db/embedding-column.js';
 
 type Env = Record<string, string | undefined>;
 export function finalizeQuietMs(env: Env): number {
@@ -129,7 +131,7 @@ export async function finalizeSession(options: FinalizeSessionOptions): Promise<
     const summary = parseCaptureLlmExtraction(raw).session_summary;
     const prepared = prepareEmbeddingText(composeEmbeddingText(summary.summary, summary.keywords, summary.decisions));
     const embedding = await options.generateEmbedding(prepared.text);
-    if (!embedding && (env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || env.GEMINI_API_KEY?.trim())) throw new Error('embedding unavailable');
+    if (!embedding && (env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || isEmbeddingConfigured(env))) throw new Error('embedding unavailable');
     if (!(await options.stillReady())) return { attempted: true, status: 'stale' };
     const nextCapture: Record<string, unknown> = { ...capture, finalized_at: new Date(nowMs()).toISOString(),
       finalized_generation: generation, finalize_count: Number(capture.finalize_count ?? 0) + 1,
@@ -147,7 +149,8 @@ export async function finalizeSession(options: FinalizeSessionOptions): Promise<
       summary=${summary.summary}, keywords=ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(summary.keywords)}::jsonb)),
       decisions=ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(summary.decisions)}::jsonb)),
       next_steps=ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(summary.next_steps)}::jsonb)),
-      embedding=${embedding ? JSON.stringify(embedding) : null}::vector, content_hash=${hash},
+      ${embeddingColumnSql()}=${embedding ? JSON.stringify(embedding) : null}::vector,
+      ${inactiveEmbeddingColumnSql()}=NULL, content_hash=${hash},
       metadata=${JSON.stringify(metadata)}::jsonb, updated_at=NOW() WHERE ${fence} RETURNING id`);
     return { attempted: true, status: saved.length ? 'finalized' : 'stale' };
   } catch {

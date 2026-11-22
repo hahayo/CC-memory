@@ -1,6 +1,7 @@
 // src/config.ts
 import 'dotenv/config';
 import { readDatabaseInputs, resolveDatabaseUrl } from './db/resolve-url.js';
+import { parseEmbeddingLocalTimeoutMs, resolveEmbeddingProvider } from './utils/embedding-provider.js';
 
 const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
 
@@ -13,6 +14,9 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
 
   // Embedding (optional - enables semantic search)
+  embeddingProvider: resolveEmbeddingProvider(process.env),
+  embeddingLocalUrl: process.env.EMBEDDING_LOCAL_URL || 'http://127.0.0.1:8790',
+  embeddingLocalTimeoutMs: parseEmbeddingLocalTimeoutMs(process.env.EMBEDDING_LOCAL_TIMEOUT_MS),
   geminiApiKey: process.env.GEMINI_API_KEY,
   embeddingModel: process.env.EMBEDDING_MODEL || 'gemini-embedding-001',
   embeddingDimensions: parseInt(process.env.EMBEDDING_DIMENSIONS || '1536', 10),

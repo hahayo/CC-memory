@@ -25,6 +25,7 @@ function makeMemoryLike(projectId: string) {
     decisions: [],
     nextSteps: [],
     embedding: null,
+    embeddingBgeM3: null,
     status: 'active',
     mergedInto: null,
     idempotencyKey: null,

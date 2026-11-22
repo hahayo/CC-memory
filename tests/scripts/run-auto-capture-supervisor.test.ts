@@ -890,6 +890,78 @@ describe('scripts/run-auto-capture-supervisor', () => {
     expect(capturedEnv.CC_MEMORY_TRANSCRIPT_SNAPSHOT_DIR).toBeUndefined()
   })
 
+  it('expects embeddings without a Gemini key when EMBEDDING_PROVIDER=local', async () => {
+    const warnings: string[] = []
+    const missingKeyFile = join(tmpdir(), `missing-gemini-key-local-${Date.now()}`)
+    let capturedEnv: NodeJS.ProcessEnv = {}
+
+    await runAutoCaptureSupervisorTick(
+      {
+        projectUrl: 'postgres://project-db.example/cc_memory',
+        geminiApiKeyFile: missingKeyFile,
+        env: { CC_CAPTURE_LLM: 'claude-cli', EMBEDDING_PROVIDER: 'local' },
+        alertTarget: {
+          botToken: 'bot-token',
+          chatId: '1679325299',
+          apiBase: 'https://api.telegram.org',
+          timeoutMs: 10_000,
+        },
+      },
+      {
+        stderr: { write: (text: string) => { warnings.push(text); } },
+        loadState: async () => createEmptyAutoCaptureAlertState(),
+        saveState: async () => {},
+        runWorker: async (input) => {
+          capturedEnv = input.env
+          return {
+            exitCode: 0,
+            stdout: '[cc-memory] auto-capture summary: processed=0 skipped=0 dead-letter=0\n',
+            stderr: '',
+          }
+        },
+      }
+    )
+
+    expect(capturedEnv.CC_MEMORY_EMBEDDING_EXPECTED).toBe('1')
+    expect(capturedEnv.EMBEDDING_PROVIDER).toBe('local')
+    expect(warnings.join('')).not.toContain('embeddings-disabled')
+  })
+
+  it('does not mark an unreadable Gemini key file as embedding credential error when EMBEDDING_PROVIDER=local', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cc-memory-local-bad-key-'))
+
+    try {
+      const result = await runAutoCaptureSupervisorTick(
+        {
+          projectUrl: 'postgres://project-db.example/cc_memory',
+          geminiApiKeyFile: root,
+          env: { CC_CAPTURE_LLM: 'claude-cli', EMBEDDING_PROVIDER: 'local' },
+          alertTarget: {
+            botToken: 'bot-token',
+            chatId: '1679325299',
+            apiBase: 'https://api.telegram.org',
+            timeoutMs: 10_000,
+          },
+        },
+        {
+          loadState: async () => createEmptyAutoCaptureAlertState(),
+          saveState: async () => {},
+          runWorker: async () => ({
+            exitCode: 0,
+            stdout: '[cc-memory] auto-capture summary: processed=1 skipped=0 dead-letter=0\n',
+            stderr: '',
+          }),
+          sendTelegram: async () => {},
+        }
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.notification).not.toBe('failure')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('reports that embeddings are disabled when no Gemini key is available', async () => {
     const warnings: string[] = []
     const missingKeyFile = join(tmpdir(), `missing-gemini-key-${Date.now()}`)

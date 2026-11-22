@@ -34,6 +34,8 @@ import {
   prepareEmbeddingText,
   type EmbeddingPolicyEvidence,
 } from '../utils/embedding.js';
+import { isEmbeddingConfigured } from '../utils/embedding-provider.js';
+import { embeddingColumnSql, inactiveEmbeddingColumnSql } from '../db/embedding-column.js';
 import { resolveWriterHost } from '../utils/writer-host.js';
 import { sweepOrphanedSandboxStaging } from './codex-sandbox.js';
 import { resolveProjectId } from './projects.js';
@@ -1405,7 +1407,7 @@ async function insertRollup(
         keywords,
         decisions,
         next_steps,
-        embedding,
+        ${embeddingColumnSql()},
         status,
         idempotency_key,
         content_hash,
@@ -1452,7 +1454,8 @@ async function updateRollup(
       keywords = ${pgTextArrayLiteral(summary.keywords)}::text[],
       decisions = ${pgTextArrayLiteral(summary.decisions)}::text[],
       next_steps = ${pgTextArrayLiteral(summary.next_steps)}::text[],
-      embedding = ${vectorLiteral(input.embedding)}::vector,
+      ${embeddingColumnSql()} = ${vectorLiteral(input.embedding)}::vector,
+      ${inactiveEmbeddingColumnSql()} = NULL,
       content_hash = ${input.contentHash},
       writer_host = ${input.writerHost},
       metadata = ${JSON.stringify(input.metadata)}::jsonb,
@@ -1565,7 +1568,7 @@ async function insertObservation(
         concepts,
         files,
         narrative,
-        embedding,
+        ${embeddingColumnSql()},
         discovery_tokens,
         source_hook,
         content_hash,
@@ -2158,7 +2161,7 @@ export async function runCaptureWorkerOnce(
   const maxSessionsPerTick = captureMaxSessionsPerTick(env);
   const retryMinIntervalMs = captureRetryMinIntervalMs(env);
   const embeddingExpected =
-    env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || Boolean(env.GEMINI_API_KEY?.trim());
+    env.CC_MEMORY_EMBEDDING_EXPECTED === '1' || isEmbeddingConfigured(env);
   let handledSessions = 0;
   const stateWriter = options.stateWriter ?? writeCaptureStateAtomically;
   const maxWindowsPerTick = captureMaxWindowsPerTick(env);

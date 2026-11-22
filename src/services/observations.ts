@@ -23,6 +23,7 @@ import {
 import { observations, projectMemories, type Observation } from '../db/schema.js';
 import { keywordMatchSql } from '../utils/keyword-like.js';
 import { generateQueryEmbedding, isEmbeddingEnabled } from '../utils/embedding.js';
+import { observationEmbeddingColumn } from '../db/embedding-column.js';
 import { InvalidArgumentError, NotFoundError } from './errors.js';
 import { RESERVED_PROJECT_ID_LIST } from './scope-policy.js';
 import type {
@@ -277,9 +278,12 @@ function combineHybridCandidates(
 }
 
 /** keyword 路徑的 SELECT 欄位：整列去掉 embedding（向量很大、結果用不到）。 */
-function omitEmbedding<T extends Record<string, unknown>>(columns: T): Omit<T, 'embedding'> {
-  const { embedding: _embedding, ...rest } = columns;
+function omitEmbedding<T extends Record<string, unknown>>(
+  columns: T
+): Omit<T, 'embedding' | 'embeddingBgeM3'> {
+  const { embedding: _embedding, embeddingBgeM3: _embeddingBgeM3, ...rest } = columns;
   void _embedding;
+  void _embeddingBgeM3;
   return rest;
 }
 
@@ -333,7 +337,7 @@ export async function keywordObservationIndexCandidates(
     .orderBy(desc(top.hits), desc(observations.observedAt))) as Array<Observation & { keywordHits: number | string }>;
 
   return rows.map(({ keywordHits, ...row }) => ({
-    result: observationIndexResult({ ...row, embedding: null } as Observation),
+    result: observationIndexResult({ ...row, embedding: null, embeddingBgeM3: null } as Observation),
     baseScore: Number(keywordHits) / total,
     semanticScore: null,
     sourceOrder: row.type === 'decision' ? 2 : 3,
@@ -353,14 +357,14 @@ export async function semanticObservationIndexCandidates(
 
   const conditions: SQL[] = [
     eq(observations.status, 'active'),
-    isNotNull(observations.embedding),
+    isNotNull(observationEmbeddingColumn()),
   ];
   if (input.projectId) conditions.push(eq(observations.projectId, input.projectId));
   if (typeCondition) conditions.push(typeCondition);
   const reserved = observationExcludeReservedCondition(excludeReserved);
   if (reserved) conditions.push(reserved);
 
-  const similarity = sql<number>`1 - (${cosineDistance(observations.embedding, queryEmbedding)})`;
+  const similarity = sql<number>`1 - (${cosineDistance(observationEmbeddingColumn(), queryEmbedding)})`;
   const rows = (await db
     .select({
       id: observations.id,
@@ -393,7 +397,7 @@ export async function semanticObservationIndexCandidates(
 
   return rows.map(({ similarity: score, ...row }) => ({
     // 與 keyword 路徑一致：沒撈的向量明確給 null（PR #53 審查 F3）
-    result: observationIndexResult({ ...row, embedding: null } as Observation),
+    result: observationIndexResult({ ...row, embedding: null, embeddingBgeM3: null } as Observation),
     baseScore: score,
     semanticScore: score,
     sourceOrder: row.type === 'decision' ? 2 : 3,

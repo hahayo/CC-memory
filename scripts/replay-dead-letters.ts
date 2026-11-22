@@ -36,6 +36,7 @@ import type { ReplayCaptureWindowResult } from '../src/services/capture-worker.j
 import { assertZstdRuntime, readTranscriptSource, transcriptSourceLength } from '../src/services/transcript-source.js';
 import { captureMaxWindowBytes, splitTranscriptRange } from '../src/services/transcript-window.js';
 import type { DbClient } from '../src/services/types.js';
+import { isEmbeddingConfigured } from '../src/utils/embedding-provider.js';
 import { checkProductionApproval } from './run-auto-capture-supervisor.js';
 
 const DEFAULT_SPOOL_DIR = path.join(homedir(), '.cache', 'cc-memory', 'spool');
@@ -562,7 +563,9 @@ async function main(): Promise<number> {
   process.env.DATABASE_URL = databaseUrl;
   const geminiKey = await loadGeminiKey(options.geminiKeyFile);
   if (geminiKey) process.env.GEMINI_API_KEY = geminiKey;
-  else process.stderr.write('[replay] warning: embeddings-disabled; rows will use NULL embedding\n');
+  if (!isEmbeddingConfigured(process.env)) {
+    process.stderr.write('[replay] warning: embeddings-disabled; rows will use NULL embedding\n');
+  }
 
   const llm = createCaptureLlmAdapter({ env: process.env, emitDisabledWarning: false });
   try {
@@ -594,7 +597,7 @@ async function main(): Promise<number> {
       db,
       llm,
       generateEmbedding,
-      embeddingExpected: Boolean(geminiKey),
+      embeddingExpected: isEmbeddingConfigured(process.env),
       replay: replayCaptureWindow,
       maxWindowBytes: captureMaxWindowBytes(process.env, llm),
     }, stdout);

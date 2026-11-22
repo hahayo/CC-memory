@@ -4,8 +4,8 @@
 // （Codex B6/A10：不靠 docker init script——它只在 fresh volume 跑一次，
 //   既有 volume 不會重建）。
 //
-//   cc_memory_test           project 側：0000-0006 + 0009-0012（不含 0007/0008/0013）
-//   cc_memory_test_personal  personal 側：0000-0007 + 0009-0011 + 0013（不含 0008/0012）
+//   cc_memory_test           project 側：0000-0006 + 0009-0012 + 0014 + 0015（不含 0007/0008/0013）
+//   cc_memory_test_personal  personal 側：0000-0007 + 0009-0011 + 0013 + 0014 + 0015（不含 0008/0012）
 //
 // 0008 不在此套用：e2e 測試內依 runbook 順序（delete 之後）套用＋清除；
 // 本 script 每次跑會把 project 測試庫殘留的 0008 constraint 清掉（自癒，
@@ -150,6 +150,8 @@ async function main() {
     '0010_add_todoist_sync.sql',                        // 兩側都套（見 migration 檔頭：shared schema 欄位）
     '0011_add_observations.sql',                        // 兩側都套：observations shared schema
     '0013_observations_personal_only_check.sql',         // personal-only：只准 __personal__
+    '0014_add_embedding_bge_m3.sql',                     // 兩側都套：bge-m3 embedding shared 欄位
+    '0015_add_embedding_bge_m3_indexes.sql',             // 兩側都套：CONCURRENTLY（applyMigrations 逐 chunk simple query、無 transaction）
   ];
   await applyMigrations(personalUrl, personalMigrations);
   // 0009 也套 project test DB：service tests 用 project DB 跑，需要 reminder_delivery_queue table
@@ -159,12 +161,14 @@ async function main() {
     '0010_add_todoist_sync.sql',
     '0011_add_observations.sql',
     '0012_observations_no_personal_check.sql',
+    '0014_add_embedding_bge_m3.sql',
+    '0015_add_embedding_bge_m3_indexes.sql',
   ]);
   await dropProjectNoPersonalChecks(projectUrl);
 
   console.error(
-    `done：${dbNameOf(projectUrl)}（0000-0006+0009+0010+0011+0012）/ ` +
-      `${dbNameOf(personalUrl)}（0000-0007+0009+0010+0011+0013）`
+    `done：${dbNameOf(projectUrl)}（0000-0006+0009+0010+0011+0012+0014+0015）/ ` +
+      `${dbNameOf(personalUrl)}（0000-0007+0009+0010+0011+0013+0014+0015）`
   );
 }
 
