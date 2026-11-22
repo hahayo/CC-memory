@@ -26,6 +26,7 @@ import {
   isCaptureLlmDisabled,
 } from '../src/services/capture-llm.js';
 import type { CaptureWorkerResult } from '../src/services/capture-worker.js';
+import { isEmbeddingConfigured } from '../src/utils/embedding-provider.js';
 import { checkProductionApproval } from './run-auto-capture-supervisor.js';
 
 const DEFAULT_SPOOL_DIR = path.join(homedir(), '.cache', 'cc-memory', 'spool');
@@ -655,7 +656,7 @@ export async function executeDrain(
     process.stderr.write(`[cc-memory] backlog drain preflight failed: ${llm.disabledReason}\n`);
     return 1;
   }
-  if (!geminiKey) {
+  if (!isEmbeddingConfigured(process.env)) {
     process.stderr.write('[cc-memory] backlog drain warning: embeddings-disabled; rows will use NULL embedding\n');
   }
   try {
@@ -727,7 +728,9 @@ async function main(): Promise<number> {
       dryRun: true,
       spoolDir: options.spoolDir,
       projectUrlFileExists: existsSync(options.projectUrlFile),
-      embeddingsEnabled: Boolean(await loadGeminiKey(options.geminiKeyFile)),
+      embeddingsEnabled:
+        isEmbeddingConfigured(process.env) ||
+        Boolean(await loadGeminiKey(options.geminiKeyFile)),
       backupDir: options.backupDir,
       transcriptSnapshotDir: options.transcriptSnapshotDir,
       backupFreeBytes: (() => {

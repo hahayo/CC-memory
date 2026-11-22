@@ -140,7 +140,7 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_MEMORY_ALERT_CHAT_ID` - Telegram 告警 chat id
 - `CC_MEMORY_ALERT_API_BASE` - Telegram API base URL（可選，覆蓋預設）
 - `CC_MEMORY_REQUIRE_ALERTS` - 設為 `1` 時告警設定是 supervisor hard gate；正式 auto-capture unit 固定啟用
-- `CC_MEMORY_EMBEDDING_EXPECTED` - supervisor 成功載入 Gemini key 時自動設為 `1`；embedding 失敗會讓 tick 不健康並告警
+- `CC_MEMORY_EMBEDDING_EXPECTED` - supervisor 成功載入 Gemini key、或 `EMBEDDING_PROVIDER=local` 時自動設為 `1`；embedding 失敗會讓 tick 不健康並告警
 - `CC_MEMORY_INJECT_TOKEN_BUDGET` - SessionStart（工作階段啟動）注入的 token budget（語彙預算，預設 1200）
 - `CC_MEMORY_INJECT_RECENT` - SessionStart Recent Activity 注入開關（預設 off）
 - `CC_MEMORY_INCLUDE_OBSERVATIONS` - search 是否包含 observations（觀察記錄，預設 on）
@@ -156,6 +156,9 @@ Todoist（5，需 `TODOIST_API_TOKEN` ∧ forced personal）：
 - `CC_DB_CONNECT_TIMEOUT_SEC` - auto-capture worker 連 PostgreSQL 的 connect timeout（連線逾時）秒數（預設 2）。高並行 drain 共用同一條 SSH tunnel（SSH 通道）時 2 秒太短（2026-09-20 實測 10 支 6 小時內 32 次 CONNECT_TIMEOUT），補舊帳 runner 設 15；必須是純十進位正整數字串，其餘一律退回預設 2——截斷型打錯字（`15seconds`、`2.5`）不會被吃成 15／2，非十進位寫法（`1e3`、`0x10`）也不接受；上限 2147483 秒（再大會被 Node 計時器折成 1 毫秒反而立刻逾時），超過同樣退回 2
 - `EMBEDDING_MODEL` - embedding（嵌入向量）模型名稱（預設 `gemini-embedding-001`）
 - `EMBEDDING_DIMENSIONS` - embedding 向量維度（預設 1536）
+- `EMBEDDING_PROVIDER` - embedding provider（提供者；`gemini`|`local`，預設 `gemini`）。`local` 改用本機 bge-m3 embed-service（embed-service/server.py 需先啟動），讀寫 `embedding_bge_m3` 欄（1024 維，需先套 migration 0014）；此模式下 `EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS`/`GEMINI_API_KEY` 對 embedding 不生效
+- `EMBEDDING_LOCAL_URL` - embed-service URL（預設 `http://127.0.0.1:8790`）
+- `EMBEDDING_LOCAL_TIMEOUT_MS` - embed-service 請求逾時毫秒（預設 30000；非正整數退回預設）
 - `CC_BACKUP_TARGET` - 備份目標，只允許 `project` 或 `personal`；Coolify 兩個 service 各自固定
 - `CC_BACKUP_TMP_DIR` - 明文 dump 暫存目錄；正式容器必須是 tmpfs
 - `CC_BACKUP_MAX_AGE_HOURS` - R2 committed manifest 最大允許年齡（預設 26）

@@ -19,6 +19,7 @@ import {
   type AutoCaptureExecutionResult,
 } from '../src/services/auto-capture-alerts.js'
 import { readSecureMode0600RegularFile } from '../src/utils/secure-file.js'
+import { resolveEmbeddingProvider } from '../src/utils/embedding-provider.js'
 import { assertZstdRuntime } from '../src/services/transcript-source.js'
 
 const DEFAULT_REPO_ROOT = path.resolve(__dirname, '..')
@@ -301,6 +302,8 @@ async function buildWorkerEnv(
   delete nextEnv.PGUSERNAME
   delete nextEnv.PGPASSWORD
 
+  const embeddingProvider = resolveEmbeddingProvider(nextEnv)
+  // 即使 provider=local 仍嘗試載入 Gemini key：capture LLM 可能用 gemini-flash。
   const geminiApiKey = await maybeReadGeminiApiKey(
     nextEnv,
     geminiApiKeyFile,
@@ -308,6 +311,8 @@ async function buildWorkerEnv(
   )
   if (geminiApiKey) {
     nextEnv.GEMINI_API_KEY = geminiApiKey
+  }
+  if (embeddingProvider === 'local' || geminiApiKey) {
     nextEnv.CC_MEMORY_EMBEDDING_EXPECTED = '1'
   } else {
     delete nextEnv.CC_MEMORY_EMBEDDING_EXPECTED
@@ -450,7 +455,8 @@ export async function runAutoCaptureSupervisorTick(
       options.geminiApiKeyFile,
       (error) => { geminiKeyUnavailableError = error }
     )
-    if (!workerEnv.GEMINI_API_KEY?.trim()) {
+    const embeddingProvider = resolveEmbeddingProvider(env)
+    if (embeddingProvider === 'gemini' && !workerEnv.GEMINI_API_KEY?.trim()) {
       const reason = geminiKeyUnavailableError instanceof Error
         ? geminiKeyUnavailableError.message
         : geminiKeyUnavailableError === undefined
@@ -465,7 +471,10 @@ export async function runAutoCaptureSupervisorTick(
     execution = await runWorker({ repoRoot, env: workerEnv })
   }
   const geminiKeyErrorCode = (geminiKeyUnavailableError as NodeJS.ErrnoException | undefined)?.code
+  // provider=local 時 Gemini key 檔問題不算 embedding credential error
+  // （key 檔同時被 gemini-flash capture LLM 用，但健康判定只跟 embedding 憑證走）。
   const hasEmbeddingCredentialError =
+    resolveEmbeddingProvider(env) === 'gemini' &&
     geminiKeyUnavailableError !== undefined && geminiKeyErrorCode !== 'ENOENT'
   const assessedExecution = hasEmbeddingCredentialError
     ? {

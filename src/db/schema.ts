@@ -14,6 +14,7 @@ import {
   bigint,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+import { LOCAL_EMBEDDING_DIMENSIONS } from '../utils/embedding-provider.js';
 
 // Embedding 維度常數（與 Gemini gemini-embedding-001 匹配）
 // 這個值是固定的，不需要從環境變數讀取
@@ -39,6 +40,8 @@ export const projectMemories = pgTable(
 
     // Embedding 向量（用於語義搜尋）
     embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
+    // 本機 bge-m3 embedding（EMBEDDING_PROVIDER=local；migration 0014，1024 維）
+    embeddingBgeM3: vector('embedding_bge_m3', { dimensions: LOCAL_EMBEDDING_DIMENSIONS }),
 
     // 狀態: 'active' | 'merged' | 'archived'
     status: text('status').default('active'),
@@ -60,6 +63,7 @@ export const projectMemories = pgTable(
   (table) => [
     // HNSW 索引用於快速向量相似度搜尋
     index('embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+    index('embedding_bge_m3_idx').using('hnsw', table.embeddingBgeM3.op('vector_cosine_ops')),
     // 專案 ID 索引
     index('project_id_idx').on(table.projectId),
     // 狀態索引
@@ -101,6 +105,8 @@ export const observations = pgTable(
     narrative: text('narrative').notNull(),
 
     embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
+    // 本機 bge-m3 embedding（migration 0014，1024 維）
+    embeddingBgeM3: vector('embedding_bge_m3', { dimensions: LOCAL_EMBEDDING_DIMENSIONS }),
     discoveryTokens: integer('discovery_tokens').notNull(),
     sourceHook: text('source_hook').notNull(),
     contentHash: text('content_hash').notNull(),
@@ -127,6 +133,7 @@ export const observations = pgTable(
     index('observations_session_idx').on(table.projectId, table.sessionId, table.observedAt),
     index('observations_status_idx').on(table.status),
     index('observations_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+    index('observations_embedding_bge_m3_idx').using('hnsw', table.embeddingBgeM3.op('vector_cosine_ops')),
   ]
 );
 

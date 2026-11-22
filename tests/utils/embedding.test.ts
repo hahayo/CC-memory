@@ -11,12 +11,14 @@ vi.mock('@google/genai', () => ({
 }));
 
 import {
+  isEmbeddingEnabled,
   composeObservationEmbeddingText,
   generateEmbedding,
   generateQueryEmbedding,
   mergeEmbeddingPolicyMetadata,
   prepareEmbeddingText,
 } from '../../src/utils/embedding.js';
+import { config } from '../../src/config.js';
 
 beforeEach(() => {
   embedContent.mockReset();
@@ -150,5 +152,142 @@ describe('embedding egress redaction', () => {
     expect(consoleError).toHaveBeenCalledWith('Failed to generate embedding (Error status=429)');
     expect(consoleError.mock.calls.flat().join(' ')).not.toContain('private request body');
     consoleError.mockRestore();
+  });
+});
+
+describe('local embedding provider (EMBEDDING_PROVIDER=local)', () => {
+  const saved = {
+    provider: config.embeddingProvider,
+    url: config.embeddingLocalUrl,
+    timeout: config.embeddingLocalTimeoutMs,
+    key: config.geminiApiKey,
+  };
+
+  function useLocal(overrides: Partial<typeof config> = {}) {
+    config.embeddingProvider = 'local';
+    config.embeddingLocalUrl = 'http://127.0.0.1:8790/';
+    config.embeddingLocalTimeoutMs = 500;
+    config.geminiApiKey = undefined;
+    Object.assign(config, overrides);
+  }
+
+  function restore() {
+    config.embeddingProvider = saved.provider;
+    config.embeddingLocalUrl = saved.url;
+    config.embeddingLocalTimeoutMs = saved.timeout;
+    config.geminiApiKey = saved.key;
+    vi.unstubAllGlobals();
+  }
+
+  function fakeVector(length = 1024, seed = 3): number[] {
+    return Array.from({ length }, (_, i) => (i % 7 === 0 ? seed : 1));
+  }
+
+  function stubFetchResponse(body: unknown, init: { ok?: boolean; status?: number } = {}) {
+    const fetchMock = vi.fn(async () => ({
+      ok: init.ok ?? true,
+      status: init.status ?? 200,
+      json: async () => ({ model: 'BAAI/bge-m3', dimensions: 1024, ...body as Record<string, unknown> }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('POSTs redacted text to /embed and returns a normalized 1024-dim vector', async () => {
+    useLocal();
+    const fetchMock = stubFetchResponse({ embeddings: [fakeVector()] });
+    try {
+      const googleKey = `AIza${'K'.repeat(32)}`;
+      const result = await generateEmbedding(`secret ${googleKey} here`);
+      expect(result).not.toBeNull();
+      expect(result).toHaveLength(1024);
+      const norm = Math.sqrt(result!.reduce((s, v) => s + v * v, 0));
+      expect(norm).toBeCloseTo(1, 6);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { method: string; body: string }];
+      expect(url).toBe('http://127.0.0.1:8790/embed');
+      expect(init.method).toBe('POST');
+      expect(init.body).toContain('[REDACTED:google_api_key]');
+      expect(init.body).not.toContain(googleKey);
+    } finally { restore(); }
+  });
+
+  it('query variant hits the same endpoint', async () => {
+    useLocal();
+    const fetchMock = stubFetchResponse({ embeddings: [fakeVector()] });
+    try {
+      const result = await generateQueryEmbedding('find something');
+      expect(result).toHaveLength(1024);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe('http://127.0.0.1:8790/embed');
+    } finally { restore(); }
+  });
+
+  it('returns null and logs status on HTTP errors without leaking text', async () => {
+    useLocal();
+    stubFetchResponse({ error: 'x' }, { ok: false, status: 500 });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await generateEmbedding('sensitive payload zzz');
+      expect(result).toBeNull();
+      const logged = consoleError.mock.calls.flat().join(' ');
+      expect(logged).toContain('LocalEmbeddingHttpError status=500');
+      expect(logged).not.toContain('sensitive payload zzz');
+    } finally { consoleError.mockRestore(); restore(); }
+  });
+
+  it('returns null on timeout', async () => {
+    useLocal({ embeddingLocalTimeoutMs: 20 });
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () =>
+          reject(new DOMException('The operation timed out', 'TimeoutError')));
+      })
+    ));
+    try {
+      const result = await generateEmbedding('anything');
+      expect(result).toBeNull();
+    } finally { restore(); }
+  });
+
+  it('returns null when the response has the wrong dimension', async () => {
+    useLocal();
+    stubFetchResponse({ embeddings: [fakeVector(1536)] });
+    try {
+      expect(await generateEmbedding('anything')).toBeNull();
+    } finally { restore(); }
+  });
+
+  it('returns null when the response advertises a different model', async () => {
+    useLocal();
+    stubFetchResponse({ model: 'BAAI/bge-small-en-v1.5', embeddings: [fakeVector()] });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await generateEmbedding('anything')).toBeNull();
+      expect(consoleError.mock.calls.flat().join(' ')).toContain('LocalEmbeddingInvalidResponse');
+    } finally { consoleError.mockRestore(); restore(); }
+  });
+
+  it('returns null on an all-zero vector', async () => {
+    useLocal();
+    stubFetchResponse({ embeddings: [new Array(1024).fill(0)] });
+    try {
+      expect(await generateEmbedding('anything')).toBeNull();
+    } finally { restore(); }
+  });
+
+  it('returns null when the vector norm overflows to Infinity', async () => {
+    useLocal();
+    stubFetchResponse({ embeddings: [new Array(1024).fill(Number.MAX_VALUE)] });
+    try {
+      expect(await generateEmbedding('anything')).toBeNull();
+    } finally { restore(); }
+  });
+
+  it('isEmbeddingEnabled is true with local provider and no key', async () => {
+    useLocal();
+    try {
+      expect(isEmbeddingEnabled()).toBe(true);
+    } finally { restore(); }
   });
 });
