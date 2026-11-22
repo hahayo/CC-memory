@@ -307,9 +307,9 @@ function createDrizzleBackfillStore(
 
 async function main(): Promise<void> {
   // 本 script 只寫 1536 維 `embedding` 欄（Gemini）。EMBEDDING_PROVIDER=local 時
-  // 寫入目標是 1024 維 `embedding_bge_m3` 欄，bge-m3 backfill 屬 stage 2。
+  // 寫入目標是 1024 維 `embedding_bge_m3` 欄，bge-m3 backfill 改用 scripts/backfill-bge-m3.ts。
   if (resolveEmbeddingProvider(process.env) === 'local') {
-    throw new Error('EMBEDDING_PROVIDER=local: bge-m3 backfill (embedding_bge_m3) is stage 2; this script only backfills the 1536-dim Gemini embedding column');
+    throw new Error('EMBEDDING_PROVIDER=local: this script only backfills the 1536-dim Gemini `embedding` column; use scripts/backfill-bge-m3.ts for embedding_bge_m3');
   }
   const options = parseEmbeddingBackfillArgs(process.argv.slice(2));
   const databaseUrl = process.env.DATABASE_URL;

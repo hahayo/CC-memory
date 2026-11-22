@@ -1,0 +1,22 @@
+# CC-memory 本機 bge-m3 embed-service 的 systemd user unit（使用者服務單元）範本。
+# 安裝方式見 embed-service/README.md。
+# server.py 只綁 127.0.0.1，不對外。
+
+[Unit]
+Description=CC-memory local bge-m3 embedding service
+
+[Service]
+Type=simple
+# 測試用 venv 預設值；請改成這台機器實際安裝 dependencies 的 venv python 路徑。
+Environment=CC_EMBED_PYTHON=/home/haha/.cache/cc-memory/embed-test-20261122/.venv/bin/python
+# server.py 的實際路徑；依 checkout 位置調整。
+Environment=CC_EMBED_SERVER=%h/CC_project/CC-memory/embed-service/server.py
+Environment=CC_EMBED_PORT=8790
+Environment=PYTHONUNBUFFERED=1
+# 可執行檔位置不能用 systemd 變數展開，故經 /bin/sh 啟動。
+ExecStart=/bin/sh -c 'exec "$CC_EMBED_PYTHON" "$CC_EMBED_SERVER"'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

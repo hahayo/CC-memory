@@ -241,8 +241,8 @@ describe('v0.5 observations schema (project/personal test DB)', () => {
     expect(contentUnique).toContain('where');
     expect(contentUnique).toContain("status = 'active'");
 
-    expect(projectIndexes.get('observations_embedding_idx')?.toLowerCase()).toContain('using hnsw');
-    expect(projectIndexes.get('observations_embedding_bge_m3_idx')?.toLowerCase()).toContain('using hnsw');
+    expect(projectIndexes.has('observations_embedding_idx')).toBe(false);
+    expect(projectIndexes.has('observations_embedding_bge_m3_idx')).toBe(false);
     expect(projectIndexes.get('observations_project_active_idx')?.toLowerCase()).toContain(
       'project_id'
     );

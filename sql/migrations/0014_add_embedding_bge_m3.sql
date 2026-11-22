@@ -8,14 +8,14 @@
 --   Drizzle select-all / insert 會列出 schema 全部欄位，DB 缺欄會讓所有
 --   memories/observations 查詢爆 column does not exist。
 --   程式碼只需要本檔（0014）：runtime Drizzle 不直接用 index；
---   0015 的 HNSW index 純屬效能（缺它時 local semantic search 走 seq scan 仍可用）。
+--   embedding_bge_m3 不建 HNSW index（見 0015：現行搜尋排序用不到，semantic search 走 seq scan）。
 --
 -- 每個 chunk 先 SET lock_timeout='5s'：
 --   ADD COLUMN 只需短暫的 ACCESS EXCLUSIVE lock，但排隊等長 transaction 時
 --   會擋住後面所有讀寫。寧可 5 秒內 fail fast（重跑即可）也不要默默卡死流量。
 --
 -- 本 migration 全為 additive。
---   rollback：先 rollback 0015（DROP INDEX），再
+--   rollback：
 --     SET lock_timeout='5s'; ALTER TABLE project_memories DROP COLUMN IF EXISTS embedding_bge_m3;
 --     SET lock_timeout='5s'; ALTER TABLE observations DROP COLUMN IF EXISTS embedding_bge_m3;
 --

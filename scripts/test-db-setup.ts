@@ -151,7 +151,7 @@ async function main() {
     '0011_add_observations.sql',                        // 兩側都套：observations shared schema
     '0013_observations_personal_only_check.sql',         // personal-only：只准 __personal__
     '0014_add_embedding_bge_m3.sql',                     // 兩側都套：bge-m3 embedding shared 欄位
-    '0015_add_embedding_bge_m3_indexes.sql',             // 兩側都套：CONCURRENTLY（applyMigrations 逐 chunk simple query、無 transaction）
+    '0015_drop_unused_observations_hnsw.sql',            // 兩側都套：DROP INDEX CONCURRENTLY（applyMigrations 逐 chunk simple query、無 transaction）
   ];
   await applyMigrations(personalUrl, personalMigrations);
   // 0009 也套 project test DB：service tests 用 project DB 跑，需要 reminder_delivery_queue table
@@ -162,7 +162,7 @@ async function main() {
     '0011_add_observations.sql',
     '0012_observations_no_personal_check.sql',
     '0014_add_embedding_bge_m3.sql',
-    '0015_add_embedding_bge_m3_indexes.sql',
+    '0015_drop_unused_observations_hnsw.sql',
   ]);
   await dropProjectNoPersonalChecks(projectUrl);
 

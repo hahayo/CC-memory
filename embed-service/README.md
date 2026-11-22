@@ -47,3 +47,32 @@ similarity（餘弦相似度），min ≥ 0.999 才算 PASS：
 .venv/bin/python check_parity.py                 # 預設 url / data-dir / n=300
 .venv/bin/python check_parity.py --n 100 --seed 1
 ```
+
+## 安裝成 systemd user service（使用者服務）
+
+`cc-memory-embed.service` 是 systemd user unit（使用者層級服務單元）範本，
+讓 embed-service 開機自動常駐、掛掉自動重啟（Restart=on-failure）。
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp cc-memory-embed.service ~/.config/systemd/user/
+# 編輯 CC_EMBED_PYTHON（指向本機 venv 的 python）與 CC_EMBED_SERVER（指向 server.py）
+$EDITOR ~/.config/systemd/user/cc-memory-embed.service
+systemctl --user daemon-reload
+systemctl --user enable --now cc-memory-embed.service
+```
+
+檢查：
+
+```bash
+systemctl --user status cc-memory-embed.service
+journalctl --user -u cc-memory-embed -f   # 追蹤日誌（log）
+curl -s http://127.0.0.1:8790/health
+```
+
+若要讓服務在「沒有登入 session（工作階段）」時也持續運作（例如 SSH 登出後、
+開機即常駐），需開啟 linger（駐留）：
+
+```bash
+loginctl enable-linger "$USER"
+```

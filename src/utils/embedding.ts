@@ -1,223 +1,74 @@
 // src/utils/embedding.ts
 import { GoogleGenAI } from '@google/genai';
-import { createHash } from 'node:crypto';
 import { config } from '../config.js';
-import { LOCAL_EMBEDDING_DIMENSIONS } from './embedding-provider.js';
+import {
+  composeEmbeddingText,
+  composeObservationEmbeddingText,
+  EMBEDDING_REDACTION_RULES_VERSION,
+  mergeEmbeddingPolicyMetadata,
+  normalizeVector,
+  prepareEmbeddingText,
+  type EmbeddingPolicyEvidence,
+  type ObservationEmbeddingInput,
+  type PreparedEmbeddingText,
+} from './embedding-text.js';
+import {
+  logEmbeddingError,
+  requestLocalEmbeddings,
+} from './local-embedding.js';
 
-export const EMBEDDING_REDACTION_RULES_VERSION = '2026-08-19.3';
-
-export interface EmbeddingPolicyEvidence {
-  rules_version: string;
-  redaction_count: number;
-  rule_counts: Record<string, number>;
-  input_sha256: string;
-}
-
-export interface PreparedEmbeddingText {
-  text: string;
-  evidence: EmbeddingPolicyEvidence;
-}
-
-interface EmbeddingRedactionRule {
-  id: string;
-  pattern: RegExp;
-  replacement: string;
-}
-
-const EMBEDDING_REDACTION_RULES: EmbeddingRedactionRule[] = [
-  {
-    id: 'private_key',
-    pattern:
-      /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/gu,
-    replacement: '[REDACTED:private_key]',
-  },
-  {
-    id: 'google_api_key',
-    pattern: /AIza[0-9A-Za-z_-]{30,}/gu,
-    replacement: '[REDACTED:google_api_key]',
-  },
-  {
-    id: 'openai_api_key',
-    pattern: /sk-[0-9A-Za-z_-]{20,}/gu,
-    replacement: '[REDACTED:openai_api_key]',
-  },
-  {
-    id: 'github_token',
-    pattern: /gh[pousr]_[0-9A-Za-z]{20,}/gu,
-    replacement: '[REDACTED:github_token]',
-  },
-  {
-    id: 'aws_access_key',
-    pattern: /AKIA[0-9A-Z]{16}/gu,
-    replacement: '[REDACTED:aws_access_key]',
-  },
-];
-
-const LABELED_SECRET_PATTERN =
-  /\b((?:[A-Za-z0-9]+[_-])*(?:password|passwd|api[_ -]?key|secret[_ -]?key|access[_ -]?token))(["']?\s*[:=]\s*["'`]?)(?!\[REDACTED:)([^\s"'`]{8,})/giu;
-
-export function prepareEmbeddingText(text: string): PreparedEmbeddingText {
-  let prepared = text;
-  const ruleCounts: Record<string, number> = {};
-
-  for (const rule of EMBEDDING_REDACTION_RULES) {
-    let count = 0;
-    prepared = prepared.replace(rule.pattern, () => {
-      count += 1;
-      return rule.replacement;
-    });
-    if (count > 0) ruleCounts[rule.id] = count;
-  }
-
-  let labeledSecretCount = 0;
-  prepared = prepared.replace(
-    LABELED_SECRET_PATTERN,
-    (_match, label: string, separator: string) => {
-      labeledSecretCount += 1;
-      return `${label}${separator}[REDACTED:labeled_secret]`;
-    },
-  );
-  if (labeledSecretCount > 0) ruleCounts.labeled_secret = labeledSecretCount;
-
-  return {
-    text: prepared,
-    evidence: {
-      rules_version: EMBEDDING_REDACTION_RULES_VERSION,
-      redaction_count: Object.values(ruleCounts).reduce((sum, count) => sum + count, 0),
-      rule_counts: ruleCounts,
-      input_sha256: createHash('sha256').update(prepared, 'utf8').digest('hex'),
-    },
-  };
-}
-
-export function mergeEmbeddingPolicyMetadata(
-  metadata: unknown,
-  evidence: EmbeddingPolicyEvidence,
-): Record<string, unknown> {
-  const base = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-    ? { ...(metadata as Record<string, unknown>) }
-    : {};
-  base.embedding_policy = evidence;
-  return base;
-}
-
-export interface EmbeddingConfig {
-  apiKey?: string;
-  model?: string;
-  dimensions?: number;
-}
-
-export interface ObservationEmbeddingInput {
-  title: string;
-  facts: string[];
-  narrative: string;
-}
-
-/**
- * 組合文本用於生成 embedding
- * 將 summary、keywords、decisions 組合成單一文本
- */
-export function composeEmbeddingText(
-  summary: string,
-  keywords?: string[],
-  decisions?: string[]
-): string {
-  const parts: string[] = [summary];
-
-  if (keywords && keywords.length > 0) {
-    parts.push(`關鍵字: ${keywords.join(', ')}`);
-  }
-
-  if (decisions && decisions.length > 0) {
-    parts.push(`決策: ${decisions.join('; ')}`);
-  }
-
-  return parts.join('\n');
-}
-
-export function composeObservationEmbeddingText(
-  observation: ObservationEmbeddingInput
-): string {
-  return [observation.title, observation.facts.join(' '), observation.narrative].join('\n');
-}
-
-/**
- * 正規化向量（L2 normalization）
- */
-export function normalizeVector(vector: number[]): number[] {
-  const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
-  if (magnitude === 0) return vector;
-  return vector.map(val => val / magnitude);
-}
-
-// 刻意不記錄 error.message（provider 可能回吐請求內容，見 tests/utils/embedding.test.ts
-// 「egress redaction」）。只記錯誤類別與 HTTP status，讓 supervisor journal 能分辨
-// 配額（429）／驗證（401/403）／網路（無 status）——2026-09-01 事故因此不可考。
-// error.name 是 provider 可改寫的字串，只放行識別字形式，避免被塞入回吐內容。
-function logEmbeddingError(prefix: string, error: unknown): void {
-  const rawName = error instanceof Error ? error.name : 'UnknownError';
-  const name = /^[A-Za-z0-9_]{1,40}$/.test(rawName) ? rawName : 'Error';
-  const status = (error as { status?: unknown } | null)?.status;
-  const statusText = typeof status === 'number' ? ` status=${status}` : '';
-  console.error(`${prefix} (${name}${statusText})`);
-}
-
-class LocalEmbeddingHttpError extends Error {
-  readonly status: number;
-  constructor(status: number) {
-    super(`local embedding HTTP ${status}`);
-    this.name = 'LocalEmbeddingHttpError';
-    this.status = status;
-  }
-}
-
-class LocalEmbeddingInvalidResponse extends Error {
-  constructor() {
-    super('local embedding invalid response');
-    this.name = 'LocalEmbeddingInvalidResponse';
-  }
-}
+export {
+  composeEmbeddingText,
+  composeObservationEmbeddingText,
+  EMBEDDING_REDACTION_RULES_VERSION,
+  mergeEmbeddingPolicyMetadata,
+  normalizeVector,
+  prepareEmbeddingText,
+};
+export type {
+  EmbeddingPolicyEvidence,
+  ObservationEmbeddingInput,
+  PreparedEmbeddingText,
+};
 
 /**
  * 本機 bge-m3 embed-service（embed-service/server.py）路徑。
  * 不記 text／response body／error message，只記白名單化的錯誤名與 status。
  */
 async function generateLocalEmbedding(text: string, label: string): Promise<number[] | null> {
-  try {
-    const prepared = prepareEmbeddingText(text);
-    const url = `${config.embeddingLocalUrl.replace(/\/+$/, '')}/embed`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputs: [prepared.text] }),
-      signal: AbortSignal.timeout(config.embeddingLocalTimeoutMs),
-    });
-    if (!response.ok) {
-      throw new LocalEmbeddingHttpError(response.status);
-    }
-    const payload: unknown = await response.json();
-    const parsed = payload as { embeddings?: unknown; model?: unknown } | null;
-    const embeddings = parsed?.embeddings;
-    if (
-      parsed?.model !== 'BAAI/bge-m3' ||
-      !Array.isArray(embeddings) || embeddings.length !== 1 ||
-      !Array.isArray(embeddings[0]) ||
-      embeddings[0].length !== LOCAL_EMBEDDING_DIMENSIONS ||
-      !embeddings[0].every((v: unknown) => typeof v === 'number' && Number.isFinite(v))
-    ) {
-      throw new LocalEmbeddingInvalidResponse();
-    }
-    const norm = Math.sqrt(
-      (embeddings[0] as number[]).reduce((sum, v) => sum + v * v, 0)
-    );
-    if (norm === 0 || !Number.isFinite(norm)) {
-      throw new LocalEmbeddingInvalidResponse();
-    }
-    return normalizeVector(embeddings[0] as number[]);
-  } catch (error) {
-    logEmbeddingError(`Failed to generate ${label}`, error);
-    return null;
-  }
+  const prepared = prepareEmbeddingText(text);
+  const result = await requestLocalEmbeddings(
+    [prepared.text],
+    {
+      url: config.embeddingLocalUrl,
+      timeoutMs: config.embeddingLocalTimeoutMs,
+    },
+    label,
+  );
+  return result?.[0] ?? null;
+}
+
+/**
+ * 批次呼叫本機 bge-m3 embed-service；texts 應已經過 prepareEmbeddingText。
+ */
+export async function generateLocalEmbeddings(
+  texts: string[],
+  options?: { url?: string; timeoutMs?: number },
+): Promise<number[][] | null> {
+  return requestLocalEmbeddings(
+    texts,
+    {
+      url: options?.url ?? config.embeddingLocalUrl,
+      timeoutMs: options?.timeoutMs ?? config.embeddingLocalTimeoutMs,
+    },
+    'local embeddings',
+  );
+}
+
+export interface EmbeddingConfig {
+  apiKey?: string;
+  model?: string;
+  dimensions?: number;
 }
 
 /**

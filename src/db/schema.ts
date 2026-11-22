@@ -63,7 +63,6 @@ export const projectMemories = pgTable(
   (table) => [
     // HNSW 索引用於快速向量相似度搜尋
     index('embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
-    index('embedding_bge_m3_idx').using('hnsw', table.embeddingBgeM3.op('vector_cosine_ops')),
     // 專案 ID 索引
     index('project_id_idx').on(table.projectId),
     // 狀態索引
@@ -132,8 +131,7 @@ export const observations = pgTable(
       .where(sql`${table.status} = 'active'`),
     index('observations_session_idx').on(table.projectId, table.sessionId, table.observedAt),
     index('observations_status_idx').on(table.status),
-    index('observations_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
-    index('observations_embedding_bge_m3_idx').using('hnsw', table.embeddingBgeM3.op('vector_cosine_ops')),
+    // observations 的 HNSW 索引已移除（migration 0015）：搜尋排序用不到、每次寫入都要維護
   ]
 );
 
