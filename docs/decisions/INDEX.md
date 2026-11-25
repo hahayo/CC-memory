@@ -6,6 +6,7 @@
 
 | ID | 狀態 | 日期 | 標題 | 決策卡 |
 |---|---|---|---|---|
+| `DEC-20261122T093907Z-switch-embedding-to-local-bge-m3` | active | 2026-11-22 | embedding 從 Gemini gemini-embedding-001 改用本機 bge-m3，並刪除未被使用的 observations HNSW 索引 | [開啟](./DEC-20261122T093907Z-switch-embedding-to-local-bge-m3.md) |
 | `DEC-20260903T183019Z-capture-worker-fresh-first-ordering` | active | 2026-09-03 | auto-capture worker 改為 fresh-first：最近有動的 session 先處理，並修掉 cursor 消失就從頭重來 | [開啟](./DEC-20260903T183019Z-capture-worker-fresh-first-ordering.md) |
 | `DEC-20260903T183019Z-session-start-inject-repo-only-and-enable` | active | 2026-09-03 | SessionStart 注入：DSN 一律讀 ~/.ccm-project-url、非 git 且無 marker 不注入、開關 CC_MEMORY_INJECT_RECENT 打開 | [開啟](./DEC-20260903T183019Z-session-start-inject-repo-only-and-enable.md) |
 | `DEC-20260902T151857Z-align-project-id-with-capture-hooks` | active | 2026-09-02 | project_id 解析對齊 capture hooks：server 第 4 層改為 git 根目錄名 | [開啟](./DEC-20260902T151857Z-align-project-id-with-capture-hooks.md) |
