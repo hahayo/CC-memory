@@ -2,7 +2,6 @@
 //
 // 檢索證據評測的 result.json 型別與 report.md 產生（純函式）。
 
-import { relative, isAbsolute } from 'node:path';
 import { PRIMARY_MODE, PRIMARY_SCOPE } from './evidence-score.js';
 import type {
   CellRuns,
@@ -20,6 +19,9 @@ import type {
 export const LIMITATION_NOTE =
   '題目都來自已被抓到的對話，這份數字量不到抓取覆蓋率造成的漏答，不是整體回想率。';
 
+export const REDIRECT_NOTE =
+  '向量端點只檢查設定的主機是不是本機；若本機端點回 HTTP 重新導向到外部，查詢文字仍可能被送出（重新導向在 src/ 的 fetch 裡，本腳本沒擋）。';
+
 export interface EvidenceCheckRecord {
   factId: string;
   kind: EvidenceKind;
@@ -27,6 +29,8 @@ export interface EvidenceCheckRecord {
   verdict: EvidenceVerdict;
   dbStatus: string | null;
   dbProjectId: string | null;
+  /** 跑搜尋期間 DB 上這筆證據有變動（已改判 stale_label） */
+  changedDuringRun: boolean;
 }
 
 export interface EnvSetting {
@@ -38,6 +42,9 @@ export interface DataVersion {
   gitHead: string;
   gitDirty: boolean;
   embeddingProvider: string;
+  /** 實際生效的向量端點主機（不含帳密與路徑）；gemini 時為外部 API */
+  embeddingEndpointHost: string;
+  embeddingEndpointLoopback: boolean;
   readOnly: string;
   poolMax: number;
   env: Record<string, EnvSetting>;
@@ -71,6 +78,8 @@ export interface BenchResult {
     evidenceValid: number;
     evidenceStaleLabel: number;
     evidenceMissing: number;
+    /** 跑搜尋期間 status／content_hash／project_id 變動的證據筆數（已改判 stale_label） */
+    evidenceChangedDuringRun: number;
     runsOk: number;
     runsDegraded: number;
     runsError: number;
@@ -80,12 +89,6 @@ export interface BenchResult {
     outOfScopeFactCells: number;
   };
   questions: QuestionResult[];
-}
-
-/** child 是否等於 parent 或在 parent 底下（兩者都應是絕對路徑）。 */
-export function isPathInside(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function fmtNum(value: number | null, digits = 2): string {
@@ -112,6 +115,7 @@ function stageWithRank(stage: FactStage, rank10: number | null, rank50: number |
   if (stage === 'in_top10') return `in_top10 (#${rank10})`;
   if (stage === 'in_top50_not_top10') return `in_top50_not_top10 (#${rank50})`;
   if (stage === 'in_top50') return `in_top50 (#${rank50})`;
+  if (stage === 'in_top50_top10_unknown') return `in_top50_top10_unknown (#${rank50})`;
   return stage;
 }
 
@@ -127,12 +131,13 @@ export function renderEvidenceReport(result: BenchResult): string {
     '# 檢索證據評測報告',
     '',
     `> 限制：${LIMITATION_NOTE}`,
+    `> ${REDIRECT_NOTE}`,
     '',
     '## 資料版本',
     '',
     `- 產生時間：${result.generatedAt}`,
     `- git HEAD：${dv.gitHead}${dv.gitDirty ? '（工作區有未提交改動）' : ''}`,
-    `- EMBEDDING_PROVIDER：${dv.embeddingProvider}`,
+    `- EMBEDDING_PROVIDER：${dv.embeddingProvider}；向量端點主機：${dv.embeddingEndpointHost}（${dv.embeddingEndpointLoopback ? '本機' : '外部'}）`,
     `- 連線 default_transaction_read_only：${dv.readOnly}；連線池 max=${dv.poolMax}`,
     `- active 筆數：observations=${dv.activeCounts.observations}、project_memories=${dv.activeCounts.projectMemories}`,
     '- 下列設定是評測程序自己的環境值，不一定等於線上 MCP server 的值：',
@@ -143,7 +148,7 @@ export function renderEvidenceReport(result: BenchResult): string {
     '',
     '## 計數',
     '',
-    `- 證據：valid=${result.counts.evidenceValid}、stale_label=${result.counts.evidenceStaleLabel}、missing=${result.counts.evidenceMissing}`,
+    `- 證據：valid=${result.counts.evidenceValid}、stale_label=${result.counts.evidenceStaleLabel}、missing=${result.counts.evidenceMissing}；執行期間變動的證據 ${result.counts.evidenceChangedDuringRun} 筆（已改判 stale_label）`,
     `- 搜尋次數：ok=${result.counts.runsOk}、degraded=${result.counts.runsDegraded}、error=${result.counts.runsError}`,
     `- 主口徑各階段事實數：${result.counts.primaryStages.map((e) => `${e.stage}=${e.count}`).join('、') || '—'}；其中 ${factsWithInvalidCells} 個事實有無效格`,
     `- out_of_scope（事實×帶 projectId 格）：${result.counts.outOfScopeFactCells}（證據全在別的 project，不計入該格可評事實數）`,

@@ -82,7 +82,8 @@ export function parseLabelFile(text: string): LabelFile {
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    throw new Error(`標註檔不是合法 JSON：${(err as Error).message}`);
+    // 不轉存 JSON.parse 的訊息：它會帶出標註檔片段
+    throw new Error(`標註檔不是合法 JSON（${err instanceof Error ? err.name : 'Error'}）`);
   }
   const parsed = labelFileSchema.safeParse(raw);
   if (!parsed.success) {
@@ -172,11 +173,15 @@ export function parseMatrixFilter(input: { modes?: string; scopes?: string; limi
 /** 搜尋前就決定的階段；null＝可評（labeled 且至少一筆 valid 證據）。 */
 export type PreSearchStage = 'not_in_db' | 'stale_label' | 'evidence_missing' | 'unlabeled';
 /**
- * 搜尋後的階段。in_top50 / not_in_top10 只在單邊 limit 沒跑時出現：
- * 只跑 limit=10 → in_top10／not_in_top10；只跑 limit=50 → in_top50／not_in_top50。
+ * 搜尋後的階段（limit=10 與 limit=50 的結果分開判，能確定的才下結論）：
+ * - in_top50_top10_unknown：limit=10 那次 degraded／error，但 limit=50 正常且命中 → 前 10 未知
+ * - in_top50：沒跑 limit=10（--limits 50），limit=50 命中
+ * - not_in_top10：limit=10 正常沒命中，limit=50 沒跑或不正常 → 前 50 未知
+ * - not_in_top50：limit=50 正常沒命中（不論 limit=10 狀態，沒進前 50 就不會進前 10）
  */
 export type SearchStage =
   | 'in_top10'
+  | 'in_top50_top10_unknown'
   | 'in_top50_not_top10'
   | 'in_top50'
   | 'not_in_top10'
@@ -186,11 +191,15 @@ export type SearchStage =
 /** out_of_scope：scope=project 的格子裡，事實所有 valid 證據都在別的 project。not_run：主口徑沒跑。 */
 export type FactStage = PreSearchStage | 'out_of_scope' | SearchStage | 'not_run';
 
-/** 由好到壞；取各 query 最佳時用。同一次執行各格 limit 組合相同，不會混到不同 limit 的階段。 */
+/**
+ * 由好到壞；取各 query 最佳時用。前 10 未知的排在「確定不在前 10」之前，
+ * 免得主摘要把可能進前 10 的事實報成沒進。
+ */
 const SEARCH_STAGE_ORDER: readonly SearchStage[] = [
   'in_top10',
-  'in_top50_not_top10',
+  'in_top50_top10_unknown',
   'in_top50',
+  'in_top50_not_top10',
   'not_in_top10',
   'not_in_top50',
   'degraded',
@@ -228,6 +237,46 @@ export interface FactInput {
   distractorKeys: readonly string[];
   /** 所有 valid 證據的 project_id 都不是題目的 project（帶 projectId 本來就搜不到） */
   validEvidenceOutsideProject: boolean;
+}
+
+export interface EvidenceRecordLike {
+  factId: string;
+  kind: EvidenceKind;
+  id: string;
+  verdict: EvidenceVerdict;
+  dbProjectId: string | null;
+}
+
+/** 由證據核對結果建出計分輸入；開跑前與跑完重核對後都用同一個函式。 */
+export function buildFactInputs(question: LabelQuestion, records: readonly EvidenceRecordLike[]): FactInput[] {
+  return question.facts.map((fact) => {
+    const own = records.filter((record) => record.factId === fact.id);
+    const valid = own.filter((record) => record.verdict === 'valid');
+    return {
+      factId: fact.id,
+      preStage: preSearchStage(
+        fact.status,
+        own.map((record) => record.verdict)
+      ),
+      validKeys: fact.status === 'labeled' ? valid.map((record) => hitKey(record.kind, record.id)) : [],
+      distractorKeys: fact.stale_distractors.map((d) => hitKey(d.kind, d.id)),
+      validEvidenceOutsideProject: valid.length > 0 && valid.every((record) => record.dbProjectId !== question.project),
+    };
+  });
+}
+
+export interface EvidenceSnapshot {
+  status: string | null;
+  contentHash: string | null;
+  projectId: string | null;
+}
+
+/** 開跑前與跑完的 DB 快照是否不同（出現／消失、status、content_hash、project_id 任一變動）。 */
+export function evidenceChanged(before: EvidenceSnapshot | null, after: EvidenceSnapshot | null): boolean {
+  if (before === null || after === null) return before !== after;
+  return (
+    before.status !== after.status || before.contentHash !== after.contentHash || before.projectId !== after.projectId
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -318,22 +367,23 @@ function staleBefore(
   return evidenceRank === null || distractorRank < evidenceRank;
 }
 
-function searchStage(
+export function searchStage(
   top10: SearchRun | null,
   top50: SearchRun | null,
   rank10: number | null,
   rank50: number | null
 ): SearchStage {
-  if (top10 !== null) {
-    if (top10.status !== 'ok') return top10.status;
-    if (rank10 !== null) return 'in_top10';
-    if (top50 === null) return 'not_in_top10';
-    if (top50.status !== 'ok') return top50.status;
-    return rank50 !== null ? 'in_top50_not_top10' : 'not_in_top50';
-  }
-  if (top50 === null) return 'error';
-  if (top50.status !== 'ok') return top50.status;
-  return rank50 !== null ? 'in_top50' : 'not_in_top50';
+  const s10 = statusOf(top10);
+  const s50 = statusOf(top50);
+  if (s10 === 'ok' && rank10 !== null) return 'in_top10';
+  if (s50 === 'ok' && rank50 === null) return 'not_in_top50';
+  if (s10 === 'ok' && s50 === 'ok') return 'in_top50_not_top10';
+  if (s10 === 'ok') return 'not_in_top10';
+  if (s50 === 'ok') return s10 === 'not_run' ? 'in_top50' : 'in_top50_top10_unknown';
+  // 兩邊都沒有可用結果：回報較嚴重的那個
+  if (s10 === 'error' || s50 === 'error') return 'error';
+  if (s10 === 'degraded' || s50 === 'degraded') return 'degraded';
+  return 'error';
 }
 
 function excludedStage(fact: FactInput, scope: BenchScope): PreSearchStage | 'out_of_scope' | null {
@@ -416,7 +466,7 @@ export interface PrimaryFactStage {
   bestQuery: string | null;
   rank10: number | null;
   rank50: number | null;
-  /** 主口徑格子中 degraded/error 的數量；>0 且 stage 不是 in_top10 時，結論可能偏差 */
+  /** 主口徑格子中，limit=10 或 limit=50 任一次 degraded／error 的格數；>0 時結論可能偏差 */
   invalidCells: number;
 }
 
@@ -439,7 +489,8 @@ export function primaryFactStage(
     return { factId, stage: first, bestQuery: null, rank10: null, rank50: null, invalidCells: 0 };
   }
 
-  const invalidCells = candidates.filter(({ fact }) => fact.stage === 'degraded' || fact.stage === 'error').length;
+  const bad = (status: CellRunStatus): boolean => status === 'degraded' || status === 'error';
+  const invalidCells = candidates.filter(({ cell }) => bad(cell.status10) || bad(cell.status50)).length;
   const best = [...candidates].sort((a, b) => {
     const order =
       SEARCH_STAGE_ORDER.indexOf(a.fact.stage as SearchStage) -

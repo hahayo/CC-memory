@@ -5,7 +5,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateByModeScope,
+  buildFactInputs,
   classifyEvidence,
+  evidenceChanged,
+  searchStage,
   countStages,
   FULL_MATRIX,
   parseMatrixFilter,
@@ -20,9 +23,10 @@ import {
   type BenchScope,
   type CellRuns,
   type FactInput,
+  type LabelQuestion,
   type SearchRun,
 } from '../../scripts/lib/evidence-score.js';
-import { isPathInside, LIMITATION_NOTE, renderEvidenceReport, type BenchResult } from '../../scripts/lib/evidence-report.js';
+import { LIMITATION_NOTE, REDIRECT_NOTE, renderEvidenceReport, type BenchResult } from '../../scripts/lib/evidence-report.js';
 
 const id = (n: number): string => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
 const obs = (n: number): { kind: 'observation'; id: string } => ({ kind: 'observation', id: id(n) });
@@ -192,13 +196,15 @@ describe('scoreCell', () => {
     const score = scoreCell([fact('F1', [1])], cell(degraded, run(50, [1])));
     expect(score.factCoverage10).toBeNull();
     expect(score.strictPrecision10).toBeNull();
-    expect(score.facts[0]!.stage).toBe('degraded');
-    expect(score.facts[0]!.rank10).toBeNull();
+    // limit=50 正常命中：保留前 50 的結果，前 10 標未知
+    expect(score.facts[0]).toMatchObject({ stage: 'in_top50_top10_unknown', rank10: null, rank50: 1 });
+    const bothDegraded = scoreCell([fact('F1', [1])], cell(degraded, { ...degraded, limit: 50 }));
+    expect(bothDegraded.facts[0]!.stage).toBe('degraded');
   });
 
-  it('limit=10 正常但沒命中、limit=50 出錯 → 階段是 error 不是 not_in_top50', () => {
+  it('limit=10 正常但沒命中、limit=50 出錯 → not_in_top10（前 50 未知），不是 not_in_top50', () => {
     const score = scoreCell([fact('F1', [7])], cell(run(10, [1]), run(50, [], { status: 'error' })));
-    expect(score.facts[0]!.stage).toBe('error');
+    expect(score.facts[0]!.stage).toBe('not_in_top10');
     expect(score.factCoverage10).toBe(0);
     expect(score.firstEvidenceRank50).toBeNull();
   });
@@ -269,17 +275,22 @@ describe('renderEvidenceReport', () => {
         gitHead: 'abc',
         gitDirty: false,
         embeddingProvider: 'local',
+        embeddingEndpointHost: '127.0.0.1:8790',
+        embeddingEndpointLoopback: true,
         readOnly: 'on',
         poolMax: 5,
         env: {},
         activeCounts: { observations: 1, projectMemories: 1 },
       },
       aggregates: [],
-      counts: { evidenceValid: 0, evidenceStaleLabel: 0, evidenceMissing: 0, runsOk: 0, runsDegraded: 0, runsError: 0, primaryStages: [], outOfScopeFactCells: 0 },
+      counts: { evidenceValid: 0, evidenceStaleLabel: 0, evidenceMissing: 0, evidenceChangedDuringRun: 0, runsOk: 0, runsDegraded: 0, runsError: 0, primaryStages: [], outOfScopeFactCells: 0 },
       questions: [],
     };
     const report = renderEvidenceReport(result);
     expect(report.split('\n').slice(0, 4).join('\n')).toContain(LIMITATION_NOTE);
+    expect(report).toContain(REDIRECT_NOTE);
+    expect(report).toContain('向量端點主機：127.0.0.1:8790（本機）');
+    expect(report).toContain('執行期間變動的證據 0 筆');
     // 矩陣沒跑主口徑（hybrid／project）要註明
     expect(report).toContain('本次矩陣沒有跑主口徑');
     expect(report).toContain('## 前 10 名組成');
@@ -371,11 +382,82 @@ describe('前 10 名組成', () => {
   });
 });
 
-describe('isPathInside（--out 不可落在 repo 底下）', () => {
-  it('repo 本身與子目錄算在裡面；repo 外、名字相近的兄弟目錄不算', () => {
-    expect(isPathInside('/repo', '/repo')).toBe(true);
-    expect(isPathInside('/repo/out/run1', '/repo')).toBe(true);
-    expect(isPathInside('/repo-other/out', '/repo')).toBe(false);
-    expect(isPathInside('/home/u/.cache/runs', '/repo')).toBe(false);
+describe('searchStage：limit=10 與 limit=50 分開判', () => {
+  const degraded10 = run(10, [], { status: 'degraded', effectiveMode: 'keyword' });
+  it('limit=10 降級、limit=50 命中 → in_top50_top10_unknown', () => {
+    expect(searchStage(degraded10, run(50, [1, 2, 7]), null, 3)).toBe('in_top50_top10_unknown');
+  });
+  it('limit=10 降級、limit=50 正常沒命中 → not_in_top50（沒進前 50 就不會進前 10）', () => {
+    expect(searchStage(degraded10, run(50, [1]), null, null)).toBe('not_in_top50');
+  });
+  it('limit=10 正常沒命中、limit=50 出錯 → not_in_top10', () => {
+    expect(searchStage(run(10, [1]), run(50, [], { status: 'error' }), null, null)).toBe('not_in_top10');
+  });
+  it('兩邊都不能用 → error 優先於 degraded', () => {
+    expect(searchStage(degraded10, run(50, [], { status: 'error' }), null, null)).toBe('error');
+    expect(searchStage(degraded10, run(50, [], { status: 'degraded' }), null, null)).toBe('degraded');
+  });
+});
+
+describe('primaryFactStage：已確認的前 50 名命中不可被報成沒命中', () => {
+  it('query A limit=10 降級、limit=50 命中第 3；query B 都正常沒命中 → 主摘要是 A 的 in_top50_top10_unknown', () => {
+    const degraded10 = run(10, [], { status: 'degraded', effectiveMode: 'keyword' });
+    const cells = [
+      scoreCell([fact('F1', [7])], cell(degraded10, run(50, [1, 2, 7]), { queryName: 'A' })),
+      scoreCell([fact('F1', [7])], cell(run(10, [1]), run(50, [1, 2]), { queryName: 'B' })),
+    ];
+    expect(primaryFactStage('F1', cells)).toMatchObject({
+      stage: 'in_top50_top10_unknown',
+      bestQuery: 'A',
+      rank50: 3,
+      invalidCells: 1,
+    });
+  });
+  it('前 10 未知排在「確定不在前 10」之前', () => {
+    const degraded10 = run(10, [], { status: 'degraded', effectiveMode: 'keyword' });
+    const cells = [
+      scoreCell([fact('F1', [7])], cell(run(10, [1]), run(50, [1, 7]), { queryName: 'A' })),
+      scoreCell([fact('F1', [7])], cell(degraded10, run(50, [7]), { queryName: 'B' })),
+    ];
+    expect(primaryFactStage('F1', cells).stage).toBe('in_top50_top10_unknown');
+  });
+});
+
+describe('執行期間證據變動（重核對）', () => {
+  const question: LabelQuestion = {
+    id: 'QX',
+    project: 'proj-a',
+    queries: [{ name: 'q', text: '虛構' }],
+    facts: [
+      { id: 'F1', text: '虛構', status: 'labeled', evidence: [{ kind: 'observation', id: id(1), content_hash: 'h' }], stale_distractors: [] },
+    ],
+  };
+  const snap = { status: 'active', contentHash: 'h', projectId: 'proj-a' };
+
+  it('evidenceChanged：hash／status／project／出現消失任一變動都算', () => {
+    expect(evidenceChanged(snap, { ...snap })).toBe(false);
+    expect(evidenceChanged(snap, { ...snap, contentHash: 'h2' })).toBe(true);
+    expect(evidenceChanged(snap, { ...snap, status: 'archived' })).toBe(true);
+    expect(evidenceChanged(snap, { ...snap, projectId: 'proj-b' })).toBe(true);
+    expect(evidenceChanged(snap, null)).toBe(true);
+    expect(evidenceChanged(null, null)).toBe(false);
+  });
+
+  it('改判 stale_label 後重新計分：原本的命中不再算', () => {
+    const record = { factId: 'F1', kind: 'observation' as const, id: id(1), dbProjectId: 'proj-a' };
+    const beforeInputs = buildFactInputs(question, [{ ...record, verdict: 'valid' }]);
+    const afterInputs = buildFactInputs(question, [{ ...record, verdict: 'stale_label' }]);
+    const runs = cell(run(10, [1]), run(50, [1]));
+    expect(scoreCell(beforeInputs, runs).facts[0]!.stage).toBe('in_top10');
+    const rescored = scoreCell(afterInputs, runs);
+    expect(rescored.facts[0]!.stage).toBe('stale_label');
+    expect(rescored.evaluableFacts).toBe(0);
+    expect(rescored.factCoverage10).toBeNull();
+  });
+
+  it('buildFactInputs：證據全在別的 project 才標 validEvidenceOutsideProject', () => {
+    const base = { factId: 'F1', kind: 'observation' as const, id: id(1), verdict: 'valid' as const };
+    expect(buildFactInputs(question, [{ ...base, dbProjectId: 'proj-b' }])[0]!.validEvidenceOutsideProject).toBe(true);
+    expect(buildFactInputs(question, [{ ...base, dbProjectId: 'proj-a' }])[0]!.validEvidenceOutsideProject).toBe(false);
   });
 });
