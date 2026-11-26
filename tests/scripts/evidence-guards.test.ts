@@ -2,12 +2,13 @@
 //
 // 檢索證據評測的安全檢查：輸出路徑、向量端點、錯誤訊息遮蔽。內容全為虛構。
 
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   describeLocalEndpoint,
+  existingOutputFiles,
   findProtectedRoot,
   isLoopbackHostname,
   isPathInside,
@@ -15,6 +16,7 @@ import {
   parseWorktreeList,
   realpathNearestExisting,
   safeErrorLabel,
+  writeNewFile,
 } from '../../scripts/lib/evidence-guards.js';
 
 describe('isPathInside', () => {
@@ -101,5 +103,40 @@ describe('safeErrorLabel', () => {
     weird.name = 'name with secret text';
     expect(safeErrorLabel(weird)).toBe('Error');
     expect(safeErrorLabel('plain string')).toBe('string');
+  });
+});
+
+describe('輸出檔不可沿符號連結寫進 repo', () => {
+  let base = '';
+  beforeAll(async () => {
+    base = await mkdtemp(join(tmpdir(), 'evb-out-'));
+    await mkdir(join(base, 'repo'), { recursive: true });
+    await writeFile(join(base, 'repo', 'tracked.md'), 'original\n');
+    await mkdir(join(base, 'out'), { recursive: true });
+    await symlink(join(base, 'repo', 'tracked.md'), join(base, 'out', 'report.md'));
+    await symlink(join(base, 'repo', 'not-yet.json'), join(base, 'out', 'result.json'));
+  });
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  it('existingOutputFiles：符號連結（含指向不存在目標的）都算已存在', async () => {
+    expect(await existingOutputFiles(join(base, 'out'), ['result.json', 'report.md', 'other.txt'])).toEqual([
+      'result.json',
+      'report.md',
+    ]);
+    expect(await existingOutputFiles(join(base, 'nope'), ['report.md'])).toEqual([]);
+  });
+
+  it('writeNewFile：遇到符號連結丟 EEXIST，repo 內的檔案不被改寫、也不被建立', async () => {
+    await expect(writeNewFile(join(base, 'out', 'report.md'), 'leak')).rejects.toMatchObject({ code: 'EEXIST' });
+    await expect(writeNewFile(join(base, 'out', 'result.json'), 'leak')).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await readFile(join(base, 'repo', 'tracked.md'), 'utf8')).toBe('original\n');
+    await expect(readFile(join(base, 'repo', 'not-yet.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('writeNewFile：新檔正常寫入', async () => {
+    await writeNewFile(join(base, 'out', 'fresh.md'), 'ok');
+    expect(await readFile(join(base, 'out', 'fresh.md'), 'utf8')).toBe('ok');
   });
 });

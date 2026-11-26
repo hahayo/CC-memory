@@ -3,7 +3,7 @@
 // 檢索證據評測的安全檢查：輸出目錄不可落在 repo（含同 repo 的其他 worktree）、
 // 向量端點必須是本機、錯誤只留類別與錯誤碼。
 
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -64,6 +64,27 @@ export async function findProtectedRoot(out: string, roots: readonly string[]): 
     if (isPathInside(realOut, realRoot)) return root;
   }
   return null;
+}
+
+/** dir 底下哪些檔名已存在（用 lstat，符號連結本身也算存在，不跟隨）。 */
+export async function existingOutputFiles(dir: string, names: readonly string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const name of names) {
+    try {
+      await lstat(join(dir, name));
+      found.push(name);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && (err as NodeJS.ErrnoException).code !== 'ENOTDIR') {
+        throw err;
+      }
+    }
+  }
+  return found;
+}
+
+/** 獨占建立（flag 'wx'＝O_CREAT|O_EXCL）：檔案已存在就失敗，連符號連結也不跟隨、不覆寫。 */
+export async function writeNewFile(path: string, content: string): Promise<void> {
+  await writeFile(path, content, { encoding: 'utf8', flag: 'wx' });
 }
 
 // ---------------------------------------------------------------------------

@@ -243,7 +243,8 @@ describe('primaryFactStage', () => {
 
   it('部分格子無效時記數', () => {
     const cells = [mk('a', run(10, [], { status: 'error' }), run(50, [])), mk('b', run(10, [1]), run(50, [1]))];
-    expect(primaryFactStage('F1', cells)).toMatchObject({ stage: 'not_in_top50', invalidCells: 1 });
+    // a 的 limit=10 出錯、limit=50 沒命中 → 前 10 未知，排在 b 的確定沒命中之前
+    expect(primaryFactStage('F1', cells)).toMatchObject({ stage: 'not_in_top50_top10_unknown', bestQuery: 'a', invalidCells: 1 });
   });
 });
 
@@ -387,8 +388,13 @@ describe('searchStage：limit=10 與 limit=50 分開判', () => {
   it('limit=10 降級、limit=50 命中 → in_top50_top10_unknown', () => {
     expect(searchStage(degraded10, run(50, [1, 2, 7]), null, 3)).toBe('in_top50_top10_unknown');
   });
-  it('limit=10 降級、limit=50 正常沒命中 → not_in_top50（沒進前 50 就不會進前 10）', () => {
-    expect(searchStage(degraded10, run(50, [1]), null, null)).toBe('not_in_top50');
+  it('limit=10 降級或出錯、limit=50 正常沒命中 → not_in_top50_top10_unknown（limit=10 可能命中）', () => {
+    expect(searchStage(degraded10, run(50, [1]), null, null)).toBe('not_in_top50_top10_unknown');
+    expect(searchStage(run(10, [], { status: 'error' }), run(50, [1]), null, null)).toBe('not_in_top50_top10_unknown');
+  });
+  it('limit=10 正常沒命中或沒跑、limit=50 正常沒命中 → not_in_top50', () => {
+    expect(searchStage(run(10, [1]), run(50, [1]), null, null)).toBe('not_in_top50');
+    expect(searchStage(null, run(50, [1]), null, null)).toBe('not_in_top50');
   });
   it('limit=10 正常沒命中、limit=50 出錯 → not_in_top10', () => {
     expect(searchStage(run(10, [1]), run(50, [], { status: 'error' }), null, null)).toBe('not_in_top10');
@@ -459,5 +465,21 @@ describe('執行期間證據變動（重核對）', () => {
     const base = { factId: 'F1', kind: 'observation' as const, id: id(1), verdict: 'valid' as const };
     expect(buildFactInputs(question, [{ ...base, dbProjectId: 'proj-b' }])[0]!.validEvidenceOutsideProject).toBe(true);
     expect(buildFactInputs(question, [{ ...base, dbProjectId: 'proj-a' }])[0]!.validEvidenceOutsideProject).toBe(false);
+  });
+});
+
+describe('not_in_top50_top10_unknown 在主摘要與計數分開看得到', () => {
+  it('比確定沒命中好、比任何命中差；countStages 單獨列', () => {
+    const degraded10 = run(10, [], { status: 'degraded', effectiveMode: 'keyword' });
+    const unknown = scoreCell([fact('F1', [7])], cell(degraded10, run(50, [1]), { queryName: 'A' }));
+    const sure = scoreCell([fact('F1', [7])], cell(run(10, [1]), run(50, [1]), { queryName: 'B' }));
+    const hit = scoreCell([fact('F1', [7])], cell(run(10, [1]), run(50, [1, 7]), { queryName: 'C' }));
+    expect(primaryFactStage('F1', [sure, unknown]).stage).toBe('not_in_top50_top10_unknown');
+    expect(primaryFactStage('F1', [unknown, hit]).stage).toBe('in_top50_not_top10');
+    // 計數照顯示順序（由差到好）分開列
+    expect(countStages(['not_in_top50_top10_unknown', 'not_in_top50'])).toEqual([
+      { stage: 'not_in_top50', count: 1 },
+      { stage: 'not_in_top50_top10_unknown', count: 1 },
+    ]);
   });
 });

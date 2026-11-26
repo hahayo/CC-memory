@@ -177,7 +177,9 @@ export type PreSearchStage = 'not_in_db' | 'stale_label' | 'evidence_missing' | 
  * - in_top50_top10_unknown：limit=10 那次 degraded／error，但 limit=50 正常且命中 → 前 10 未知
  * - in_top50：沒跑 limit=10（--limits 50），limit=50 命中
  * - not_in_top10：limit=10 正常沒命中，limit=50 沒跑或不正常 → 前 50 未知
- * - not_in_top50：limit=50 正常沒命中（不論 limit=10 狀態，沒進前 50 就不會進前 10）
+ * - not_in_top50_top10_unknown：limit=10 degraded／error，limit=50 正常沒命中 → 前 10 未知
+ *   （兩次搜尋各自撈候選再排序，limit=10 可能命中而 limit=50 沒有，不能推成沒進前 10）
+ * - not_in_top50：limit=50 正常沒命中，且 limit=10 正常沒命中或沒跑
  */
 export type SearchStage =
   | 'in_top10'
@@ -185,6 +187,7 @@ export type SearchStage =
   | 'in_top50_not_top10'
   | 'in_top50'
   | 'not_in_top10'
+  | 'not_in_top50_top10_unknown'
   | 'not_in_top50'
   | 'degraded'
   | 'error';
@@ -200,6 +203,7 @@ const SEARCH_STAGE_ORDER: readonly SearchStage[] = [
   'in_top50_top10_unknown',
   'in_top50',
   'in_top50_not_top10',
+  'not_in_top50_top10_unknown',
   'not_in_top10',
   'not_in_top50',
   'degraded',
@@ -376,7 +380,9 @@ export function searchStage(
   const s10 = statusOf(top10);
   const s50 = statusOf(top50);
   if (s10 === 'ok' && rank10 !== null) return 'in_top10';
-  if (s50 === 'ok' && rank50 === null) return 'not_in_top50';
+  if (s50 === 'ok' && rank50 === null) {
+    return s10 === 'ok' || s10 === 'not_run' ? 'not_in_top50' : 'not_in_top50_top10_unknown';
+  }
   if (s10 === 'ok' && s50 === 'ok') return 'in_top50_not_top10';
   if (s10 === 'ok') return 'not_in_top10';
   if (s50 === 'ok') return s10 === 'not_run' ? 'in_top50' : 'in_top50_top10_unknown';

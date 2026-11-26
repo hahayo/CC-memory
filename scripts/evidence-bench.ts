@@ -13,7 +13,7 @@
 // 向量端點必須是本機（loopback），否則需要 --allow-remote-embedding；錯誤只記類別與錯誤碼。
 
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -47,10 +47,13 @@ import {
 } from './lib/evidence-score.js';
 import {
   describeLocalEndpoint,
+  existingOutputFiles,
   findProtectedRoot,
   mainWorktreeFromCommonDir,
   parseWorktreeList,
+  realpathNearestExisting,
   safeErrorLabel,
+  writeNewFile,
 } from './lib/evidence-guards.js';
 import {
   renderEvidenceReport,
@@ -148,13 +151,28 @@ async function protectedRepoRoots(): Promise<string[]> {
   return [...roots];
 }
 
-async function assertOutOutsideRepo(out: string): Promise<void> {
+const OUTPUT_FILES = ['result.json', 'report.md'] as const;
+
+/**
+ * 查驗輸出目錄並回傳它的真實路徑（之後寫檔一律用這個）：
+ * 不可落在 repo（含同 repo 的其他 worktree），裡面也不可已有 result.json／report.md（含符號連結）。
+ * 開跑前（連資料庫前）跑一次，寫檔前再跑一次；寫檔本身另用 'wx' 當最後一道。
+ */
+async function verifyOutDir(out: string): Promise<string> {
   const hit = await findProtectedRoot(out, await protectedRepoRoots());
   if (hit !== null) {
     throw new UsageError(
       `--out 不可放在 repo 底下（${hit}）：報表含事實敘述等內部內容，repo 是公開的。請改放 repo 外，例如 ~/.cache/cc-memory/evidence-bench/runs/`
     );
   }
+  const realOut = await realpathNearestExisting(out);
+  const existing = await existingOutputFiles(realOut, OUTPUT_FILES);
+  if (existing.length > 0) {
+    throw new UsageError(
+      `--out 目錄裡已有 ${existing.join('、')}（可能是舊報表或符號連結），不覆寫。請換一個新的 --out 目錄`
+    );
+  }
+  return realOut;
 }
 
 function selectQuestions(labels: LabelFile, only: string[] | null): LabelQuestion[] {
@@ -352,7 +370,7 @@ async function evaluateQuestion(
 
 async function main(): Promise<number> {
   const args = parseCli(process.argv.slice(2));
-  await assertOutOutsideRepo(args.out);
+  await verifyOutDir(args.out);
   const conn = process.env.DATABASE_URL?.trim() ?? '';
   if (conn.length === 0) {
     throw new UsageError('DATABASE_URL 沒設。請先 export DATABASE_URL（本腳本不內建任何預設連線）');
@@ -468,12 +486,22 @@ async function main(): Promise<number> {
       questions: results,
     };
 
-    await mkdir(args.out, { recursive: true });
-    await writeFile(join(args.out, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
-    await writeFile(join(args.out, 'report.md'), renderEvidenceReport(result), 'utf8');
+    // 跑了很久才寫檔：先重新查驗一次，建好目錄後再查一次真實路徑，寫檔用 'wx'
+    const checkedOut = await verifyOutDir(args.out);
+    await mkdir(checkedOut, { recursive: true });
+    const realOut = await verifyOutDir(checkedOut);
+    try {
+      await writeNewFile(join(realOut, 'result.json'), `${JSON.stringify(result, null, 2)}\n`);
+      await writeNewFile(join(realOut, 'report.md'), renderEvidenceReport(result));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new UsageError('寫檔時發現輸出檔已存在（可能是符號連結），未覆寫。請換一個新的 --out 目錄重跑');
+      }
+      throw err;
+    }
     process.stdout.write(
       `完成：搜尋 ok=${result.counts.runsOk} degraded=${result.counts.runsDegraded} error=${result.counts.runsError}\n` +
-        `報表：${join(args.out, 'report.md')}\n`
+        `報表：${join(realOut, 'report.md')}\n`
     );
     return 0;
   } finally {
